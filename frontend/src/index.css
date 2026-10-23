@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+@theme {
+  --color-amber-600: #b45309;
+  --color-amber-700: #92400e;
+  --color-emerald-600: #047857;
+}
+
+@layer base {
+  html {
+    font-size: 16px;
+  }
+  body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+  }
+  :focus-visible {
+    outline: 2px solid #b45309;
+    outline-offset: 2px;
+  }
+}
+
+.crop-high-contrast {
+  filter: contrast(215%) brightness(105%) grayscale(100%);
+}
+
+.crop-invert {
+  filter: invert(100%) contrast(175%);
+}

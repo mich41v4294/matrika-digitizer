@@ -1,0 +1,45 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+familysearch.env
+
+# Runtime data, SQLite databases, uploads, crops & Slovakiana archival caches (CC BY-NC-ND 4.0)
+data/*
+!data/.gitkeep
+data/uploads/
+data/uploads/slovakiana/
+data/crops/
+data/slovakiana_facets_*.json
+samples/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.ged
+
+# Python virtual environments & caches
+.venv/
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Frontend build & dependencies
+node_modules/
+frontend/node_modules
+frontend/dist
+*.tsbuildinfo
+
+# OS & test artifacts
+.DS_Store
+playwright-report/
+test-results/
+frontend/playwright-report/
+frontend/test-results/

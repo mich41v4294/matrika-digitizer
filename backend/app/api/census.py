@@ -1,0 +1,2687 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import func
+from sqlmodel import select
+
+from backend.app.api.scans import resolve_scan_media_url
+from backend.app.census.slovakiana_client import (
+    TAG_KEY_TO_YEAR,
+    WCM_BASE_URL,
+    slovakiana_client,
+)
+from backend.app.config import settings
+from backend.app.census.worker import (
+    download_and_process_single_census_sheet,
+    is_job_running_in_memory,
+    request_job_pause,
+    run_catalog_harvest_job,
+    run_download_and_pipeline_job,
+    upsert_census_sheet_from_dict,
+)
+from backend.app.db.models import (
+    CensusDownloadJob,
+    CensusHousehold,
+    CensusOverviewHouse,
+    CensusSheet,
+    FamilySearchMatch,
+    LocalRecordMatch,
+    PersonFact,
+    RecordRow,
+    ScanImage,
+)
+from backend.app.db.session import SessionDep
+from backend.app.mcp.familysearch_client import (
+    match_census_to_local_matrika,
+    schedule_auto_fs_match,
+    trigger_auto_fs_match_for_fact,
+)
+from backend.app.pipeline.extraction_stage import (
+    _format_birth_place_raw,
+    extract_census_overview_sheet,
+    reconcile_census_household_relationships,
+)
+from backend.app.pipeline.lexicon import (
+    apply_person_fact_search_fields,
+    can_match_overview_house_to_sheet,
+    canonical_municipality_display,
+    canonical_municipality_key,
+    extract_person_fact_name_candidates,
+    fold_text_diacritics,
+    fuzzy_name_matches,
+    is_compatible_settlement,
+    normalize_census_relation,
+    normalize_given_name,
+    normalize_house_number,
+    normalize_religion,
+    normalize_village,
+    owner_surname_folded_from_name,
+    strip_slovak_feminine_suffix,
+)
+from backend.app.pipeline.schemas import validate_census_date, validate_person_name, validate_sex
+from backend.app.search.fts import index_census_sheet, index_person_fact
+
+router = APIRouter(prefix="/api/census", tags=["census"])
+
+
+def _census_storage_root() -> Path:
+    return Path(
+        getattr(settings, "census_data_dir", None) or (Path(settings.upload_dir) / "slovakiana")
+    )
+
+
+def _scan_to_media_url(scan: ScanImage | None) -> str | None:
+    return resolve_scan_media_url(scan)
+
+
+def _serialize_scan(scan: ScanImage | None) -> dict[str, Any] | None:
+    if not scan:
+        return None
+    return {
+        **scan.model_dump(),
+        "image_url": _scan_to_media_url(scan),
+    }
+
+
+def _census_thumbnail_url(slovakiana_key: str, census_root: Path) -> str | None:
+    local_thumb_path = census_root / "thumbnails" / f"{slovakiana_key}.jpg"
+    fallback_thumb_path = Path(settings.upload_dir) / "slovakiana" / "thumbnails" / f"{slovakiana_key}.jpg"
+    if local_thumb_path.exists() or fallback_thumb_path.exists():
+        return f"/media/uploads/slovakiana/thumbnails/{slovakiana_key}.jpg"
+    return None
+
+
+def _serialize_sheet(s: CensusSheet, overview_houses_count: int = 0) -> dict[str, Any]:
+    imgs = json.loads(s.image_urls_json or "[]")
+    front_url = imgs[0].get("jpeg_url") if imgs else None
+    back_url = imgs[1].get("jpeg_url") if len(imgs) > 1 else None
+    census_root = _census_storage_root()
+    thumb_url = _census_thumbnail_url(s.slovakiana_key, census_root)
+    if not thumb_url and s.thumbnail_id:
+        thumb_url = f"{WCM_BASE_URL}/image/download/{s.thumbnail_id}?sizeIndex=0"
+    elif not thumb_url and imgs and imgs[0].get("thumbnail_url"):
+        thumb_url = imgs[0].get("thumbnail_url")
+
+    effective_type = s.sheet_type or "household"
+    canonical_muni = canonical_municipality_display(s.municipality) or s.municipality
+
+    return {
+        **s.model_dump(),
+        "municipality": canonical_muni,
+        "sheet_type": effective_type,
+        "obvod_number": s.obvod_number,
+        "commissioner_name": s.commissioner_name,
+        "overview_houses_count": overview_houses_count,
+        "cair_id": s.slovakiana_key,
+        "slovakiana_id": s.slovakiana_key,
+        "district_name": s.district,
+        "municipality_name": canonical_muni,
+        "street_name": s.street_raw,
+        "house_number_raw": s.house_number,
+        "house_number_conscription": s.house_number,
+        "thumbnail_url": thumb_url,
+        "front_image_url": front_url,
+        "back_image_url": back_url,
+        "source_web_url": f"https://slovakiana.sk/scitacie-harky/{s.slovakiana_key}",
+        "pipeline_status": s.download_status,
+    }
+
+
+_ROMAN_ORDER: dict[str, int] = {
+    "I": 1,
+    "II": 2,
+    "III": 3,
+    "IV": 4,
+    "V": 5,
+    "VI": 6,
+    "VII": 7,
+    "VIII": 8,
+    "IX": 9,
+    "X": 10,
+}
+
+# Historical / Slovakiana / FamilySearch district aliases per canonical municipality key
+_MUNICIPALITY_HISTORICAL_DISTRICT_ALIASES: dict[str, set[str]] = {
+    "horny cepen": {"trnava", "galanta", "sered", "772", "712"},
+    "dolny cepen": {"trnava", "galanta", "sered", "772", "712"},
+    "stredny cepen": {"trnava", "galanta", "sered", "772", "712"},
+    "velke surovce": {"trnava", "galanta", "sered", "772", "712"},
+    "male surovce": {"trnava", "galanta", "sered", "772", "712"},
+    "surovce": {"trnava", "galanta", "sered", "772", "712"},
+    "valtasur": {"trnava", "galanta", "sered", "772", "712"},
+    "varov sur": {"trnava", "galanta", "sered", "772", "712"},
+    "majcichov": {"trnava", "galanta", "772", "712"},
+    "vlckovce": {"trnava", "galanta", "772", "712"},
+    "opoj": {"trnava", "galanta", "772", "712"},
+    "krizovany nad dudvahom": {"trnava", "galanta", "772", "712"},
+    "zemianske sady": {"galanta", "trnava", "hlohovec", "712", "772", "715"},
+    "salgocka": {"galanta", "hlohovec", "trnava", "712", "715", "772"},
+    "horne zelenice": {"hlohovec", "trnava", "galanta", "715", "772", "712"},
+    "dolne zelenice": {"hlohovec", "trnava", "galanta", "715", "772", "712"},
+    "siladice": {"hlohovec", "trnava", "715", "772"},
+    "velke ripnany": {"nitra", "topolcany", "piestany", "740", "770", "748"},
+    "male ripnany": {"nitra", "topolcany", "piestany", "740", "770", "748"},
+}
+
+
+def _sheet_matches_municipality(s: CensusSheet, municipality: str | None) -> bool:
+    if not municipality or not municipality.strip():
+        return True
+    m_val = municipality.strip()
+    m_folded = fold_text_diacritics(m_val)
+    m_canon = canonical_municipality_key(m_val)
+    s_canon = canonical_municipality_key(s.municipality)
+    s_folded = fold_text_diacritics(s.municipality or s.municipality_folded or "")
+    if s.municipality_key and s.municipality_key == m_val:
+        return True
+    if m_canon and s_canon == m_canon:
+        return True
+    if m_folded and m_folded in s_folded:
+        return True
+    if m_canon and m_canon in s_canon:
+        return True
+    return False
+
+
+def _sheet_matches_district(
+    s: CensusSheet,
+    district: str | None,
+    *,
+    municipality_specified: bool = False,
+) -> bool:
+    if not district or not district.strip():
+        return True
+    import re as _re
+
+    d_raw = _re.sub(r"^\s*okr(?:es)?\.?\s*", "", district.strip(), flags=_re.IGNORECASE).strip()
+    d_folded = fold_text_diacritics(d_raw)
+    if not d_folded:
+        return True
+    if s.district_key and s.district_key == d_raw:
+        return True
+    s_dist_folded = fold_text_diacritics(s.district or s.district_folded or "")
+    if d_folded in s_dist_folded:
+        return True
+
+    m_canon = canonical_municipality_key(s.municipality)
+    aliases = _MUNICIPALITY_HISTORICAL_DISTRICT_ALIASES.get(m_canon, set())
+    if municipality_specified:
+        if d_folded in aliases or d_raw in aliases:
+            return True
+    else:
+        # Allow historical/modern district aliases (e.g. Galanta/Sereď for Horný Čepeň & Veľké Šúrovce,
+        # Topoľčany/Piešťany for Veľké Ripňany) without cross-polluting primary DB districts like Trnava/Hlohovec
+        if d_folded in ("galanta", "sered", "topolcany", "piestany", "712", "770", "748") and (
+            d_folded in aliases or d_raw in aliases
+        ):
+            return True
+    return False
+
+
+def _parse_birth_year_range(birth_year: str | int | None) -> tuple[int, int] | None:
+    if birth_year is None:
+        return None
+    import re as _re
+
+    raw = str(birth_year).strip()
+    if not raw:
+        return None
+    # Range: "1890-1900", "1890 - 1900", "1890–1900", "1890..1900", "1890 do 1900"
+    m_range = _re.match(r"^\s*(\d{4})\s*(?:[-–—]+|\.\.+|do)\s*(\d{4})\s*$", raw, flags=_re.IGNORECASE)
+    if m_range:
+        y1, y2 = int(m_range.group(1)), int(m_range.group(2))
+        return (min(y1, y2), max(y1, y2))
+    # Tolerance: "1896±2", "1896+-2", "1896+/-2"
+    m_tol = _re.match(r"^\s*(\d{4})\s*(?:±|\+-|\+/-)\s*(\d{1,2})\s*$", raw)
+    if m_tol:
+        yr, tol = int(m_tol.group(1)), int(m_tol.group(2))
+        return (yr - tol, yr + tol)
+    # Approximate prefix: "~1896", "cca 1896", "okolo 1896"
+    m_approx = _re.match(r"^\s*(?:~|cca\.?|okolo)\s*(\d{4})\s*$", raw, flags=_re.IGNORECASE)
+    if m_approx:
+        yr = int(m_approx.group(1))
+        return (yr - 2, yr + 2)
+    # Open-ended ranges: "1890-" or "-1900"
+    m_open_start = _re.match(r"^\s*(\d{4})\s*[-–—]+\s*$", raw)
+    if m_open_start:
+        return (int(m_open_start.group(1)), 2100)
+    m_open_end = _re.match(r"^\s*[-–—]+\s*(\d{4})\s*$", raw)
+    if m_open_end:
+        return (1600, int(m_open_end.group(1)))
+    # Exact 4-digit year: "1896"
+    m_exact = _re.match(r"^\s*(\d{4})\s*$", raw)
+    if m_exact:
+        yr = int(m_exact.group(1))
+        return (yr, yr)
+    return None
+
+
+def _extract_fact_birth_years(pf: PersonFact) -> list[int]:
+    import re as _re
+
+    years: list[int] = []
+    if pf.birth_year_est is not None:
+        try:
+            years.append(int(pf.birth_year_est))
+        except Exception:
+            pass
+    if pf.birth_or_event_date:
+        for m in _re.finditer(r"\b(1[6789]\d{2}|20\d{2})\b", str(pf.birth_or_event_date)):
+            yr = int(m.group(1))
+            if yr not in years:
+                years.append(yr)
+    return years
+
+
+def _fact_matches_birth_year(pf: PersonFact, birth_year: str | int | None) -> bool:
+    if birth_year is None or not str(birth_year).strip():
+        return True
+    raw = str(birth_year).strip()
+    yr_range = _parse_birth_year_range(raw)
+    years = _extract_fact_birth_years(pf)
+    if yr_range is not None:
+        y_min, y_max = yr_range
+        return any(y_min <= y <= y_max for y in years)
+    raw_f = fold_text_diacritics(raw)
+    return any(raw_f in str(y) for y in years) or (
+        raw_f in fold_text_diacritics(pf.birth_or_event_date or "")
+    )
+
+
+def _text_matches_person_name(haystack_parts: list[str | None], person_name: str | None) -> bool:
+    if not person_name or not person_name.strip():
+        return True
+    return fuzzy_name_matches(person_name.strip(), haystack_parts, threshold=0.76)
+
+
+def _fact_matches_person_name(
+    pf: PersonFact,
+    person_name: str | None,
+    *,
+    ocr_text: str | None = None,
+) -> bool:
+    if not person_name or not person_name.strip():
+        return True
+    candidates = extract_person_fact_name_candidates(pf, ocr_text=ocr_text)
+    if pf.observationes_raw:
+        candidates.append(pf.observationes_raw)
+    return _text_matches_person_name(candidates, person_name)
+
+
+def _overview_house_matches_person_query(
+    ovh: CensusOverviewHouse,
+    person_query: str | None,
+) -> bool:
+    if not person_query or not person_query.strip():
+        return True
+    return _text_matches_person_name(
+        [
+            ovh.owner_name,
+            ovh.owner_surname_folded,
+            ovh.raw_ocr_text,
+            ovh.remarks,
+        ],
+        person_query,
+    )
+
+
+def _fact_matches_birth_place(pf: PersonFact, birth_place: str | None) -> bool:
+    if not birth_place or not birth_place.strip():
+        return True
+    import re as _re
+
+    bp_val = birth_place.strip()
+    bp_folded = fold_text_diacritics(bp_val)
+    bp_canon = canonical_municipality_key(bp_val)
+    place_parts = [
+        pf.birth_place_raw,
+        pf.birth_place_sk,
+        pf.birth_place_municipality,
+        pf.birth_place_district,
+        pf.birth_place_country,
+        pf.home_jurisdiction,
+        pf.previous_residence,
+        pf.village_raw,
+        pf.village_sk,
+    ]
+    combined_folded = fold_text_diacritics(" ".join(p for p in place_parts if p))
+    if bp_folded and bp_folded in combined_folded:
+        return True
+
+    q_toks = [t for t in _re.split(r"[\s,;()/]+", bp_folded) if t and t not in ("okr", "okres")]
+    if q_toks and all(t in combined_folded for t in q_toks):
+        return True
+
+    for cand_m in (
+        pf.birth_place_municipality,
+        pf.birth_place_sk,
+        (pf.birth_place_raw or "").split(",")[0],
+        (pf.home_jurisdiction or "").split(",")[0],
+    ):
+        if not cand_m:
+            continue
+        cand_canon = canonical_municipality_key(cand_m)
+        if bp_canon and cand_canon == bp_canon:
+            return True
+        if cand_canon and bp_folded in _MUNICIPALITY_HISTORICAL_DISTRICT_ALIASES.get(cand_canon, set()):
+            return True
+    return False
+
+
+def _serialize_person_preview(
+    pf: PersonFact,
+    *,
+    matched_filter: bool = False,
+) -> dict[str, Any]:
+    given = pf.given_name_sk or pf.given_name_raw or ""
+    surname = pf.surname_raw or pf.surname_normalized or ""
+    rel_low = (pf.relation_to_head or "").strip().lower()
+    is_child_or_male = pf.sex == "M" or rel_low in {
+        "syn",
+        "dcéra",
+        "vnuk",
+        "vnučka",
+        "chovanec",
+        "chovanka",
+        "adoptívny syn",
+        "adoptívna dcéra",
+        "nevlastný syn",
+        "nevlastná dcéra",
+    }
+    maiden = None if is_child_or_male else pf.mother_maiden_surname
+    full_name = f"{given} {surname}".strip()
+    if maiden:
+        full_name = f"{full_name} (rod. {maiden})".strip()
+    years = _extract_fact_birth_years(pf)
+    byear = years[0] if years else None
+    bplace = (
+        pf.birth_place_raw
+        or pf.birth_place_sk
+        or pf.birth_place_municipality
+        or None
+    )
+    return {
+        "id": pf.id,
+        "given_name": given or None,
+        "surname": surname or None,
+        "surname_normalized": pf.surname_normalized or None,
+        "maiden_surname": maiden or None,
+        "full_name": full_name or None,
+        "relation_to_head": pf.relation_to_head,
+        "birth_date": pf.birth_or_event_date,
+        "birth_year": byear,
+        "birth_place": bplace,
+        "domicile": pf.home_jurisdiction,
+        "matched_filter": matched_filter,
+    }
+
+
+def _build_person_previews(
+    facts: list[PersonFact],
+    *,
+    row_ocr_by_id: dict[int, str] | None = None,
+    person_name: str | None = None,
+    birth_year: str | int | None = None,
+    birth_place: str | None = None,
+    q: str | None = None,
+) -> list[dict[str, Any]]:
+    has_pn = bool(person_name and person_name.strip())
+    has_by = bool(birth_year and str(birth_year).strip())
+    has_bp = bool(birth_place and birth_place.strip())
+    has_q = bool(q and q.strip())
+    ocr_map = row_ocr_by_id or {}
+    previews: list[dict[str, Any]] = []
+    for pf in facts:
+        is_pf_match = False
+        pf_ocr = ocr_map.get(pf.row_id)
+        if has_pn or has_by or has_bp:
+            is_pf_match = (
+                (not has_pn or _fact_matches_person_name(pf, person_name, ocr_text=pf_ocr))
+                and (not has_by or _fact_matches_birth_year(pf, birth_year))
+                and (not has_bp or _fact_matches_birth_place(pf, birth_place))
+            )
+        elif has_q and q:
+            is_pf_match = (
+                _fact_matches_person_name(pf, q, ocr_text=pf_ocr)
+                or _fact_matches_birth_year(pf, q)
+                or _fact_matches_birth_place(pf, q)
+            )
+        previews.append(_serialize_person_preview(pf, matched_filter=is_pf_match))
+    return previews
+
+
+def _with_member_previews(
+    payload: dict[str, Any],
+    previews: list[dict[str, Any]],
+    *,
+    include_extracted_members: bool = False,
+) -> dict[str, Any]:
+    payload["extracted_persons_preview"] = previews
+    payload["members_preview"] = previews
+    if include_extracted_members:
+        payload["extracted_members"] = previews
+    return payload
+
+
+def _serialize_household(hh: CensusHousehold | None) -> dict[str, Any] | None:
+    if not hh:
+        return None
+    notes: dict[str, Any] = {}
+    if hh.notes_raw:
+        try:
+            notes = json.loads(hh.notes_raw)
+        except Exception:
+            notes = {}
+    dwelling_unit = hh.dwelling_unit or notes.get("dwelling_unit") or "I"
+    head_name = notes.get("head_of_household_name") or hh.house_owner_name
+    wife_name = notes.get("wife_name") or notes.get("wife_given_name")
+    wife_maiden = notes.get("wife_maiden_name") or notes.get("wife_maiden_surname")
+    members_cnt = notes.get("members_count", notes.get("member_count", 0))
+    head_surname = notes.get("head_surname") or hh.house_owner_name
+    consensus_surname = (
+        notes.get("consensus_surname")
+        or (strip_slovak_feminine_suffix(head_surname) if head_surname else None)
+        or head_surname
+    )
+    return {
+        **hh.model_dump(),
+        "id": hh.id,
+        "dwelling_unit": dwelling_unit,
+        "head_of_household_name": head_name,
+        "wife_name": wife_name,
+        "wife_maiden_name": wife_maiden,
+        "members_count": members_cnt,
+        "consensus_surname": consensus_surname,
+        "head_surname": head_surname,
+        "head_given_name": notes.get("head_given_name"),
+        "wife_given_name": notes.get("wife_given_name"),
+        "wife_maiden_surname": wife_maiden,
+        "member_count": members_cnt,
+    }
+
+
+class StartCensusJobRequest(BaseModel):
+    name: str | None = None
+    job_type: str = "catalog_harvest"  # "catalog_harvest" | "download_and_pipeline"
+    census_year_tag: str | None = None  # "10001" (1930) | "10003" (1940) | None (both)
+    district_tag: str | None = None
+    municipality_tag: str | None = None
+    municipality: str | None = None
+    district: str | None = None
+    query_text: str | None = None
+    max_sheets: int | None = 100
+    run_pipeline: bool = True
+    run_mcp: bool = True
+    only_undone: bool = True
+
+
+class RemoteSearchRequest(BaseModel):
+    query_text: str | None = None
+    year_tag: str | None = None
+    district_tag: str | None = None
+    municipality_tag: str | None = None
+    page: int = 1
+    page_size: int = 20
+    save_to_catalog: bool = True
+
+
+class CreateCensusPersonRequest(BaseModel):
+    person_row_number: int | str | None = None
+    surname_raw: str | None = None
+    maiden_surname: str | None = None
+    mother_maiden_surname: str | None = None
+    given_name_raw: str | None = None
+    relation_to_head: str | None = None
+    sex: str | None = None
+    birth_or_event_date: str | None = None
+    birth_year_est: int | None = None
+    marital_status: str | None = None
+    marriage_date: str | None = None
+    marriage_date_raw: str | None = None
+    children_born_count: int | str | None = None
+    children_living_count: int | str | None = None
+    children_deceased_count: int | str | None = None
+    children_dead_count: int | str | None = None
+    birth_place_municipality: str | None = None
+    birth_place_district: str | None = None
+    birth_place_country: str | None = None
+    birth_place_raw: str | None = None
+    moved_in_date: str | None = None
+    previous_residence: str | None = None
+    home_jurisdiction: str | None = None
+    citizenship: str | None = None
+    nationality: str | None = None
+    religion: str | None = None
+    literacy: str | None = None
+    social_status_or_occupation: str | None = None
+    occupation_position: str | None = None
+    employer_workplace: str | None = None
+    presence_type: str | None = "trvale"
+    observationes_raw: str | None = None
+    spouse_name: str | None = None
+    father_name: str | None = None
+    mother_name: str | None = None
+
+
+class UpdateCensusPersonRequest(CreateCensusPersonRequest):
+    pass
+
+
+class SetSheetTypeRequest(BaseModel):
+    sheet_type: str = "overview"  # "overview" | "household"
+    obvod_number: str | None = None
+    commissioner_name: str | None = None
+    run_extract: bool = True
+
+
+class OverviewHousePatchRequest(BaseModel):
+    ordinal_number: int | str | None = None
+    settlement_name: str | None = None
+    house_number: str | None = None
+    is_inhabited: bool | None = None
+    owner_name: str | None = None
+    household_count: int | None = None
+    present_persons_count: int | None = None
+    remarks: str | None = None
+    matched_sheet_id: int | None = None
+
+
+@router.get("/facets")
+async def get_census_facets(
+    district_tag: str | None = None,
+    year_tag: str | None = None,
+) -> dict[str, Any]:
+    """
+    Fetches live Slovakiana facets (years 1930/1940, districts, and municipalities).
+    When `district_tag` is provided, queries Slovakiana for the exact municipalities in that district.
+    """
+    try:
+        only_unblackened = year_tag == "10001"
+        facets = await slovakiana_client.fetch_facets(only_unblackened=only_unblackened)
+        years = facets.get("years") or []
+        districts = facets.get("districts") or []
+        if district_tag and district_tag.strip():
+            cities = await slovakiana_client.fetch_cities_for_district(
+                district_tag=district_tag.strip(),
+                year_tag=year_tag.strip() if year_tag else None,
+                only_unblackened=only_unblackened,
+            )
+        else:
+            cities = facets.get("municipalities") or []
+        return {
+            "years": years,
+            "districts": districts,
+            "cities": cities,
+            "online": True,
+        }
+    except Exception as exc:
+        return {
+            "years": [
+                {"tagKey": "10001", "name": "1930", "count": 599068},
+                {"tagKey": "10003", "name": "1940", "count": 647859},
+            ],
+            "districts": [],
+            "cities": [],
+            "online": False,
+            "error": str(exc),
+        }
+
+
+@router.get("/stats")
+def get_census_stats(session: SessionDep) -> dict[str, Any]:
+    total_sheets = session.exec(select(func.count()).select_from(CensusSheet)).one()
+    sheets_1930 = session.exec(
+        select(func.count()).select_from(CensusSheet).where(CensusSheet.census_year == 1930)
+    ).one()
+    sheets_1940 = session.exec(
+        select(func.count()).select_from(CensusSheet).where(CensusSheet.census_year == 1940)
+    ).one()
+    downloaded_sheets = session.exec(
+        select(func.count())
+        .select_from(CensusSheet)
+        .where(CensusSheet.download_status.in_(["downloaded", "sliced", "ocr_done", "extracted", "matched"]))
+    ).one()
+    processed_sheets = session.exec(
+        select(func.count())
+        .select_from(CensusSheet)
+        .where(CensusSheet.download_status.in_(["extracted", "matched"]))
+    ).one()
+    census_facts = session.exec(
+        select(func.count()).select_from(PersonFact).where(PersonFact.record_type == "census")
+    ).one()
+    local_cross_matches = session.exec(
+        select(func.count()).select_from(LocalRecordMatch)
+    ).one()
+
+    distinct_municipalities = session.exec(
+        select(CensusSheet.municipality, CensusSheet.district, func.count(CensusSheet.id))
+        .group_by(CensusSheet.municipality, CensusSheet.district)
+        .order_by(func.count(CensusSheet.id).desc())
+        .limit(200)
+    ).all()
+
+    distinct_districts = session.exec(
+        select(CensusSheet.district, func.count(CensusSheet.id))
+        .where(CensusSheet.district.is_not(None))
+        .group_by(CensusSheet.district)
+        .order_by(CensusSheet.district.asc())
+    ).all()
+
+    return {
+        "total_cataloged_sheets": total_sheets,
+        "sheets_1930": sheets_1930,
+        "sheets_1940": sheets_1940,
+        "downloaded_sheets": downloaded_sheets,
+        "processed_sheets": processed_sheets,
+        "extracted_census_persons": census_facts,
+        "local_matrika_cross_matches": local_cross_matches,
+        "top_municipalities": [
+            {"municipality": m[0], "district": m[1], "count": m[2]}
+            for m in distinct_municipalities
+            if m[0]
+        ],
+        "local_districts": [
+            {"district": d[0], "count": d[1]}
+            for d in distinct_districts
+            if d[0]
+        ],
+    }
+
+
+@router.get("/jobs")
+def list_census_jobs(session: SessionDep) -> dict[str, Any]:
+    jobs = session.exec(
+        select(CensusDownloadJob).order_by(CensusDownloadJob.id.desc()).limit(30)
+    ).all()
+    dirty = False
+    for j in jobs:
+        if j.status == "running" and j.id is not None and not is_job_running_in_memory(j.id):
+            if j.total_items and j.completed_items >= j.total_items:
+                j.status = "completed"
+            else:
+                j.status = "paused"
+            session.add(j)
+            dirty = True
+    if dirty:
+        session.commit()
+
+    out: list[dict[str, Any]] = []
+    for j in jobs:
+        flt = json.loads(j.filter_json or "{}")
+        out.append(
+            {
+                **j.model_dump(),
+                "name": flt.get("name") or f"{j.job_type} #{j.id}",
+                "total_sheets": j.total_items,
+                "cataloged_sheets": j.completed_items if j.job_type == "catalog_harvest" else j.total_items,
+                "downloaded_sheets": j.completed_items if j.job_type != "catalog_harvest" else 0,
+                "processed_sheets": j.completed_items if j.job_type == "full_pipeline" else 0,
+                "failed_sheets": j.failed_items,
+                "current_page": j.cursor_page,
+                "is_active_runtime": bool(j.id and is_job_running_in_memory(j.id)),
+            }
+        )
+    return {"jobs": out}
+
+
+@router.delete("/jobs/{job_id}")
+@router.post("/jobs/{job_id}/cancel")
+def delete_or_cancel_census_job(job_id: int, session: SessionDep) -> dict[str, Any]:
+    job = session.get(CensusDownloadJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="CensusDownloadJob not found")
+    request_job_pause(job_id)
+    session.delete(job)
+    session.commit()
+    return {"status": "deleted", "job_id": job_id}
+
+
+@router.post("/jobs/start")
+async def start_census_job(
+    req: StartCensusJobRequest,
+    background_tasks: BackgroundTasks,
+    session: SessionDep,
+) -> dict[str, Any]:
+    years = [TAG_KEY_TO_YEAR[req.census_year_tag]] if req.census_year_tag in TAG_KEY_TO_YEAR else [1930, 1940]
+    cat_keys = [k for k in (req.district_tag, req.municipality_tag) if k]
+    job_name = req.name or (
+        f"Katalóg Slovakiana ({req.municipality or req.query_text or req.municipality_tag or req.district_tag or 'všetky'})"
+        if req.job_type == "catalog_harvest"
+        else f"Sťahovanie a OCR hárkov ({req.municipality or req.query_text or req.municipality_tag or 'výber'})"
+    )
+    db_job_type = "catalog_harvest" if req.job_type == "catalog_harvest" else "full_pipeline"
+    filter_payload = {
+        "name": job_name,
+        "years": years,
+        "category_keys": cat_keys,
+        "municipality": (req.municipality or "").strip() or None,
+        "district": (req.district or "").strip() or None,
+        "search_text": req.query_text or "",
+        "include_blackened": True,
+        "limit_sheets": req.max_sheets or 50,
+        "auto_ocr": req.run_pipeline,
+        "run_mcp": req.run_mcp,
+        "only_undone": req.only_undone,
+    }
+    job = CensusDownloadJob(
+        job_type=db_job_type,
+        filter_json=json.dumps(filter_payload, ensure_ascii=False),
+        status="running",
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+
+    if req.job_type == "catalog_harvest":
+        max_pages = max(1, ((req.max_sheets or 200) + 199) // 200)
+        background_tasks.add_task(
+            run_catalog_harvest_job,
+            job.id or 0,
+            max_pages=max_pages,
+            page_size=min(200, req.max_sheets or 200),
+        )
+    else:
+        background_tasks.add_task(
+            run_download_and_pipeline_job,
+            job.id or 0,
+        )
+
+    return {"status": "started", "job": job}
+
+
+@router.post("/jobs/{job_id}/pause")
+def pause_census_job(job_id: int, session: SessionDep) -> dict[str, Any]:
+    job = session.get(CensusDownloadJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="CensusDownloadJob not found")
+    request_job_pause(job_id)
+    job.status = "paused"
+    job.updated_at = datetime.now(timezone.utc)
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return {"status": "paused", "job": job}
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_census_job(
+    job_id: int,
+    background_tasks: BackgroundTasks,
+    session: SessionDep,
+) -> dict[str, Any]:
+    job = session.get(CensusDownloadJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="CensusDownloadJob not found")
+    job.status = "running"
+    job.updated_at = datetime.now(timezone.utc)
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+
+    if job.job_type == "catalog_harvest":
+        background_tasks.add_task(run_catalog_harvest_job, job.id or 0)
+    else:
+        background_tasks.add_task(run_download_and_pipeline_job, job.id or 0)
+
+    return {"status": "resumed", "job": job}
+
+
+@router.get("/sheets")
+def list_census_sheets(
+    session: SessionDep,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    q: str | None = None,
+    census_year: int | None = None,
+    municipality: str | None = None,
+    district: str | None = None,
+    person_name: str | None = None,
+    person_query: str | None = None,
+    owner_query: str | None = None,
+    birth_year: str | None = None,
+    birth_place: str | None = None,
+    download_status: str | None = None,
+    pipeline_status: str | None = None,
+    limit: int = 80,
+    offset: int = 0,
+) -> dict[str, Any]:
+    effective_person_name = person_name or person_query or owner_query
+    person_name = effective_person_name
+    stmt = select(CensusSheet).order_by(CensusSheet.id.desc())
+    if census_year:
+        stmt = stmt.where(CensusSheet.census_year == census_year)
+    status_filter = pipeline_status or download_status
+    if status_filter:
+        if status_filter == "idle":
+            stmt = stmt.where(CensusSheet.download_status == "cataloged")
+        elif status_filter in ("pending", "pending_ocr", "undone", "not_done"):
+            stmt = stmt.where(
+                (CensusSheet.download_status.is_(None))  # type: ignore[union-attr]
+                | (CensusSheet.download_status.notin_(["ocr_done", "extracted", "matched"]))  # type: ignore[union-attr]
+            )
+        else:
+            stmt = stmt.where(CensusSheet.download_status == status_filter)
+
+    all_matching = list(session.exec(stmt).all())
+
+    has_muni = bool(municipality and municipality.strip())
+    if has_muni and municipality:
+        all_matching = [s for s in all_matching if _sheet_matches_municipality(s, municipality)]
+        target_canon = canonical_municipality_key(municipality)
+        exact_muni = [
+            s
+            for s in all_matching
+            if canonical_municipality_key(s.municipality) == target_canon
+            or s.municipality_key == municipality.strip()
+        ]
+        if exact_muni:
+            all_matching = exact_muni
+
+    if district and district.strip():
+        all_matching = [
+            s
+            for s in all_matching
+            if _sheet_matches_district(s, district, municipality_specified=has_muni)
+        ]
+
+    has_pn = bool(person_name and person_name.strip())
+    has_by = bool(birth_year and str(birth_year).strip())
+    has_bp = bool(birth_place and birth_place.strip())
+    has_q = bool(q and q.strip())
+    has_person_or_q_filter = has_pn or has_by or has_bp or has_q
+
+    candidate_ids = [s.id for s in all_matching if s.id is not None]
+    households_by_sheet: dict[int, CensusHousehold] = {}
+    all_households_by_sheet: dict[int, list[CensusHousehold]] = {}
+    facts_by_sheet: dict[int, list[PersonFact]] = {}
+    overview_counts_by_sheet: dict[int, int] = {}
+    matched_ovh_owners_by_sheet: dict[int, list[str]] = {}
+    ovh_by_overview_sheet: dict[int, list[CensusOverviewHouse]] = {}
+    row_ocr_by_id: dict[int, str] = {}
+
+    if has_person_or_q_filter and candidate_ids:
+        for hh in session.exec(
+            select(CensusHousehold)
+            .where(CensusHousehold.census_sheet_id.in_(candidate_ids))
+            .order_by(CensusHousehold.id.asc())
+        ).all():
+            all_households_by_sheet.setdefault(hh.census_sheet_id, []).append(hh)
+            if hh.census_sheet_id not in households_by_sheet or (hh.dwelling_unit or "I") == "I":
+                if hh.census_sheet_id not in households_by_sheet:
+                    households_by_sheet[hh.census_sheet_id] = hh
+        all_sheet_facts = list(
+            session.exec(
+                select(PersonFact)
+                .where(PersonFact.census_sheet_id.in_(candidate_ids))
+                .order_by(PersonFact.id.asc())
+            ).all()
+        )
+        for pf in all_sheet_facts:
+            if pf.census_sheet_id:
+                facts_by_sheet.setdefault(pf.census_sheet_id, []).append(pf)
+        f_row_ids = list({pf.row_id for pf in all_sheet_facts if pf.row_id})
+        if f_row_ids:
+            for r_obj in session.exec(select(RecordRow).where(RecordRow.id.in_(f_row_ids))).all():
+                if r_obj.id is not None:
+                    ocr_t = " ".join(
+                        p for p in (r_obj.raw_ocr_combined, r_obj.raw_ocr_left, r_obj.raw_ocr_right) if p
+                    )
+                    if ocr_t:
+                        row_ocr_by_id[r_obj.id] = ocr_t
+        for ovh in session.exec(
+            select(CensusOverviewHouse).where(
+                (CensusOverviewHouse.census_sheet_id.in_(candidate_ids))
+                | (CensusOverviewHouse.matched_sheet_id.in_(candidate_ids))
+            )
+        ).all():
+            overview_counts_by_sheet[ovh.census_sheet_id] = (
+                overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
+            )
+            ovh_by_overview_sheet.setdefault(ovh.census_sheet_id, []).append(ovh)
+            if ovh.matched_sheet_id:
+                for tx in (ovh.owner_name, ovh.raw_ocr_text, ovh.remarks):
+                    if tx:
+                        matched_ovh_owners_by_sheet.setdefault(ovh.matched_sheet_id, []).append(tx)
+
+        filtered_sheets: list[CensusSheet] = []
+        for s in all_matching:
+            sid = s.id or 0
+            s_facts = facts_by_sheet.get(sid, [])
+            s_hhs = all_households_by_sheet.get(sid, [])
+            s_ovhs = ovh_by_overview_sheet.get(sid, [])
+            name_parts: list[str | None] = [
+                s.household_owner,
+                s.commissioner_name,
+                *matched_ovh_owners_by_sheet.get(sid, []),
+            ]
+            for ovh_item in s_ovhs:
+                name_parts.extend([ovh_item.owner_name, ovh_item.raw_ocr_text, ovh_item.remarks])
+            for hh_item in s_hhs:
+                hh_ser = _serialize_household(hh_item)
+                if hh_ser:
+                    name_parts.extend(
+                        [
+                            hh_ser.get("head_of_household_name"),
+                            hh_ser.get("head_given_name"),
+                            hh_ser.get("head_surname"),
+                            hh_ser.get("wife_name"),
+                            hh_ser.get("wife_given_name"),
+                            hh_ser.get("wife_maiden_name"),
+                        ]
+                    )
+
+            if has_q and q:
+                q_val = q.strip()
+                q_folded = fold_text_diacritics(q_val)
+                meta_text = fold_text_diacritics(
+                    " ".join(
+                        filter(
+                            None,
+                            [
+                                s.municipality,
+                                s.district,
+                                s.street_raw,
+                                s.house_number,
+                                s.slovakiana_key,
+                                s.household_owner,
+                            ],
+                        )
+                    )
+                )
+                q_match = (
+                    (q_folded in meta_text)
+                    or _text_matches_person_name(name_parts, q_val)
+                    or any(
+                        _fact_matches_person_name(pf, q_val, ocr_text=row_ocr_by_id.get(pf.row_id))
+                        or _fact_matches_birth_year(pf, q_val)
+                        or _fact_matches_birth_place(pf, q_val)
+                        for pf in s_facts
+                    )
+                    or any(_overview_house_matches_person_query(ovh_item, q_val) for ovh_item in s_ovhs)
+                )
+                if not q_match:
+                    continue
+
+            if has_pn or has_by or has_bp:
+                fact_combined_match = any(
+                    (
+                        not has_pn
+                        or _fact_matches_person_name(pf, person_name, ocr_text=row_ocr_by_id.get(pf.row_id))
+                    )
+                    and (not has_by or _fact_matches_birth_year(pf, birth_year))
+                    and (not has_bp or _fact_matches_birth_place(pf, birth_place))
+                    for pf in s_facts
+                )
+                header_name_match = (
+                    has_pn
+                    and (
+                        _text_matches_person_name(name_parts, person_name)
+                        or any(_overview_house_matches_person_query(ovh_item, person_name) for ovh_item in s_ovhs)
+                    )
+                    and (not has_by or any(_fact_matches_birth_year(pf, birth_year) for pf in s_facts))
+                    and (not has_bp or any(_fact_matches_birth_place(pf, birth_place) for pf in s_facts))
+                )
+                if not (fact_combined_match or header_name_match):
+                    continue
+
+            filtered_sheets.append(s)
+        all_matching = filtered_sheets
+
+    total = len(all_matching)
+    page_items = all_matching[offset : offset + limit]
+
+    sheet_ids = [s.id for s in page_items if s.id is not None]
+    if sheet_ids and not has_person_or_q_filter:
+        for hh in session.exec(
+            select(CensusHousehold)
+            .where(CensusHousehold.census_sheet_id.in_(sheet_ids))
+            .order_by(CensusHousehold.id.asc())
+        ).all():
+            all_households_by_sheet.setdefault(hh.census_sheet_id, []).append(hh)
+            if hh.census_sheet_id not in households_by_sheet or (hh.dwelling_unit or "I") == "I":
+                if hh.census_sheet_id not in households_by_sheet:
+                    households_by_sheet[hh.census_sheet_id] = hh
+        for pf in session.exec(
+            select(PersonFact)
+            .where(PersonFact.census_sheet_id.in_(sheet_ids))
+            .order_by(PersonFact.id.asc())
+        ).all():
+            if pf.census_sheet_id:
+                facts_by_sheet.setdefault(pf.census_sheet_id, []).append(pf)
+        for ovh in session.exec(
+            select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id.in_(sheet_ids))
+        ).all():
+            overview_counts_by_sheet[ovh.census_sheet_id] = (
+                overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
+            )
+
+    census_root = _census_storage_root()
+    results: list[dict[str, Any]] = []
+    missing_thumbs: list[dict[str, Any]] = []
+    for s in page_items:
+        sid = s.id or 0
+        hh = households_by_sheet.get(sid)
+        sheet_hhs = all_households_by_sheet.get(sid, [])
+        s_facts = facts_by_sheet.get(sid, [])
+        if not _census_thumbnail_url(s.slovakiana_key, census_root) and s.thumbnail_id:
+            missing_thumbs.append({"slovakiana_key": s.slovakiana_key, "thumbnail_id": s.thumbnail_id})
+        ov_cnt = overview_counts_by_sheet.get(sid, 0)
+        linked_sheets = _find_linked_house_sheets(session, s)
+
+        persons_preview: list[dict[str, Any]] = []
+        for pf in s_facts:
+            is_pf_match = False
+            pf_ocr = row_ocr_by_id.get(pf.row_id)
+            if has_pn or has_by or has_bp:
+                is_pf_match = (
+                    (not has_pn or _fact_matches_person_name(pf, person_name, ocr_text=pf_ocr))
+                    and (not has_by or _fact_matches_birth_year(pf, birth_year))
+                    and (not has_bp or _fact_matches_birth_place(pf, birth_place))
+                )
+            elif has_q and q:
+                is_pf_match = (
+                    _fact_matches_person_name(pf, q, ocr_text=pf_ocr)
+                    or _fact_matches_birth_year(pf, q)
+                    or _fact_matches_birth_place(pf, q)
+                )
+            persons_preview.append(_serialize_person_preview(pf, matched_filter=is_pf_match))
+
+        s_payload = _serialize_sheet(s, overview_houses_count=ov_cnt)
+        s_payload["linked_house_sheets"] = linked_sheets
+        s_payload["extracted_persons_preview"] = persons_preview
+        s_payload["members_preview"] = persons_preview
+        results.append(
+            {
+                "sheet": s_payload,
+                "household": _serialize_household(hh),
+                "households": [sh for sh in (_serialize_household(h) for h in sheet_hhs) if sh is not None],
+                "extracted_members_count": len(s_facts),
+                "extracted_persons_preview": persons_preview,
+                "members_preview": persons_preview,
+                "extracted_members": persons_preview,
+                "overview_houses_count": ov_cnt,
+                "linked_house_sheets": linked_sheets,
+            }
+        )
+
+    if missing_thumbs and background_tasks is not None:
+        background_tasks.add_task(slovakiana_client.download_thumbnails_batch, missing_thumbs)
+
+    return {"total": total, "sheets": results}
+
+
+filter_census_sheets = list_census_sheets
+
+
+async def _resolve_census_sheet(session: SessionDep, sheet_ref: str) -> CensusSheet:
+    """
+    Resolves a CensusSheet by either its Slovakiana identifier (`cair-test001`)
+    or its numeric database ID (`45`). If a `cair-*` identifier is not in the local
+    DB yet, fetches it from Slovakiana and upserts it on the fly.
+    """
+    from backend.app.census.slovakiana_client import SLOVAKIANA_KEY_RE
+
+    ref = str(sheet_ref or "").strip()
+    if not ref.isdigit() and not SLOVAKIANA_KEY_RE.fullmatch(ref):
+        raise HTTPException(status_code=400, detail=f"Invalid slovakiana_key format: '{ref}'")
+    sheet = session.exec(select(CensusSheet).where(CensusSheet.slovakiana_key == ref)).first()
+    if not sheet and ref.isdigit():
+        sheet = session.get(CensusSheet, int(ref))
+    if not sheet and ref.startswith("cair-"):
+        try:
+            detail = await slovakiana_client.fetch_sheet_detail(ref)
+            sheet = upsert_census_sheet_from_dict(session, detail)
+            session.commit()
+            session.refresh(sheet)
+            index_census_sheet(session, sheet)
+            session.commit()
+            imgs = detail.get("images") or []
+            await slovakiana_client.download_thumbnail(
+                ref,
+                sheet.thumbnail_id,
+                imgs[0].get("thumbnail_url") if imgs else None,
+            )
+        except Exception:
+            sheet = None
+    if not sheet:
+        raise HTTPException(status_code=404, detail=f"CensusSheet '{sheet_ref}' not found")
+    return sheet
+
+
+@router.post("/sheets/remote-search")
+async def remote_search_slovakiana(
+    req: RemoteSearchRequest,
+    session: SessionDep,
+) -> dict[str, Any]:
+    """
+    Searches live `wcm.slovakiana.sk/censussheet/search`, downloads local thumbnails
+    for all returned hits, and indexes them into our local SQLite + FTS5 catalog.
+    """
+    years = [TAG_KEY_TO_YEAR[req.year_tag]] if req.year_tag in TAG_KEY_TO_YEAR else None
+    cat_keys = [k for k in (req.district_tag, req.municipality_tag) if k]
+
+    data = await slovakiana_client.search_sheets(
+        page=max(0, req.page - 1),
+        size=req.page_size,
+        years=years,
+        category_keys=cat_keys,
+        search_text=req.query_text or "",
+    )
+    items = data.get("items") or []
+    total_remote = int(data.get("total") or len(items))
+
+    # Download local thumbnails for all search hits concurrently
+    await slovakiana_client.download_thumbnails_batch(items)
+
+    saved_sheets: list[CensusSheet] = []
+    for parsed in items:
+        if req.municipality_tag and not parsed.get("municipality_key"):
+            parsed["municipality_key"] = req.municipality_tag
+        if req.district_tag and not parsed.get("district_key"):
+            parsed["district_key"] = req.district_tag
+        if req.save_to_catalog and parsed.get("slovakiana_key"):
+            sheet = upsert_census_sheet_from_dict(session, parsed)
+            saved_sheets.append(sheet)
+
+    if req.save_to_catalog:
+        session.commit()
+        for s in saved_sheets:
+            session.refresh(s)
+            index_census_sheet(session, s)
+        session.commit()
+
+    return {
+        "total_remote": total_remote,
+        "page": req.page,
+        "saved_count": len(saved_sheets),
+        "sheets": [
+            {
+                "sheet": _serialize_sheet(s),
+                "household": None,
+                "extracted_members_count": 0,
+            }
+            for s in saved_sheets
+        ],
+    }
+
+
+def _build_linked_house_sheet_entry(
+    session: SessionDep,
+    other_sheet: CensusSheet,
+    hh: CensusHousehold | None = None,
+    facts: list[PersonFact] | None = None,
+) -> dict[str, Any]:
+    if hh is None and other_sheet.id:
+        hh = session.exec(
+            select(CensusHousehold)
+            .where(CensusHousehold.census_sheet_id == other_sheet.id)
+            .order_by(CensusHousehold.id.asc())
+        ).first()
+    if facts is None and other_sheet.id:
+        facts = list(
+            session.exec(
+                select(PersonFact)
+                .where(PersonFact.census_sheet_id == other_sheet.id)
+                .order_by(PersonFact.id.asc())
+            ).all()
+        )
+    facts_list = facts or []
+    hh_ser = _serialize_household(hh) if hh else None
+    head_name = None
+    if hh_ser:
+        head_name = f"{hh_ser.get('head_given_name') or ''} {hh_ser.get('head_surname') or ''}".strip() or None
+    if not head_name and hh and hh.house_owner_name:
+        head_name = hh.house_owner_name
+    if not head_name and other_sheet.household_owner:
+        head_name = other_sheet.household_owner
+    if not head_name and facts_list:
+        first_fact = facts_list[0]
+        g_first = first_fact.given_name_sk or first_fact.given_name_raw or ""
+        s_first = first_fact.surname_normalized or first_fact.surname_raw or ""
+        head_name = f"{g_first} {s_first}".strip() or None
+
+    persons_preview: list[dict[str, Any]] = []
+    for pf in facts_list[:12]:
+        persons_preview.append(
+            {
+                "given_name": pf.given_name_sk or pf.given_name_raw,
+                "surname": pf.surname_normalized or pf.surname_raw,
+                "relation_to_head": pf.relation_to_head,
+                "birth_year": pf.birth_year_est,
+            }
+        )
+
+    canonical_muni = canonical_municipality_display(other_sheet.municipality) or other_sheet.municipality
+    return {
+        "id": other_sheet.id,
+        "cair_id": other_sheet.slovakiana_key,
+        "slovakiana_key": other_sheet.slovakiana_key,
+        "slovakiana_id": other_sheet.slovakiana_key,
+        "census_year": other_sheet.census_year,
+        "municipality": canonical_muni,
+        "district": other_sheet.district,
+        "settlement": other_sheet.street_raw or canonical_muni,
+        "house_number": other_sheet.house_number,
+        "enumeration_district": other_sheet.obvod_number,
+        "sheet_number": other_sheet.sheet_number,
+        "box_number": other_sheet.box_number,
+        "is_blackened": other_sheet.is_blackened,
+        "download_status": other_sheet.download_status,
+        "head_of_household": head_name,
+        "persons_count": len(facts_list),
+        "persons_preview": persons_preview,
+    }
+
+
+def _find_matching_village_house_sheets(
+    session: SessionDep,
+    sheet: CensusSheet,
+) -> list[CensusSheet]:
+    eff_type = sheet.sheet_type or "household"
+    if eff_type == "overview":
+        return []
+    target_muni = canonical_municipality_key(sheet.municipality)
+    target_hn = normalize_house_number(sheet.house_number)
+    if not target_muni or not target_hn:
+        return []
+
+    stmt = select(CensusSheet).where(CensusSheet.house_number.is_not(None))
+    if sheet.id is not None:
+        stmt = stmt.where(CensusSheet.id != sheet.id)
+    if sheet.house_number_int is not None:
+        stmt = stmt.where(
+            (CensusSheet.house_number_int == sheet.house_number_int)
+            | (CensusSheet.house_number == str(sheet.house_number).strip())
+        )
+
+    candidates = list(session.exec(stmt).all())
+    matched_others: list[CensusSheet] = []
+    for other in candidates:
+        other_type = other.sheet_type or "household"
+        if other_type == "overview":
+            continue
+        if canonical_municipality_key(other.municipality) != target_muni:
+            continue
+        if sheet.municipality_key and other.municipality_key and sheet.municipality_key != other.municipality_key:
+            continue
+        if normalize_house_number(other.house_number) != target_hn:
+            continue
+        if not is_compatible_settlement(sheet.street_raw, other.street_raw, sheet.municipality):
+            continue
+        matched_others.append(other)
+    return matched_others
+
+
+def _find_linked_house_sheets(
+    session: SessionDep,
+    sheet: CensusSheet,
+) -> list[dict[str, Any]]:
+    """
+    Finds all cross-year household `CensusSheet` records (`other.id != sheet.id`,
+    `other.census_year != sheet.census_year`, and `other.sheet_type != 'overview'`)
+    that belong to the exact same canonical village (`canonical_municipality_key`) and exact same
+    normalized house number (`normalize_house_number`), connecting 1930 <-> 1940 sheets for the same house.
+    """
+    cross_year = [
+        o
+        for o in _find_matching_village_house_sheets(session, sheet)
+        if o.census_year != sheet.census_year
+    ]
+    cross_year.sort(
+        key=lambda o: (
+            o.census_year or 0,
+            o.sheet_number or "",
+            o.id or 0,
+        )
+    )
+    return [_build_linked_house_sheet_entry(session, o) for o in cross_year]
+
+
+def _find_same_year_house_sheets(
+    session: SessionDep,
+    sheet: CensusSheet,
+) -> list[dict[str, Any]]:
+    """
+    Finds sibling household `CensusSheet` records from the SAME census year (`other.census_year == sheet.census_year`)
+    for the exact same village and house number (e.g. multiple apartment/byt sheets for the same house in 1940).
+    """
+    same_year = [
+        o
+        for o in _find_matching_village_house_sheets(session, sheet)
+        if o.census_year == sheet.census_year
+    ]
+    same_year.sort(
+        key=lambda o: (
+            o.sheet_number or "",
+            o.id or 0,
+        )
+    )
+    return [_build_linked_house_sheet_entry(session, o) for o in same_year]
+
+
+def _serialize_overview_house(
+    session: SessionDep,
+    ovh: CensusOverviewHouse,
+    matched_sheet: CensusSheet | None = None,
+    matched_hh: CensusHousehold | None = None,
+    matched_members_count: int = 0,
+    overview_sheet: CensusSheet | None = None,
+    row_obj: RecordRow | None = None,
+    scan_obj: ScanImage | None = None,
+    candidate_sheets: list[CensusSheet] | None = None,
+) -> dict[str, Any]:
+    if overview_sheet is None and ovh.census_sheet_id:
+        overview_sheet = session.get(CensusSheet, ovh.census_sheet_id)
+    if scan_obj is None and ovh.scan_id:
+        scan_obj = session.get(ScanImage, ovh.scan_id)
+
+    # Validate any passed or stored matched_sheet strictly against same-village + same-year + same-house rules
+    if matched_sheet is not None and not can_match_overview_house_to_sheet(ovh, matched_sheet, overview_sheet=overview_sheet):
+        matched_sheet = None
+        matched_hh = None
+        matched_members_count = 0
+
+    if matched_sheet is None and ovh.matched_sheet_id:
+        cand = session.get(CensusSheet, ovh.matched_sheet_id)
+        if cand and can_match_overview_house_to_sheet(ovh, cand, overview_sheet=overview_sheet):
+            matched_sheet = cand
+
+    ov_muni_raw = ovh.municipality or (overview_sheet.municipality if overview_sheet else None)
+    target_muni = canonical_municipality_key(ov_muni_raw)
+    target_hn = normalize_house_number(ovh.house_number)
+
+    # Find all sheets in the exact same canonical village + exact same normalized house number across years (1930 & 1940)
+    all_village_house_sheets: list[CensusSheet] = []
+    if target_muni and target_hn:
+        if candidate_sheets is None:
+            stmt = select(CensusSheet).where(
+                CensusSheet.house_number.is_not(None),
+                CensusSheet.sheet_type != "overview",
+            )
+            if ovh.house_number_int is not None:
+                stmt = stmt.where(
+                    (CensusSheet.house_number_int == ovh.house_number_int)
+                    | (CensusSheet.house_number == str(ovh.house_number).strip())
+                )
+            sheets_iter = session.exec(stmt).all()
+        else:
+            sheets_iter = candidate_sheets
+        for cs in sheets_iter:
+            eff_type = cs.sheet_type or "household"
+            if eff_type == "overview":
+                continue
+            if canonical_municipality_key(cs.municipality) != target_muni:
+                continue
+            if (
+                overview_sheet is not None
+                and overview_sheet.municipality_key
+                and cs.municipality_key
+                and overview_sheet.municipality_key != cs.municipality_key
+            ):
+                continue
+            if normalize_house_number(cs.house_number) != target_hn:
+                continue
+            if not is_compatible_settlement(ovh.settlement_name, cs.street_raw, ov_muni_raw):
+                continue
+            all_village_house_sheets.append(cs)
+            if matched_sheet is None and can_match_overview_house_to_sheet(ovh, cs, overview_sheet=overview_sheet):
+                matched_sheet = cs
+
+    all_village_house_sheets.sort(
+        key=lambda cs: (
+            0 if cs.census_year == ovh.census_year else 1,
+            cs.census_year or 0,
+            cs.id or 0,
+        )
+    )
+
+    if matched_sheet and matched_hh is None:
+        matched_hh = session.exec(
+            select(CensusHousehold).where(CensusHousehold.census_sheet_id == matched_sheet.id)
+        ).first()
+        if not matched_members_count:
+            matched_members_count = session.exec(
+                select(func.count()).select_from(PersonFact).where(PersonFact.census_sheet_id == matched_sheet.id)
+            ).one()
+    head_name = None
+    if matched_hh and matched_hh.house_owner_name:
+        head_name = matched_hh.house_owner_name
+    elif matched_sheet and matched_sheet.household_owner:
+        head_name = matched_sheet.household_owner
+
+    page_side = "front"
+    if scan_obj and scan_obj.page_side:
+        page_side = scan_obj.page_side
+    elif overview_sheet and ovh.scan_id and ovh.scan_id == overview_sheet.back_scan_id:
+        page_side = "back"
+
+    page_number = 1 if page_side == "front" else 2
+    if "_" in page_side:
+        tail = page_side.split("_", 1)[1]
+        if tail.isdigit():
+            page_number = int(tail)
+
+    booklet_page = page_number
+    page_half = "full"
+    header_crop_url = scan_obj.header_crop_path if scan_obj else None
+    y_start = row_obj.y_start if row_obj else None
+    y_end = row_obj.y_end if row_obj else None
+    if row_obj and row_obj.cell_crops_json:
+        try:
+            cc_list = json.loads(row_obj.cell_crops_json)
+            if isinstance(cc_list, list) and cc_list and isinstance(cc_list[0], dict):
+                meta_cc = cc_list[0]
+                if isinstance(meta_cc.get("booklet_page"), int):
+                    booklet_page = meta_cc["booklet_page"]
+                if isinstance(meta_cc.get("page_half"), str):
+                    page_half = meta_cc["page_half"]
+                if isinstance(meta_cc.get("header_crop_url"), str):
+                    header_crop_url = meta_cc["header_crop_url"]
+        except Exception:
+            pass
+
+    ovh_dump = ovh.model_dump()
+    ovh_dump["municipality"] = canonical_municipality_display(ovh.municipality) or ovh.municipality
+    ovh_dump["matched_sheet_id"] = matched_sheet.id if matched_sheet else None
+
+    matched_sheet_entry = (
+        _build_linked_house_sheet_entry(session, matched_sheet, hh=matched_hh)
+        if matched_sheet
+        else None
+    )
+    matched_sheets_entries = [
+        _build_linked_house_sheet_entry(session, cs)
+        for cs in all_village_house_sheets
+    ]
+
+    return {
+        **ovh_dump,
+        "row_id": row_obj.id if row_obj else None,
+        "page_side": page_side,
+        "page_number": page_number,
+        "booklet_page": booklet_page,
+        "page_half": page_half,
+        "header_crop_url": header_crop_url,
+        "y_start": y_start,
+        "y_end": y_end,
+        "matched_slovakiana_key": matched_sheet.slovakiana_key if matched_sheet else None,
+        "matched_cair_id": matched_sheet.slovakiana_key if matched_sheet else None,
+        "matched_head_name": head_name or (matched_sheet_entry["head_of_household"] if matched_sheet_entry else None),
+        "matched_members_count": matched_members_count or (matched_sheet_entry["persons_count"] if matched_sheet_entry else 0),
+        "matched_sheet": matched_sheet_entry,
+        "matched_sheets": matched_sheets_entries,
+    }
+
+
+@router.get("/sheets/{sheet_ref}")
+async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[str, Any]:
+    sheet = await _resolve_census_sheet(session, sheet_ref)
+
+    front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
+    back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
+
+    all_sheet_scans: list[ScanImage] = []
+    seen_sids: set[int] = set()
+    for sc in (front_scan, back_scan):
+        if sc and sc.id is not None and sc.id not in seen_sids:
+            all_sheet_scans.append(sc)
+            seen_sids.add(sc.id)
+    if sheet.id is not None:
+        for extra_sc in session.exec(
+            select(ScanImage)
+            .where(ScanImage.census_sheet_id == sheet.id)
+            .order_by(ScanImage.id.asc())
+        ).all():
+            if extra_sc.id is not None and extra_sc.id not in seen_sids:
+                all_sheet_scans.append(extra_sc)
+                seen_sids.add(extra_sc.id)
+    scans_by_id: dict[int, ScanImage] = {sc.id: sc for sc in all_sheet_scans if sc.id is not None}
+
+    all_households = list(
+        session.exec(
+            select(CensusHousehold)
+            .where(CensusHousehold.census_sheet_id == sheet.id)
+            .order_by(CensusHousehold.id.asc())
+        ).all()
+    )
+    all_households.sort(
+        key=lambda h: (
+            _ROMAN_ORDER.get((h.dwelling_unit or "I").strip().upper(), 99),
+            h.dwelling_unit or "I",
+            h.id or 0,
+        )
+    )
+    household = all_households[0] if all_households else None
+    hh_by_id: dict[int, CensusHousehold] = {
+        h.id: h for h in all_households if h.id is not None
+    }
+
+    facts = list(
+        session.exec(
+            select(PersonFact)
+            .where(PersonFact.census_sheet_id == sheet.id)
+            .order_by(PersonFact.id.asc())
+        ).all()
+    )
+    if not facts and all_households:
+        all_households = []
+        household = None
+        hh_by_id = {}
+
+    rows_by_id: dict[int, RecordRow] = {}
+    rows_by_crop: dict[str, RecordRow] = {}
+    scan_ids_for_rows = [sc.id for sc in all_sheet_scans if sc.id is not None]
+    if scan_ids_for_rows:
+        for r in session.exec(
+            select(RecordRow)
+            .where(RecordRow.scan_id.in_(scan_ids_for_rows))
+            .order_by(RecordRow.scan_id.asc(), RecordRow.row_index.asc())
+        ).all():
+            if r.id is not None:
+                rows_by_id[r.id] = r
+            if r.stitched_crop_path:
+                rows_by_crop[r.stitched_crop_path] = r
+
+    facts.sort(
+        key=lambda f: (
+            0 if (f.scan_id and f.scan_id == sheet.front_scan_id) else 1,
+            rows_by_id[f.row_id].row_index if (f.row_id and f.row_id in rows_by_id) else 999,
+            f.id or 0,
+        )
+    )
+
+    fact_ids = [f.id for f in facts if f.id is not None]
+    fs_matches_by_fact: dict[int, FamilySearchMatch] = {}
+    local_matches_by_fact: dict[int, list[dict[str, Any]]] = {}
+    if fact_ids:
+        for m in session.exec(
+            select(FamilySearchMatch).where(
+                FamilySearchMatch.person_fact_id.in_(fact_ids),
+                FamilySearchMatch.fs_person_id.is_not(None),  # type: ignore[union-attr]
+                func.trim(FamilySearchMatch.fs_person_id) != "",
+                FamilySearchMatch.confidence_score > 0,
+            )
+        ).all():
+            if m.fs_person_id and str(m.fs_person_id).strip():
+                fs_matches_by_fact[m.person_fact_id] = m
+
+        for lm in session.exec(
+            select(LocalRecordMatch).where(LocalRecordMatch.census_fact_id.in_(fact_ids))
+        ).all():
+            target_fact = session.get(PersonFact, lm.matrika_fact_id)
+            agrees_list = json.loads(lm.what_agrees_json or "[]")
+            explanation_sk = agrees_list[0] if agrees_list else ""
+            local_matches_by_fact.setdefault(lm.census_fact_id, []).append(
+                {
+                    "match": {
+                        "id": lm.id,
+                        "match_type": lm.match_kind,
+                        "confidence_score": lm.confidence_score,
+                        "explanation_sk": explanation_sk,
+                    },
+                    "matrika_fact": target_fact,
+                }
+            )
+
+    members: list[dict[str, Any]] = []
+    persons: list[dict[str, Any]] = []
+    for f in facts:
+        row = rows_by_id.get(f.row_id)
+        cell_crops = json.loads(row.cell_crops_json or "[]") if row else []
+        hh_obj = hh_by_id.get(f.census_household_id or 0) if f.census_household_id else household
+        dwelling_unit = (hh_obj.dwelling_unit if hh_obj and hh_obj.dwelling_unit else None) or "I"
+        fact_payload = {
+            **f.model_dump(),
+            "household_id": f.census_household_id,
+            "dwelling_unit": dwelling_unit,
+        }
+        member_entry = {
+            "fact": fact_payload,
+            "row": row,
+            "dwelling_unit": dwelling_unit,
+            "household_id": f.census_household_id,
+            "stitched_crop_url": row.stitched_crop_path if row else None,
+            "cell_crops": cell_crops,
+            "fs_match": fs_matches_by_fact.get(f.id or 0),
+            "local_matches": local_matches_by_fact.get(f.id or 0, []),
+        }
+        members.append(member_entry)
+        persons.append(
+            {
+                **fact_payload,
+                **member_entry,
+            }
+        )
+
+    serialized_households = [
+        sh for sh in (_serialize_household(h) for h in all_households) if sh is not None
+    ]
+
+    overview_houses_rows = list(
+        session.exec(
+            select(CensusOverviewHouse)
+            .where(CensusOverviewHouse.census_sheet_id == sheet.id)
+            .order_by(CensusOverviewHouse.row_index.asc())
+        ).all()
+    )
+    ov_candidate_sheets: list[CensusSheet] | None = None
+    if overview_houses_rows:
+        ov_candidate_sheets = list(
+            session.exec(
+                select(CensusSheet).where(
+                    CensusSheet.house_number.is_not(None),
+                    CensusSheet.sheet_type != "overview",
+                )
+            ).all()
+        )
+    overview_houses: list[dict[str, Any]] = []
+    for ovh in overview_houses_rows:
+        matched_row = rows_by_crop.get(ovh.stitched_crop_path or "")
+        if matched_row is None and ovh.scan_id:
+            for r_cand in rows_by_id.values():
+                if r_cand.scan_id == ovh.scan_id and (
+                    r_cand.entry_number == str(ovh.ordinal_number or ovh.row_index)
+                    or r_cand.row_index == ovh.row_index
+                ):
+                    matched_row = r_cand
+                    break
+        overview_houses.append(
+            _serialize_overview_house(
+                session,
+                ovh,
+                overview_sheet=sheet,
+                row_obj=matched_row,
+                scan_obj=scans_by_id.get(ovh.scan_id or 0),
+                candidate_sheets=ov_candidate_sheets,
+            )
+        )
+
+    linked_overview_house: dict[str, Any] | None = None
+    eff_sheet_type = sheet.sheet_type or "household"
+    if eff_sheet_type != "overview" and sheet.house_number:
+        ov_match = session.exec(
+            select(CensusOverviewHouse).where(CensusOverviewHouse.matched_sheet_id == sheet.id)
+        ).first()
+        if ov_match is not None:
+            ov_parent_check = session.get(CensusSheet, ov_match.census_sheet_id)
+            if not can_match_overview_house_to_sheet(ov_match, sheet, overview_sheet=ov_parent_check):
+                ov_match = None
+        if not ov_match and sheet.municipality:
+            candidates = session.exec(
+                select(CensusOverviewHouse).where(
+                    CensusOverviewHouse.census_year == sheet.census_year,
+                )
+            ).all()
+            for cand in candidates:
+                ov_parent_cand = session.get(CensusSheet, cand.census_sheet_id)
+                if can_match_overview_house_to_sheet(cand, sheet, overview_sheet=ov_parent_cand):
+                    ov_match = cand
+                    break
+        if ov_match:
+            ov_parent = session.get(CensusSheet, ov_match.census_sheet_id)
+            linked_overview_house = {
+                **_serialize_overview_house(
+                    session,
+                    ov_match,
+                    matched_sheet=sheet,
+                    matched_hh=household,
+                    matched_members_count=len(members),
+                    overview_sheet=ov_parent,
+                ),
+                "overview_slovakiana_key": ov_parent.slovakiana_key if ov_parent else None,
+            }
+
+    linked_house_sheets = _find_linked_house_sheets(session, sheet)
+    same_year_house_sheets = _find_same_year_house_sheets(session, sheet)
+
+    sheet_dict = _serialize_sheet(sheet, overview_houses_count=len(overview_houses))
+    sheet_dict["linked_house_sheets"] = linked_house_sheets
+    sheet_dict["same_year_house_sheets"] = same_year_house_sheets
+    front_local_url = _scan_to_media_url(front_scan)
+    back_local_url = _scan_to_media_url(back_scan)
+    if front_local_url:
+        sheet_dict["front_image_url"] = front_local_url
+    if back_local_url:
+        sheet_dict["back_image_url"] = back_local_url
+
+    pages_payload: list[dict[str, Any]] = []
+    for idx_sc, sc in enumerate(all_sheet_scans):
+        p_side = sc.page_side or ("front" if idx_sc == 0 else ("back" if idx_sc == 1 else f"page_{idx_sc + 1}"))
+        p_num = idx_sc + 1
+        sc_url = _scan_to_media_url(sc)
+        if p_side == "front":
+            lbl = "Predná strana (_v)"
+        elif p_side == "back":
+            lbl = "Zadná strana (_r)"
+        else:
+            lbl = f"Strana {p_num}"
+        pages_payload.append(
+            {
+                "page_number": p_num,
+                "page_side": p_side,
+                "label": lbl,
+                "scan_id": sc.id,
+                "scan_url": sc_url,
+                "overlay_url": sc.overlay_path,
+                "header_crop_url": sc.header_crop_path,
+                "width": sc.width,
+                "height": sc.height,
+            }
+        )
+
+    serialized_rows: list[dict[str, Any]] = []
+    for r_obj in rows_by_id.values():
+        r_sc = scans_by_id.get(r_obj.scan_id)
+        r_side = r_sc.page_side if (r_sc and r_sc.page_side) else (
+            "back" if (sheet.back_scan_id and r_obj.scan_id == sheet.back_scan_id) else "front"
+        )
+        r_pnum = 1 if r_side == "front" else 2
+        if "_" in r_side:
+            t_str = r_side.split("_", 1)[1]
+            if t_str.isdigit():
+                r_pnum = int(t_str)
+        serialized_rows.append(
+            {
+                **r_obj.model_dump(),
+                "page_side": r_side,
+                "page_number": r_pnum,
+            }
+        )
+
+    return {
+        "sheet": sheet_dict,
+        "front_scan": _serialize_scan(front_scan),
+        "back_scan": _serialize_scan(back_scan),
+        "front_scan_url": front_local_url or sheet_dict.get("front_image_url"),
+        "front_overlay_url": front_scan.overlay_path if front_scan else None,
+        "back_scan_url": back_local_url or sheet_dict.get("back_image_url"),
+        "back_overlay_url": back_scan.overlay_path if back_scan else None,
+        "pages": pages_payload,
+        "household": serialized_households[0] if serialized_households else _serialize_household(household),
+        "households": serialized_households,
+        "members": members,
+        "persons": persons,
+        "rows": serialized_rows,
+        "overview_houses": overview_houses,
+        "linked_overview_house": linked_overview_house,
+        "linked_house_sheets": linked_house_sheets,
+        "same_year_house_sheets": same_year_house_sheets,
+    }
+
+
+@router.post("/sheets/{sheet_ref}/download-and-process")
+async def trigger_sheet_download_and_process(
+    sheet_ref: str,
+    session: SessionDep,
+    run_pipeline: bool = True,
+    run_mcp: bool = True,
+) -> dict[str, Any]:
+    sheet = await _resolve_census_sheet(session, sheet_ref)
+
+    result = await download_and_process_single_census_sheet(
+        sheet.id or 0,
+        run_pipeline=run_pipeline,
+        run_mcp=run_mcp,
+    )
+    return result
+
+
+@router.post("/sheets/{sheet_ref}/persons")
+async def add_census_person(
+    sheet_ref: str,
+    req: CreateCensusPersonRequest,
+    session: SessionDep,
+) -> dict[str, Any]:
+    sheet = await _resolve_census_sheet(session, sheet_ref)
+
+    existing_facts = session.exec(
+        select(PersonFact).where(PersonFact.census_sheet_id == sheet.id)
+    ).all()
+    next_row_num = int(req.person_row_number or (len(existing_facts) + 1))
+
+    scan_id = sheet.front_scan_id or 0
+    row = RecordRow(
+        scan_id=scan_id,
+        row_index=next_row_num,
+        y_start=0,
+        y_end=100,
+        status="extracted",
+        record_type="census",
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+
+    fact = PersonFact(
+        row_id=row.id or 0,
+        scan_id=scan_id,
+        record_type="census",
+        census_sheet_id=sheet.id,
+        person_row_number=str(next_row_num),
+        entry_number=str(next_row_num),
+        event_year=sheet.census_year,
+        village_raw=sheet.municipality,
+        village_sk=sheet.municipality,
+        house_number=sheet.house_number,
+    )
+    session.add(fact)
+    session.commit()
+    session.refresh(fact)
+
+    return await update_census_person(fact.id or 0, UpdateCensusPersonRequest(**req.model_dump()), session)
+
+
+@router.put("/persons/{fact_id}")
+@router.patch("/facts/{fact_id}")
+async def update_census_person(
+    fact_id: int,
+    req: UpdateCensusPersonRequest,
+    session: SessionDep,
+) -> dict[str, Any]:
+    fact = session.get(PersonFact, fact_id)
+    if not fact:
+        raise HTTPException(status_code=404, detail="PersonFact not found")
+
+    updates = req.model_dump(exclude_unset=True)
+    if "surname_raw" in updates and updates["surname_raw"] is not None:
+        s_val, _ = validate_person_name(updates["surname_raw"], role="surname")
+        fact.surname_raw = s_val or updates["surname_raw"]
+        fact.surname_normalized = strip_slovak_feminine_suffix(fact.surname_raw) or fact.surname_raw
+    if "maiden_surname" in updates and updates["maiden_surname"] is not None:
+        fact.mother_maiden_surname = updates["maiden_surname"]
+    if "mother_maiden_surname" in updates and updates["mother_maiden_surname"] is not None:
+        fact.mother_maiden_surname = updates["mother_maiden_surname"]
+    if "given_name_raw" in updates and updates["given_name_raw"] is not None:
+        g_val, _ = validate_person_name(updates["given_name_raw"], role="given")
+        fact.given_name_raw = g_val or updates["given_name_raw"]
+        g_sk, g_sex = normalize_given_name(fact.given_name_raw)
+        fact.given_name_sk = g_sk or fact.given_name_raw
+        fact.given_name_hu = g_sk
+        if not updates.get("sex") and g_sex:
+            fact.sex = g_sex
+    if "relation_to_head" in updates:
+        fact.relation_to_head = normalize_census_relation(updates["relation_to_head"]) or updates["relation_to_head"]
+    if "sex" in updates and updates["sex"]:
+        fact.sex = validate_sex(updates["sex"], fact.given_name_raw)
+    if "birth_or_event_date" in updates:
+        cdate, cyear = validate_census_date(updates["birth_or_event_date"])
+        fact.birth_or_event_date = cdate or updates["birth_or_event_date"]
+        if cyear and not updates.get("birth_year_est"):
+            fact.birth_year_est = cyear
+    if "birth_year_est" in updates and updates["birth_year_est"] is not None:
+        fact.birth_year_est = updates["birth_year_est"]
+
+    # Structured birthplace fields (Obec / Okres / Krajina)
+    if "birth_place_municipality" in updates:
+        fact.birth_place_municipality = updates["birth_place_municipality"] or None
+    if "birth_place_district" in updates:
+        fact.birth_place_district = updates["birth_place_district"] or None
+    if "birth_place_country" in updates:
+        fact.birth_place_country = updates["birth_place_country"] or None
+    if "birth_place_raw" in updates:
+        fact.birth_place_raw = updates["birth_place_raw"]
+        bp_sk, _, _ = normalize_village(fact.birth_place_raw)
+        fact.birth_place_sk = bp_sk or fact.birth_place_raw
+    elif any(k in updates for k in ("birth_place_municipality", "birth_place_district", "birth_place_country")):
+        fact.birth_place_raw = _format_birth_place_raw(
+            fact.birth_place_municipality,
+            fact.birth_place_district,
+            fact.birth_place_country,
+            fact.birth_place_raw,
+        )
+        bp_sk, _, _ = normalize_village(fact.birth_place_municipality or fact.birth_place_raw)
+        fact.birth_place_sk = bp_sk or fact.birth_place_municipality or fact.birth_place_raw
+
+    if "marriage_date" in updates and updates["marriage_date"] is not None:
+        fact.marriage_date_raw = str(updates["marriage_date"])
+    if "children_deceased_count" in updates and updates["children_deceased_count"] is not None:
+        fact.children_dead_count = str(updates["children_deceased_count"])
+    elif "children_living_count" in updates and updates["children_living_count"] is not None:
+        try:
+            born_int = int(updates.get("children_born_count") or fact.children_born_count or 0)
+            liv_int = int(updates["children_living_count"])
+            if born_int >= liv_int:
+                fact.children_dead_count = str(born_int - liv_int)
+        except Exception:
+            pass
+
+    if "religion" in updates:
+        fact.religion = normalize_religion(updates["religion"]) or updates["religion"]
+    if "social_status_or_occupation" in updates:
+        raw_occ = str(updates["social_status_or_occupation"] or "").strip()
+        fact.social_status_or_occupation = raw_occ or None
+
+    for simple_key in (
+        "person_row_number",
+        "marital_status",
+        "marriage_date_raw",
+        "children_born_count",
+        "children_dead_count",
+        "moved_in_date",
+        "previous_residence",
+        "home_jurisdiction",
+        "citizenship",
+        "nationality",
+        "literacy",
+        "occupation_position",
+        "employer_workplace",
+        "presence_type",
+        "observationes_raw",
+        "spouse_name",
+        "father_name",
+        "mother_name",
+    ):
+        if simple_key in updates and updates[simple_key] is not None:
+            setattr(fact, simple_key, str(updates[simple_key]))
+
+    apply_person_fact_search_fields(fact)
+
+    session.add(fact)
+    session.commit()
+    session.refresh(fact)
+
+    if fact.census_sheet_id:
+        reconcile_census_household_relationships(session, fact.census_sheet_id)
+        match_census_to_local_matrika(session, fact)
+        index_person_fact(session, fact)
+        session.commit()
+    else:
+        index_person_fact(session, fact)
+        session.commit()
+
+    schedule_auto_fs_match(fact.id, trigger_auto_fs_match_for_fact)
+
+    return {"status": "updated", "fact": fact}
+
+
+@router.delete("/persons/{fact_id}")
+@router.delete("/facts/{fact_id}")
+def delete_census_person(fact_id: int, session: SessionDep) -> dict[str, Any]:
+    from backend.app.db.session import delete_person_fact_cascade
+
+    fact = session.get(PersonFact, fact_id)
+    if not fact:
+        raise HTTPException(status_code=404, detail="PersonFact not found")
+    census_sheet_id = fact.census_sheet_id
+    deleted = delete_person_fact_cascade(session, fact_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="PersonFact not found")
+    if census_sheet_id:
+        reconcile_census_household_relationships(session, census_sheet_id)
+    return {"status": "deleted", "fact_id": fact_id}
+
+
+@router.post("/sheets/{sheet_ref}/set-type")
+async def set_census_sheet_type(
+    sheet_ref: str,
+    req: SetSheetTypeRequest,
+    session: SessionDep,
+) -> dict[str, Any]:
+    sheet = await _resolve_census_sheet(session, sheet_ref)
+    target_type = "overview" if req.sheet_type == "overview" else "household"
+    sheet.sheet_type = target_type
+    if req.obvod_number is not None:
+        sheet.obvod_number = req.obvod_number
+    if req.commissioner_name is not None:
+        sheet.commissioner_name = req.commissioner_name
+    session.add(sheet)
+    session.commit()
+    session.refresh(sheet)
+
+    overview_houses: list[CensusOverviewHouse] = []
+    if req.run_extract:
+        if target_type == "overview":
+            if not sheet.front_scan_id:
+                await download_and_process_single_census_sheet(sheet.id or 0, run_pipeline=True, run_mcp=False)
+                session.refresh(sheet)
+            else:
+                front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
+                back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
+                overview_houses = await extract_census_overview_sheet(session, sheet, front_scan, back_scan)
+        else:
+            for ovh in session.exec(
+                select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
+            ).all():
+                session.delete(ovh)
+            session.commit()
+            if sheet.front_scan_id:
+                from backend.app.pipeline.orchestrator import process_census_sheet_pipeline
+
+                await process_census_sheet_pipeline(sheet.id or 0, run_mcp=True)
+            else:
+                await download_and_process_single_census_sheet(sheet.id or 0, run_pipeline=True, run_mcp=True)
+            session.refresh(sheet)
+
+    return {
+        "status": "updated",
+        "sheet": _serialize_sheet(sheet, overview_houses_count=len(overview_houses)),
+        "overview_houses": [_serialize_overview_house(session, h) for h in overview_houses],
+    }
+
+
+@router.patch("/overview-houses/{house_id}")
+def patch_overview_house(
+    house_id: int,
+    req: OverviewHousePatchRequest,
+    session: SessionDep,
+) -> dict[str, Any]:
+    ovh = session.get(CensusOverviewHouse, house_id)
+    if not ovh:
+        raise HTTPException(status_code=404, detail="CensusOverviewHouse not found")
+
+    updates = req.model_dump(exclude_unset=True)
+    if "ordinal_number" in updates and updates["ordinal_number"] is not None:
+        updates["ordinal_number"] = str(updates["ordinal_number"])
+    for k in (
+        "ordinal_number",
+        "settlement_name",
+        "house_number",
+        "is_inhabited",
+        "owner_name",
+        "household_count",
+        "present_persons_count",
+        "remarks",
+        "matched_sheet_id",
+    ):
+        if k in updates:
+            setattr(ovh, k, updates[k])
+
+    if "house_number" in updates and ovh.house_number:
+        import re as _re
+
+        m_int = _re.search(r"(\d+)", str(ovh.house_number))
+        ovh.house_number_int = int(m_int.group(1)) if m_int else None
+        if "matched_sheet_id" not in updates:
+            ov_parent = session.get(CensusSheet, ovh.census_sheet_id)
+            ovh.matched_sheet_id = None
+            cand_sheets = session.exec(
+                select(CensusSheet).where(
+                    CensusSheet.census_year == ovh.census_year,
+                )
+            ).all()
+            for cs in cand_sheets:
+                if can_match_overview_house_to_sheet(ovh, cs, overview_sheet=ov_parent):
+                    ovh.matched_sheet_id = cs.id
+                    break
+    elif "matched_sheet_id" in updates and ovh.matched_sheet_id:
+        ov_parent = session.get(CensusSheet, ovh.census_sheet_id)
+        cand = session.get(CensusSheet, ovh.matched_sheet_id)
+        if not cand or not can_match_overview_house_to_sheet(ovh, cand, overview_sheet=ov_parent):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot link CensusOverviewHouse to a CensusSheet from a different municipality, year, or house number.",
+            )
+
+    if "owner_name" in updates:
+        ovh.owner_surname_folded = owner_surname_folded_from_name(ovh.owner_name)
+
+    session.add(ovh)
+    session.commit()
+    session.refresh(ovh)
+    return {"status": "updated", "overview_house": _serialize_overview_house(session, ovh)}
+
+
+@router.delete("/overview-houses/{house_id}")
+def delete_overview_house(house_id: int, session: SessionDep) -> dict[str, Any]:
+    ovh = session.get(CensusOverviewHouse, house_id)
+    if not ovh:
+        raise HTTPException(status_code=404, detail="CensusOverviewHouse not found")
+    session.delete(ovh)
+    session.commit()
+    return {"status": "deleted", "house_id": house_id}
+
+
+@router.get("/municipality-overview")
+@router.get("/municipalities/overview")
+def get_municipality_overview(
+    session: SessionDep,
+    municipality: str | None = None,
+    census_year: int | None = None,
+    district: str | None = None,
+    person_name: str | None = None,
+    person_query: str | None = None,
+    owner_query: str | None = None,
+    birth_year: str | None = None,
+    birth_place: str | None = None,
+    q: str | None = None,
+) -> dict[str, Any]:
+    """
+    Returns a unified village/house directory (`Dom č. 1 .. N`) merging `Prehľad sčítacieho obvodu`
+    (`CensusOverviewHouse`) rows and household `CensusSheet`s (`sheet_type == 'household'`)
+    for the requested municipality.
+    """
+    person_name = person_name or person_query or owner_query
+    stmt = select(CensusSheet)
+    if census_year:
+        stmt = stmt.where(CensusSheet.census_year == census_year)
+
+    sheets = list(session.exec(stmt.order_by(CensusSheet.id.asc())).all())
+    has_muni = bool(municipality and municipality.strip())
+    if has_muni and municipality:
+        sheets = [s for s in sheets if _sheet_matches_municipality(s, municipality)]
+        target_canon = canonical_municipality_key(municipality)
+        exact_muni = [
+            s
+            for s in sheets
+            if canonical_municipality_key(s.municipality) == target_canon
+            or s.municipality_key == municipality.strip()
+        ]
+        if exact_muni:
+            sheets = exact_muni
+
+    if district and district.strip():
+        sheets = [
+            s
+            for s in sheets
+            if _sheet_matches_district(s, district, municipality_specified=has_muni)
+        ]
+
+    sheet_ids = [s.id for s in sheets if s.id is not None]
+    sheets_by_id: dict[int, CensusSheet] = {s.id: s for s in sheets if s.id is not None}
+
+    households_by_sheet: dict[int, CensusHousehold] = {}
+    facts_by_sheet: dict[int, list[PersonFact]] = {}
+    member_counts_by_sheet: dict[int, int] = {}
+    ov_row_ocr_by_id: dict[int, str] = {}
+    if sheet_ids:
+        for hh in session.exec(
+            select(CensusHousehold).where(CensusHousehold.census_sheet_id.in_(sheet_ids))
+        ).all():
+            households_by_sheet[hh.census_sheet_id] = hh
+        all_ov_facts = list(
+            session.exec(
+                select(PersonFact)
+                .where(PersonFact.census_sheet_id.in_(sheet_ids))
+                .order_by(PersonFact.id.asc())
+            ).all()
+        )
+        for pf in all_ov_facts:
+            if pf.census_sheet_id:
+                facts_by_sheet.setdefault(pf.census_sheet_id, []).append(pf)
+                member_counts_by_sheet[pf.census_sheet_id] = (
+                    member_counts_by_sheet.get(pf.census_sheet_id, 0) + 1
+                )
+        f_rids = list({pf.row_id for pf in all_ov_facts if pf.row_id})
+        if f_rids:
+            for r_obj in session.exec(select(RecordRow).where(RecordRow.id.in_(f_rids))).all():
+                if r_obj.id is not None:
+                    ocr_t = " ".join(
+                        p for p in (r_obj.raw_ocr_combined, r_obj.raw_ocr_left, r_obj.raw_ocr_right) if p
+                    )
+                    if ocr_t:
+                        ov_row_ocr_by_id[r_obj.id] = ocr_t
+
+    overview_sheets: list[dict[str, Any]] = []
+    household_sheets_by_id: dict[int, CensusSheet] = {}
+    # Keyed strictly by (canonical_municipality_key, census_year, normalize_house_number)
+    household_sheets_by_muni_year_hn: dict[tuple[str, int, str], list[CensusSheet]] = {}
+
+    for s in sheets:
+        eff_type = s.sheet_type or "household"
+        if eff_type == "overview":
+            ov_cnt = session.exec(
+                select(func.count()).select_from(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == s.id)
+            ).one()
+            overview_sheets.append(_serialize_sheet(s, overview_houses_count=ov_cnt))
+        else:
+            if s.id is not None:
+                household_sheets_by_id[s.id] = s
+            m_key = canonical_municipality_key(s.municipality)
+            hn_key = normalize_house_number(s.house_number)
+            if m_key and hn_key:
+                household_sheets_by_muni_year_hn.setdefault(
+                    (m_key, int(s.census_year or 0), hn_key), []
+                ).append(s)
+
+    ov_stmt = select(CensusOverviewHouse)
+    if sheet_ids:
+        ov_stmt = ov_stmt.where(
+            (CensusOverviewHouse.census_sheet_id.in_(sheet_ids))
+            | (
+                CensusOverviewHouse.municipality.ilike(f"%{(municipality or '').strip()}%")
+                if municipality and municipality.strip()
+                else False
+            )
+        )
+    elif municipality and municipality.strip():
+        ov_stmt = ov_stmt.where(CensusOverviewHouse.municipality.ilike(f"%{municipality.strip()}%"))
+    if census_year:
+        ov_stmt = ov_stmt.where(CensusOverviewHouse.census_year == census_year)
+
+    ov_houses = list(session.exec(ov_stmt.order_by(CensusOverviewHouse.row_index.asc())).all())
+    if municipality and municipality.strip():
+        target_canon = canonical_municipality_key(municipality)
+        m_folded = fold_text_diacritics(municipality.strip())
+        exact_ov = [
+            ovh
+            for ovh in ov_houses
+            if canonical_municipality_key(ovh.municipality) == target_canon
+        ]
+        if exact_ov:
+            ov_houses = exact_ov
+        else:
+            ov_houses = [
+                ovh
+                for ovh in ov_houses
+                if m_folded in fold_text_diacritics(ovh.municipality or "")
+            ]
+
+    has_pn = bool(person_name and person_name.strip())
+    has_by = bool(birth_year and str(birth_year).strip())
+    has_bp = bool(birth_place and birth_place.strip())
+    has_q = bool(q and q.strip())
+
+    def _build_preview_for_facts(s_facts: list[PersonFact]) -> list[dict[str, Any]]:
+        previews: list[dict[str, Any]] = []
+        for pf in s_facts:
+            is_pf_match = False
+            pf_ocr = ov_row_ocr_by_id.get(pf.row_id)
+            if has_pn or has_by or has_bp:
+                is_pf_match = (
+                    (not has_pn or _fact_matches_person_name(pf, person_name, ocr_text=pf_ocr))
+                    and (not has_by or _fact_matches_birth_year(pf, birth_year))
+                    and (not has_bp or _fact_matches_birth_place(pf, birth_place))
+                )
+            elif has_q and q:
+                is_pf_match = (
+                    _fact_matches_person_name(pf, q, ocr_text=pf_ocr)
+                    or _fact_matches_birth_year(pf, q)
+                    or _fact_matches_birth_place(pf, q)
+                )
+            previews.append(_serialize_person_preview(pf, matched_filter=is_pf_match))
+        return previews
+
+    def _house_matches_filters(
+        entry: dict[str, Any],
+        s_facts: list[PersonFact],
+        ovh_obj: CensusOverviewHouse | None = None,
+    ) -> bool:
+        name_parts: list[str | None] = [
+            entry.get("owner_name"),
+            entry.get("head_name"),
+            entry.get("wife_name"),
+            entry.get("remarks"),
+        ]
+        if ovh_obj is not None:
+            name_parts.extend([ovh_obj.owner_name, ovh_obj.owner_surname_folded, ovh_obj.raw_ocr_text, ovh_obj.remarks])
+        hh_dict = entry.get("household")
+        if isinstance(hh_dict, dict):
+            name_parts.extend(
+                [
+                    hh_dict.get("head_of_household_name"),
+                    hh_dict.get("head_given_name"),
+                    hh_dict.get("head_surname"),
+                    hh_dict.get("wife_name"),
+                    hh_dict.get("wife_given_name"),
+                    hh_dict.get("wife_maiden_name"),
+                ]
+            )
+        if has_q and q:
+            q_val = q.strip()
+            q_folded = fold_text_diacritics(q_val)
+            meta_folded = fold_text_diacritics(
+                " ".join(
+                    str(x)
+                    for x in (
+                        entry.get("house_number"),
+                        entry.get("owner_name"),
+                        entry.get("head_name"),
+                        entry.get("wife_name"),
+                        entry.get("slovakiana_key"),
+                        entry.get("settlement_name"),
+                        entry.get("remarks"),
+                        ovh_obj.raw_ocr_text if ovh_obj else None,
+                    )
+                    if x
+                )
+            )
+            q_ok = (
+                (q_folded in meta_folded)
+                or _text_matches_person_name(name_parts, q_val)
+                or (ovh_obj is not None and _overview_house_matches_person_query(ovh_obj, q_val))
+                or any(
+                    _fact_matches_person_name(pf, q_val, ocr_text=ov_row_ocr_by_id.get(pf.row_id))
+                    or _fact_matches_birth_year(pf, q_val)
+                    or _fact_matches_birth_place(pf, q_val)
+                    for pf in s_facts
+                )
+            )
+            if not q_ok:
+                return False
+
+        if has_pn or has_by or has_bp:
+            fact_combined = any(
+                (not has_pn or _fact_matches_person_name(pf, person_name, ocr_text=ov_row_ocr_by_id.get(pf.row_id)))
+                and (not has_by or _fact_matches_birth_year(pf, birth_year))
+                and (not has_bp or _fact_matches_birth_place(pf, birth_place))
+                for pf in s_facts
+            )
+            header_match = (
+                has_pn
+                and (
+                    _text_matches_person_name(name_parts, person_name)
+                    or (ovh_obj is not None and _overview_house_matches_person_query(ovh_obj, person_name))
+                )
+                and (not has_by or any(_fact_matches_birth_year(pf, birth_year) for pf in s_facts))
+                and (not has_bp or any(_fact_matches_birth_place(pf, birth_place) for pf in s_facts))
+            )
+            if not (fact_combined or header_match):
+                return False
+        return True
+
+    houses_directory: list[dict[str, Any]] = []
+    covered_sheet_ids: set[int] = set()
+
+    for ovh in ov_houses:
+        hn_str = str(ovh.house_number or "").strip()
+        hn_key = normalize_house_number(hn_str)
+        ov_parent = sheets_by_id.get(ovh.census_sheet_id) or session.get(CensusSheet, ovh.census_sheet_id)
+        ov_muni_raw = ovh.municipality or (ov_parent.municipality if ov_parent else None)
+        ov_muni_key = canonical_municipality_key(ov_muni_raw)
+        ov_muni_display = canonical_municipality_display(ov_muni_raw) or ov_muni_raw
+
+        matched_sheet = household_sheets_by_id.get(ovh.matched_sheet_id or 0)
+        if matched_sheet is None and ovh.matched_sheet_id:
+            matched_sheet = session.get(CensusSheet, ovh.matched_sheet_id)
+
+        # Enforce strict programmatic same-village + same-year + same-house-number matching!
+        if matched_sheet is not None and not can_match_overview_house_to_sheet(
+            ovh, matched_sheet, overview_sheet=ov_parent
+        ):
+            matched_sheet = None
+
+        if matched_sheet is None and ov_muni_key and hn_key:
+            candidates = household_sheets_by_muni_year_hn.get(
+                (ov_muni_key, int(ovh.census_year or 0), hn_key), []
+            )
+            for cand in candidates:
+                if can_match_overview_house_to_sheet(ovh, cand, overview_sheet=ov_parent):
+                    matched_sheet = cand
+                    break
+
+        if matched_sheet and matched_sheet.id:
+            covered_sheet_ids.add(matched_sheet.id)
+
+        s_facts = facts_by_sheet.get(matched_sheet.id or 0, []) if matched_sheet else []
+        persons_preview = _build_preview_for_facts(s_facts)
+
+        hh = households_by_sheet.get(matched_sheet.id or 0) if matched_sheet else None
+        hh_ser = _serialize_household(hh) if hh else None
+        mem_cnt = len(s_facts) if matched_sheet else 0
+        head_name = (
+            ( f"{hh_ser.get('head_given_name') or ''} {hh_ser.get('head_surname') or ''}".strip() if hh_ser else None )
+            or (matched_sheet.household_owner if matched_sheet else None)
+        )
+        wife_name = (
+            f"{hh_ser.get('wife_given_name') or ''} {hh_ser.get('wife_maiden_surname') and ('rod. ' + hh_ser['wife_maiden_surname']) or ''}".strip()
+            if hh_ser and hh_ser.get("wife_given_name")
+            else None
+        )
+
+        linked_sheets = _find_linked_house_sheets(session, matched_sheet) if matched_sheet else []
+        matched_sheet_payload = _serialize_sheet(matched_sheet) if matched_sheet else None
+        if matched_sheet_payload is not None:
+            matched_sheet_payload["linked_house_sheets"] = linked_sheets
+            matched_sheet_payload["extracted_persons_preview"] = persons_preview
+            matched_sheet_payload["members_preview"] = persons_preview
+
+        entry_obj = {
+            "house_number": hn_str or str(ovh.ordinal_number or ""),
+            "house_number_int": ovh.house_number_int or (int(hn_key) if hn_key.isdigit() else 999999),
+            "ordinal_number": ovh.ordinal_number,
+            "municipality": ov_muni_display,
+            "settlement_name": canonical_municipality_display(ovh.settlement_name) or ovh.settlement_name or ov_muni_display,
+            "is_inhabited": ovh.is_inhabited,
+            "owner_name": ovh.owner_name,
+            "overview_house_id": ovh.id,
+            "overview_sheet_id": ovh.census_sheet_id,
+            "overview_household_count": ovh.household_count,
+            "overview_present_persons_count": ovh.present_persons_count,
+            "remarks": ovh.remarks,
+            "stitched_crop_path": ovh.stitched_crop_path,
+            "sheet_id": matched_sheet.id if matched_sheet else None,
+            "slovakiana_key": matched_sheet.slovakiana_key if matched_sheet else None,
+            "head_name": head_name or None,
+            "wife_name": wife_name or None,
+            "extracted_members_count": mem_cnt,
+            "extracted_members": persons_preview,
+            "extracted_persons_preview": persons_preview,
+            "members_preview": persons_preview,
+            "pipeline_status": matched_sheet.download_status if matched_sheet else "missing_sheet",
+            "sheet": matched_sheet_payload,
+            "household": hh_ser,
+            "linked_house_sheets": linked_sheets,
+        }
+        if _house_matches_filters(entry_obj, s_facts, ovh_obj=ovh):
+            houses_directory.append(entry_obj)
+
+    # Also add any household CensusSheets that weren't in the overview table yet
+    for s in sheets:
+        eff_type = s.sheet_type or "household"
+        if eff_type == "overview" or (s.id and s.id in covered_sheet_ids):
+            continue
+        hn_str = str(s.house_number or "").strip()
+        hn_int = int(hn_str) if hn_str.isdigit() else 999999
+        s_facts = facts_by_sheet.get(s.id or 0, [])
+        persons_preview = _build_preview_for_facts(s_facts)
+        hh = households_by_sheet.get(s.id or 0)
+        hh_ser = _serialize_household(hh) if hh else None
+        mem_cnt = len(s_facts)
+        head_name = (
+            (f"{hh_ser.get('head_given_name') or ''} {hh_ser.get('head_surname') or ''}".strip() if hh_ser else None)
+            or s.household_owner
+        )
+        wife_name = (
+            f"{hh_ser.get('wife_given_name') or ''} {hh_ser.get('wife_maiden_surname') and ('rod. ' + hh_ser['wife_maiden_surname']) or ''}".strip()
+            if hh_ser and hh_ser.get("wife_given_name")
+            else None
+        )
+        linked_sheets = _find_linked_house_sheets(session, s)
+        s_payload = _serialize_sheet(s)
+        s_payload["linked_house_sheets"] = linked_sheets
+        s_payload["extracted_persons_preview"] = persons_preview
+        s_payload["members_preview"] = persons_preview
+        s_muni_display = canonical_municipality_display(s.municipality) or s.municipality
+        entry_obj = {
+            "house_number": hn_str or "?",
+            "house_number_int": hn_int,
+            "ordinal_number": None,
+            "municipality": s_muni_display,
+            "settlement_name": canonical_municipality_display(s.street_raw) or s.street_raw or s_muni_display,
+            "is_inhabited": True,
+            "owner_name": head_name,
+            "overview_house_id": None,
+            "overview_sheet_id": None,
+            "overview_household_count": 1 if mem_cnt > 0 else None,
+            "overview_present_persons_count": mem_cnt if mem_cnt > 0 else None,
+            "remarks": None,
+            "stitched_crop_path": None,
+            "sheet_id": s.id,
+            "slovakiana_key": s.slovakiana_key,
+            "head_name": head_name or None,
+            "wife_name": wife_name or None,
+            "extracted_members_count": mem_cnt,
+            "extracted_members": persons_preview,
+            "extracted_persons_preview": persons_preview,
+            "members_preview": persons_preview,
+            "pipeline_status": s.download_status,
+            "sheet": s_payload,
+            "household": hh_ser,
+            "linked_house_sheets": linked_sheets,
+        }
+        if _house_matches_filters(entry_obj, s_facts):
+            houses_directory.append(entry_obj)
+
+    houses_directory.sort(key=lambda item: (item["house_number_int"], str(item["house_number"])))
+
+    raw_muni = (sheets[0].municipality if sheets else None) or municipality
+    resolved_muni = canonical_municipality_display(raw_muni) or raw_muni
+    resolved_dist = (sheets[0].district if sheets else None) or district
+    resolved_year = (sheets[0].census_year if sheets else None) or census_year or 1930
+
+    return {
+        "municipality": resolved_muni,
+        "district": resolved_dist,
+        "census_year": resolved_year,
+        "overview_sheets": overview_sheets,
+        "houses_directory": houses_directory,
+        "total_houses": len(houses_directory),
+    }
+
+
+municipality_overview = get_municipality_overview
+
+
+@router.get("/overview-houses")
+def list_overview_houses(
+    session: SessionDep,
+    municipality: str | None = None,
+    census_year: int | None = None,
+    district: str | None = None,
+    person_name: str | None = None,
+    person_query: str | None = None,
+    owner_query: str | None = None,
+    q: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    stmt = select(CensusOverviewHouse).order_by(CensusOverviewHouse.row_index.asc())
+    if census_year:
+        stmt = stmt.where(CensusOverviewHouse.census_year == census_year)
+    houses = list(session.exec(stmt).all())
+    if municipality and municipality.strip():
+        target_canon = canonical_municipality_key(municipality)
+        m_fold = fold_text_diacritics(municipality.strip())
+        houses = [
+            h
+            for h in houses
+            if canonical_municipality_key(h.municipality) == target_canon
+            or m_fold in fold_text_diacritics(h.municipality or "")
+        ]
+    if district and district.strip():
+        d_fold = fold_text_diacritics(district.strip())
+        houses = [h for h in houses if d_fold in fold_text_diacritics(h.district or "")]
+
+    eff_query = person_name or person_query or owner_query or q
+    if eff_query and eff_query.strip():
+        q_val = eff_query.strip()
+        q_fold = fold_text_diacritics(q_val)
+        houses = [
+            h
+            for h in houses
+            if _overview_house_matches_person_query(h, q_val)
+            or q_fold in fold_text_diacritics(f"{h.house_number or ''} {h.settlement_name or ''} {h.remarks or ''}")
+        ]
+
+    total = len(houses)
+    paged = houses[offset : offset + limit]
+    candidate_sheets: list[CensusSheet] | None = None
+    if paged:
+        candidate_sheets = list(
+            session.exec(
+                select(CensusSheet).where(
+                    CensusSheet.house_number.is_not(None),
+                    CensusSheet.sheet_type != "overview",
+                )
+            ).all()
+        )
+    return {
+        "total": total,
+        "overview_houses": [
+            _serialize_overview_house(session, h, candidate_sheets=candidate_sheets)
+            for h in paged
+        ],
+    }
+
+
+@router.get("/municipalities-summary")
+def get_municipalities_summary(
+    session: SessionDep,
+    census_year: int | None = None,
+    district: str | None = None,
+) -> dict[str, Any]:
+    """
+    Returns a summary of municipalities in the local DB (total sheets, OCR-done sheets,
+    overview sheets count, extracted persons count, and overview houses count) to power
+    the Left Sidebar in CensusHub.tsx.
+    """
+    stmt = select(CensusSheet)
+    if census_year:
+        stmt = stmt.where(CensusSheet.census_year == census_year)
+
+    sheets = list(session.exec(stmt).all())
+    if district and district.strip():
+        sheets = [s for s in sheets if _sheet_matches_district(s, district, municipality_specified=False)]
+    ov_houses_all = list(session.exec(select(CensusOverviewHouse)).all())
+    ov_count_by_muni_key: dict[str, int] = {}
+    for ovh in ov_houses_all:
+        if census_year and ovh.census_year != census_year:
+            continue
+        m_key = canonical_municipality_key(ovh.municipality) or "neznama obec"
+        ov_count_by_muni_key[m_key] = ov_count_by_muni_key.get(m_key, 0) + 1
+
+    person_counts_by_sheet: dict[int, int] = {}
+    for row_sid, cnt in session.exec(
+        select(PersonFact.census_sheet_id, func.count(PersonFact.id))
+        .where(PersonFact.record_type == "census")
+        .group_by(PersonFact.census_sheet_id)
+    ).all():
+        if row_sid:
+            person_counts_by_sheet[row_sid] = int(cnt)
+
+    by_muni: dict[tuple[str, str], dict[str, Any]] = {}
+    for s in sheets:
+        m_display = canonical_municipality_display(s.municipality) or s.municipality or "Neznáma obec"
+        m_canon = canonical_municipality_key(m_display) or "neznama obec"
+        d_name = s.district or ""
+        key = (m_canon, canonical_municipality_key(d_name))
+        entry = by_muni.get(key)
+        if not entry:
+            entry = {
+                "municipality": m_display,
+                "municipality_key": s.municipality_key,
+                "district": d_name,
+                "district_key": s.district_key,
+                "total_sheets": 0,
+                "downloaded_sheets": 0,
+                "ocr_done_sheets": 0,
+                "overview_sheets_count": 0,
+                "overview_houses_count": ov_count_by_muni_key.get(m_canon, 0),
+                "extracted_persons_count": 0,
+                "years": set(),
+            }
+            by_muni[key] = entry
+        elif not entry.get("municipality_key") and s.municipality_key:
+            entry["municipality_key"] = s.municipality_key
+        if not entry.get("district_key") and s.district_key:
+            entry["district_key"] = s.district_key
+
+        entry["total_sheets"] += 1
+        entry["years"].add(s.census_year)
+        if s.download_status in ("downloaded", "sliced", "ocr_done", "extracted", "matched"):
+            entry["downloaded_sheets"] += 1
+        if s.download_status in ("ocr_done", "extracted", "matched"):
+            entry["ocr_done_sheets"] += 1
+        if s.sheet_type == "overview":
+            entry["overview_sheets_count"] += 1
+        if s.id:
+            entry["extracted_persons_count"] += person_counts_by_sheet.get(s.id, 0)
+
+    municipalities_list: list[dict[str, Any]] = []
+    for entry in by_muni.values():
+        entry["years"] = sorted(list(entry["years"]))
+        municipalities_list.append(entry)
+
+    municipalities_list.sort(
+        key=lambda x: (-x["ocr_done_sheets"], -x["total_sheets"], x["municipality"])
+    )
+
+    return {
+        "municipalities": municipalities_list,
+        "total_municipalities": len(municipalities_list),
+    }

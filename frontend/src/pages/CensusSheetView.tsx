@@ -1,0 +1,4223 @@
+import React, { useEffect, useState } from "react";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import {
+  AlertCircle,
+  ArrowLeft,
+  Building2,
+  CheckCircle2,
+  Download,
+  Edit3,
+  ExternalLink,
+  Eye,
+  FileSpreadsheet,
+  Home,
+  Layers,
+  MapPin,
+  Plus,
+  RefreshCw,
+  Save,
+  Scale,
+  Sparkles,
+  Trash2,
+  UserCheck,
+  Users,
+  X,
+} from "lucide-react";
+import ZoomableScanViewer, { HoverZoomRowCrop } from "../components/ZoomableScanViewer";
+import { useFeatureFlags } from "../featureFlags";
+import type { CensusSheetDetail, LinkedHouseSheet } from "../api";
+import { matchesPersonNameQuery, stripFemSuffix } from "../utils/fuzzyName";
+
+export interface RelationPresetGroup {
+  groupLabel: string;
+  options: Array<{ value: string; label: string }>;
+}
+
+export const RELATION_TO_HEAD_GROUPS: RelationPresetGroup[] = [
+  {
+    groupLabel: "Hlava domácnosti a partneri",
+    options: [
+      { value: "hlava domácnosti", label: "hlava domácnosti (Hlava domácnosti / Majiteľ bytu)" },
+      { value: "manželka", label: "manželka" },
+      { value: "manžel", label: "manžel" },
+      { value: "družka", label: "družka" },
+      { value: "druh", label: "druh" },
+    ],
+  },
+  {
+    groupLabel: "Deti a chovanci",
+    options: [
+      { value: "syn", label: "syn" },
+      { value: "dcéra", label: "dcéra" },
+      { value: "nevlastný syn", label: "nevlastný syn" },
+      { value: "nevlastná dcéra", label: "nevlastná dcéra" },
+      { value: "adoptívny syn", label: "adoptívny syn" },
+      { value: "adoptívna dcéra", label: "adoptívna dcéra" },
+      { value: "chovanec", label: "chovanec" },
+      { value: "chovanka", label: "chovanka" },
+    ],
+  },
+  {
+    groupLabel: "Rodičia, svokrovci, zať a nevesta",
+    options: [
+      { value: "matka", label: "matka" },
+      { value: "otec", label: "otec" },
+      { value: "svokra", label: "svokra" },
+      { value: "svokor", label: "svokor" },
+      { value: "svatka", label: "svatka" },
+      { value: "svat", label: "svat" },
+      { value: "zať", label: "zať" },
+      { value: "nevesta", label: "nevesta" },
+    ],
+  },
+  {
+    groupLabel: "Vnuci a starí rodičia",
+    options: [
+      { value: "vnuk", label: "vnuk" },
+      { value: "vnučka", label: "vnučka" },
+      { value: "pravnuk", label: "pravnuk" },
+      { value: "pravnučka", label: "pravnučka" },
+      { value: "stará matka", label: "stará matka" },
+      { value: "starý otec", label: "starý otec" },
+    ],
+  },
+  {
+    groupLabel: "Súrodenci a širšia rodina",
+    options: [
+      { value: "brat", label: "brat" },
+      { value: "sestra", label: "sestra" },
+      { value: "nevlastný brat", label: "nevlastný brat" },
+      { value: "nevlastná sestra", label: "nevlastná sestra" },
+      { value: "švagor", label: "švagor" },
+      { value: "švagriná", label: "švagriná" },
+      { value: "strýko", label: "strýko" },
+      { value: "stryná", label: "stryná" },
+      { value: "ujo", label: "ujo" },
+      { value: "teta", label: "teta" },
+      { value: "synovec", label: "synovec" },
+      { value: "neter", label: "neter" },
+      { value: "bratranec", label: "bratranec" },
+      { value: "sesternica", label: "sesternica" },
+      { value: "príbuzný", label: "príbuzný" },
+      { value: "príbuzná", label: "príbuzná" },
+    ],
+  },
+  {
+    groupLabel: "Služobníctvo, čeľaď a pomocníci",
+    options: [
+      { value: "slúžka", label: "slúžka" },
+      { value: "sluha", label: "sluha" },
+      { value: "čeľadník", label: "čeľadník" },
+      { value: "paholok", label: "paholok" },
+      { value: "gazdiná", label: "gazdiná" },
+      { value: "pestúnka", label: "pestúnka" },
+      { value: "učeník", label: "učeník" },
+      { value: "tovariš", label: "tovariš" },
+      { value: "pomocník", label: "pomocník" },
+    ],
+  },
+  {
+    groupLabel: "Podnájomníci a hostia",
+    options: [
+      { value: "podnájomník", label: "podnájomník" },
+      { value: "podnájomníčka", label: "podnájomníčka" },
+      { value: "bývajúci", label: "bývajúci" },
+      { value: "hosť", label: "hosť" },
+    ],
+  },
+];
+
+export const ALL_RELATION_TO_HEAD_OPTIONS: Array<{ value: string; label: string }> =
+  RELATION_TO_HEAD_GROUPS.flatMap((g) => g.options);
+
+export const QUICK_RELATION_PILLS: string[] = [
+  "hlava domácnosti",
+  "manželka",
+  "syn",
+  "dcéra",
+  "matka",
+  "otec",
+  "svokra",
+  "svokor",
+  "zať",
+  "nevesta",
+  "vnuk",
+  "vnučka",
+  "brat",
+  "sestra",
+  "švagor",
+  "švagriná",
+  "slúžka",
+  "sluha",
+  "podnájomník",
+  "hosť",
+];
+
+const ROMAN_NUMERALS = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
+
+function toRomanBytLabel(indexOrRaw: number | string | null | undefined): string {
+  if (typeof indexOrRaw === "string" && indexOrRaw.trim()) {
+    const cleaned = indexOrRaw
+      .trim()
+      .replace(/^byt\s*(č\.?|c\.?)?\s*/i, "")
+      .replace(/\.$/, "")
+      .trim();
+    const asNum = Number(cleaned);
+    if (!Number.isNaN(asNum) && asNum >= 1 && asNum <= ROMAN_NUMERALS.length) {
+      return ROMAN_NUMERALS[asNum - 1];
+    }
+    if (/^[IVX]+$/i.test(cleaned)) {
+      return cleaned.toUpperCase();
+    }
+    return cleaned;
+  }
+  if (typeof indexOrRaw === "number" && indexOrRaw >= 1) {
+    return ROMAN_NUMERALS[indexOrRaw - 1] || String(indexOrRaw);
+  }
+  return "I";
+}
+
+function isHeadOfHouseholdRelation(rel: string | null | undefined): boolean {
+  if (!rel) return false;
+  const low = rel.trim().toLowerCase();
+  return (
+    low === "hlava domácnosti" ||
+    low === "hlava domacnosti" ||
+    low === "hlava" ||
+    low === "majiteľ bytu" ||
+    low === "majitel bytu" ||
+    low === "majiteľ domu" ||
+    low === "majitel domu" ||
+    low === "prednosta domácnosti" ||
+    low.includes("hlava domácnosti") ||
+    low.includes("majiteľ bytu")
+  );
+}
+
+function stripFeminineSurnameSuffixClient(surname: string | null | undefined): string {
+  return surname ? stripFemSuffix(surname) : "";
+}
+
+function formatConsensusSurnameForMemberClient(
+  consensusSurname: string,
+  sex: string | null | undefined,
+  currentSurnameRaw: string | null | undefined
+): string {
+  const c = consensusSurname.trim().replace(/-+$/, "");
+  if (!c) return consensusSurname;
+  const cur = (currentSurnameRaw || "").trim();
+  const curLow = cur.toLowerCase();
+  const cLow = c.toLowerCase();
+  const isFem = sex === "F" || curLow.endsWith("ová") || curLow.endsWith("ova") || curLow.endsWith("á");
+  if (!isFem) return c;
+
+  // Adjectival surnames (-ský, -cký, -ý, -í) -> feminine is -ská, -cká, -á (NEVER -ová!)
+  if (cLow.endsWith("ský") || cLow.endsWith("sky")) {
+    return c.slice(0, -3) + "ská";
+  }
+  if (cLow.endsWith("cký") || cLow.endsWith("cky")) {
+    return c.slice(0, -3) + "cká";
+  }
+  if (cLow.endsWith("ý") || cLow.endsWith("í")) {
+    return c.slice(0, -1) + "á";
+  }
+  if (cLow.endsWith("ová") || cLow.endsWith("ova") || cLow.endsWith("á")) {
+    return c;
+  }
+  // Only add -ová if the member's surname already used -ová/-ova
+  if (curLow.endsWith("ová") || curLow.endsWith("ova")) {
+    if ((cLow.endsWith("a") || cLow.endsWith("o")) && c.length >= 4) {
+      return c.slice(0, -1) + "ová";
+    }
+    return `${c}ová`;
+  }
+  return c;
+}
+
+function levenshteinDistance(a: string, b: string): number {
+  const s = a.toLowerCase();
+  const t = b.toLowerCase();
+  if (s === t) return 0;
+  const m = s.length;
+  const n = t.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[m][n];
+}
+
+interface ScanRowRecord {
+  id: number;
+  scan_id: number;
+  row_index: number;
+  entry_number?: string | null;
+  y_start: number;
+  y_end: number;
+  stitched_crop_path: string | null;
+  left_crop_path?: string | null;
+  right_crop_path?: string | null;
+  status?: string;
+  page_side?: string | null;
+  page_number?: number | null;
+}
+
+interface CensusPersonMember {
+  fact: {
+    id: number;
+    row_id: number;
+    scan_id: number;
+    person_row_number: number | string | null;
+    surname_raw: string | null;
+    surname_normalized: string | null;
+    mother_maiden_surname: string | null;
+    given_name_raw: string | null;
+    given_name_sk: string | null;
+    relation_to_head: string | null;
+    sex: string | null;
+    birth_or_event_date: string | null;
+    birth_year_est: number | null;
+    marital_status: string | null;
+    marriage_date_raw: string | null;
+    marriage_date?: string | null;
+    children_born_count: number | string | null;
+    children_dead_count: number | string | null;
+    children_deceased_count?: number | string | null;
+    birth_place_raw: string | null;
+    birth_place_sk: string | null;
+    birth_place_municipality?: string | null;
+    birth_place_district?: string | null;
+    birth_place_country?: string | null;
+    citizenship?: string | null;
+    moved_in_date: string | null;
+    previous_residence: string | null;
+    home_jurisdiction: string | null;
+    nationality: string | null;
+    religion: string | null;
+    literacy: string | null;
+    social_status_or_occupation: string | null;
+    occupation_position: string | null;
+    employer_workplace: string | null;
+    presence_type: string | null;
+    presence_status?: string | null;
+    observationes_raw: string | null;
+    father_name: string | null;
+    mother_name: string | null;
+    spouse_name: string | null;
+    census_household_id?: number | null;
+    household_id?: number | null;
+    dwelling_unit?: string | null;
+    byt_number?: string | null;
+    apartment_number?: string | null;
+    surname_ocr_raw?: string | null;
+    original_ocr_surname?: string | null;
+    surname_consensus_from?: string | null;
+    surname_candidates_json?: string | null;
+  };
+  household_id?: number | null;
+  dwelling_unit?: string | null;
+  row?: ScanRowRecord | null;
+  stitched_crop_url: string | null;
+  cell_crops: Record<string, string>;
+  fs_match: {
+    id: number;
+    match_status: string;
+    fs_url: string | null;
+    confidence_score: number;
+    summary_sk: string | null;
+  } | null;
+  local_matches: Array<{
+    match: {
+      id: number;
+      match_type: string;
+      confidence_score: number;
+      explanation_sk: string;
+    };
+    matrika_fact: {
+      id: number;
+      record_type: string;
+      event_year: number | null;
+      birth_or_event_date: string | null;
+      given_name_raw: string | null;
+      surname_raw: string | null;
+      father_name: string | null;
+      mother_name: string | null;
+    } | null;
+  }>;
+}
+
+export interface CensusOverviewHouseRow {
+  id: number;
+  census_sheet_id: number;
+  scan_id?: number | null;
+  row_id?: number | null;
+  page_side?: string | null;
+  page_number?: number | null;
+  booklet_page?: number | null;
+  page_half?: string | null;
+  header_crop_url?: string | null;
+  row_index: number;
+  census_year: number;
+  district: string | null;
+  municipality: string;
+  obvod_number: string | null;
+  ordinal_number: string | number | null;
+  settlement_name: string | null;
+  house_number: string | null;
+  house_number_int?: number | null;
+  is_inhabited: boolean | null;
+  owner_name: string | null;
+  household_count: number | null;
+  present_persons_count: number | null;
+  remarks: string | null;
+  matched_sheet_id: number | null;
+  matched_slovakiana_key?: string | null;
+  matched_cair_id?: string | null;
+  matched_head_name?: string | null;
+  matched_members_count?: number;
+  matched_sheet?: LinkedHouseSheet | null;
+  matched_sheets?: LinkedHouseSheet[];
+  overview_slovakiana_key?: string | null;
+  stitched_crop_path: string | null;
+  raw_ocr_text?: string | null;
+  confidence?: number;
+  y_start?: number | null;
+  y_end?: number | null;
+}
+
+interface ScanDetailInfo {
+  id: number;
+  filename: string;
+  image_url?: string | null;
+  original_url?: string | null;
+  overlay_path: string | null;
+  header_crop_path?: string | null;
+  header_crop_url?: string | null;
+  width?: number;
+  height?: number;
+  page_side?: string | null;
+}
+
+interface SheetPageInfo {
+  page_number: number;
+  page_side: string;
+  label: string;
+  scan_id: number | null;
+  scan_url: string | null;
+  overlay_url: string | null;
+  header_crop_url: string | null;
+  width?: number;
+  height?: number;
+}
+
+interface SheetDetailResponse {
+  sheet: CensusSheetDetail;
+  front_scan: ScanDetailInfo | null;
+  back_scan: ScanDetailInfo | null;
+  front_scan_url?: string | null;
+  front_overlay_url?: string | null;
+  back_scan_url?: string | null;
+  back_overlay_url?: string | null;
+  pages?: SheetPageInfo[];
+  household: {
+    id: number;
+    apartment_number?: string | null;
+    dwelling_unit?: string | null;
+    byt_label?: string | null;
+    head_surname: string | null;
+    head_given_name: string | null;
+    head_name?: string | null;
+    wife_given_name: string | null;
+    wife_maiden_surname: string | null;
+    wife_name?: string | null;
+    consensus_surname?: string | null;
+    member_count: number;
+  } | null;
+  households?: Array<{
+    id?: number;
+    apartment_number?: string | null;
+    dwelling_unit?: string | null;
+    byt_label?: string | null;
+    head_surname?: string | null;
+    head_given_name?: string | null;
+    head_name?: string | null;
+    wife_given_name?: string | null;
+    wife_maiden_surname?: string | null;
+    wife_name?: string | null;
+    consensus_surname?: string | null;
+    member_count?: number;
+  }>;
+  members: CensusPersonMember[];
+  rows?: ScanRowRecord[];
+  overview_houses?: CensusOverviewHouseRow[];
+  linked_overview_house?: CensusOverviewHouseRow | null;
+  linked_house_sheets?: LinkedHouseSheet[];
+  same_year_house_sheets?: LinkedHouseSheet[];
+}
+
+interface Props {
+  lang: "sk" | "en";
+  refreshStatus: () => void;
+}
+
+export interface BytSummaryGroup {
+  bytIndex: number;
+  bytRoman: string;
+  bytLabel: string; // e.g. "Byt č. I"
+  householdId: number | null;
+  headFullName: string;
+  headGivenName: string | null;
+  headSurname: string | null;
+  wifeFullName: string | null;
+  wifeGivenName: string | null;
+  wifeMaidenSurname: string | null;
+  consensusSurname: string | null;
+  memberCount: number;
+  members: CensusPersonMember[];
+}
+
+function parseExplicitBytFromObservationes(obs: string | null | undefined): string | null {
+  if (!obs) return null;
+  const m = obs.match(/\bByt\s*(?:č\.?|c\.?)?\s*([IVX0-9]+)\b/i);
+  if (m && m[1]) {
+    return toRomanBytLabel(m[1]);
+  }
+  return null;
+}
+
+function getExplicitMemberBytRoman(m: CensusPersonMember): string | null {
+  const f = m.fact;
+  const raw =
+    m.dwelling_unit ||
+    f.dwelling_unit ||
+    f.byt_number ||
+    f.apartment_number ||
+    parseExplicitBytFromObservationes(f.observationes_raw);
+  if (raw && String(raw).trim()) {
+    return toRomanBytLabel(String(raw));
+  }
+  return null;
+}
+
+function computeBytConsensusSurname(
+  groupMembers: CensusPersonMember[],
+  fallbackHeadSurname: string | null
+): string | null {
+  const counts = new Map<string, { count: number; display: string }>();
+  for (const m of groupMembers) {
+    const raw = m.fact.surname_normalized || m.fact.surname_raw;
+    const stem = stripFeminineSurnameSuffixClient(raw);
+    if (!stem || stem === "—") continue;
+    const key = stem.toLowerCase();
+    const prev = counts.get(key);
+    const weight = isHeadOfHouseholdRelation(m.fact.relation_to_head) ? 2 : 1;
+    if (prev) {
+      prev.count += weight;
+    } else {
+      counts.set(key, { count: weight, display: stem });
+    }
+  }
+  let best: { count: number; display: string } | null = null;
+  for (const entry of counts.values()) {
+    if (!best || entry.count > best.count) {
+      best = entry;
+    }
+  }
+  if (best) return best.display;
+  return stripFeminineSurnameSuffixClient(fallbackHeadSurname) || fallbackHeadSurname || null;
+}
+
+function detectSurnameConsensusUnification(
+  m: CensusPersonMember,
+  bytConsensusSurname: string | null,
+  enableConsensus: boolean
+): {
+  wasUnified: boolean;
+  fromRaw: string | null;
+  toConsensus: string | null;
+} {
+  if (!enableConsensus) {
+    return { wasUnified: false, fromRaw: null, toConsensus: null };
+  }
+  const f = m.fact;
+  let explicitFrom =
+    f.surname_consensus_from || f.original_ocr_surname || f.surname_ocr_raw || null;
+  if (!explicitFrom && f.surname_candidates_json) {
+    try {
+      const parsed = JSON.parse(f.surname_candidates_json);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const firstRaw = parsed[0]?.raw_ocr;
+        if (typeof firstRaw === "string" && firstRaw.trim()) {
+          explicitFrom = firstRaw.trim();
+        }
+      }
+    } catch {
+      // ignore invalid JSON
+    }
+  }
+  if (
+    explicitFrom &&
+    f.surname_raw &&
+    explicitFrom.trim().toLowerCase() !== f.surname_raw.trim().toLowerCase()
+  ) {
+    return {
+      wasUnified: true,
+      fromRaw: explicitFrom.trim(),
+      toConsensus: f.surname_raw.trim(),
+    };
+  }
+
+  return { wasUnified: false, fromRaw: null, toConsensus: null };
+}
+
+function buildBytGroups(
+  detail: SheetDetailResponse,
+  multiBytEnabled: boolean
+): {
+  groups: BytSummaryGroup[];
+  memberBytMap: Map<number, BytSummaryGroup>;
+} {
+  const members = detail.members || [];
+  if (members.length === 0) {
+    return { groups: [], memberBytMap: new Map<number, BytSummaryGroup>() };
+  }
+  const rawHouseholds =
+    detail.households && detail.households.length > 0
+      ? detail.households
+      : detail.household
+      ? [detail.household]
+      : [];
+
+  if (!multiBytEnabled) {
+    const singleMembers = members;
+    const headM =
+      singleMembers.find((m) => isHeadOfHouseholdRelation(m.fact.relation_to_head)) ||
+      singleMembers[0] ||
+      null;
+    const wifeM =
+      singleMembers.find((m) => {
+        const r = (m.fact.relation_to_head || "").toLowerCase();
+        return r === "manželka" || r === "družka";
+      }) || null;
+    const headGiven =
+      detail.household?.head_given_name ||
+      headM?.fact.given_name_sk ||
+      headM?.fact.given_name_raw ||
+      null;
+    const headSurname =
+      detail.household?.head_surname || headM?.fact.surname_raw || null;
+    const wifeGiven =
+      detail.household?.wife_given_name ||
+      wifeM?.fact.given_name_sk ||
+      wifeM?.fact.given_name_raw ||
+      null;
+    const wifeMaiden =
+      detail.household?.wife_maiden_surname ||
+      wifeM?.fact.mother_maiden_surname ||
+      null;
+    const consensus =
+      detail.household?.consensus_surname ||
+      computeBytConsensusSurname(singleMembers, headSurname);
+    const singleGroup: BytSummaryGroup = {
+      bytIndex: 1,
+      bytRoman: "I",
+      bytLabel: "Byt č. I",
+      householdId: detail.household?.id ?? null,
+      headFullName:
+        `${headGiven || ""} ${headSurname || ""}`.trim() || "Neznáma hlava domácnosti",
+      headGivenName: headGiven,
+      headSurname,
+      wifeFullName: wifeGiven
+        ? `${wifeGiven}${wifeMaiden ? ` (rod. ${wifeMaiden})` : ""}`
+        : null,
+      wifeGivenName: wifeGiven,
+      wifeMaidenSurname: wifeMaiden,
+      consensusSurname: consensus,
+      memberCount: singleMembers.length,
+      members: singleMembers,
+    };
+    const map = new Map<number, BytSummaryGroup>();
+    for (const m of singleMembers) {
+      map.set(m.fact.id, singleGroup);
+    }
+    return { groups: [singleGroup], memberBytMap: map };
+  }
+
+  // Partition members into Byty by:
+  // 1) explicit dwelling_unit / apartment_number / Byt tag in observationes, OR
+  // 2) distinct household_id / census_household_id when multiple exist, OR
+  // 3) sequential boundaries starting at each `hlava domácnosti` (or person_row_number === 1 after row 1)
+  const buckets = new Map<string, CensusPersonMember[]>();
+  const bucketOrder: string[] = [];
+
+  const distinctHhIds = new Set<number>();
+  for (const m of members) {
+    const hid = m.household_id ?? m.fact.household_id ?? m.fact.census_household_id;
+    if (typeof hid === "number" && hid > 0) {
+      distinctHhIds.add(hid);
+    }
+  }
+  const hasMultipleHhIds = distinctHhIds.size > 1;
+  const hasExplicitDwellingUnits = members.some((m) => Boolean(getExplicitMemberBytRoman(m)));
+
+    let currentSequentialByt = 1;
+  members.forEach((m, idx) => {
+    let key: string;
+    const explicitRoman = getExplicitMemberBytRoman(m);
+    if (explicitRoman) {
+      key = explicitRoman;
+    } else if (hasMultipleHhIds) {
+      const hid = m.household_id ?? m.fact.household_id ?? m.fact.census_household_id;
+      key = hid ? `HH_${hid}` : "I";
+    } else {
+      const isHead = isHeadOfHouseholdRelation(m.fact.relation_to_head);
+      const rowNum = Number(m.fact.person_row_number);
+      const obsTag = parseExplicitBytFromObservationes(m.fact.observationes_raw);
+      const prevSurname = idx > 0 ? stripFeminineSurnameSuffixClient(members[idx - 1].fact.surname_raw) : "";
+      const curSurname = stripFeminineSurnameSuffixClient(m.fact.surname_raw);
+      const sameFamily =
+        Boolean(prevSurname && curSurname) &&
+        (prevSurname.toLowerCase() === curSurname.toLowerCase() ||
+          levenshteinDistance(prevSurname, curSurname) <= 2);
+      if (
+        idx > 0 &&
+        !sameFamily &&
+        (Boolean(obsTag && obsTag !== "I") ||
+          rowNum === 1 ||
+          (isHead && !hasExplicitDwellingUnits && rowNum === 1))
+      ) {
+        currentSequentialByt += 1;
+      }
+      key = toRomanBytLabel(currentSequentialByt);
+    }
+    if (!buckets.has(key)) {
+      buckets.set(key, []);
+      bucketOrder.push(key);
+    }
+    buckets.get(key)!.push(m);
+  });
+
+  // If backend returned more households in `data.households` than buckets detected, ensure all are represented
+  if (rawHouseholds.length > bucketOrder.length && bucketOrder.length <= 1) {
+    const groups: BytSummaryGroup[] = rawHouseholds.map((hh, i) => {
+      const roman = toRomanBytLabel(hh.dwelling_unit || hh.apartment_number || i + 1);
+      const hhMembers = members.filter((m) => {
+        const hid = m.household_id ?? m.fact.household_id ?? m.fact.census_household_id;
+        return hh.id && hid === hh.id;
+      });
+      const assignedMembers = hhMembers.length > 0 ? hhMembers : i === 0 ? members : [];
+      const headGiven = hh.head_given_name || null;
+      const headSurname = hh.head_surname || null;
+      const wifeGiven = hh.wife_given_name || null;
+      const wifeMaiden = hh.wife_maiden_surname || null;
+      const consensus =
+        hh.consensus_surname || computeBytConsensusSurname(assignedMembers, headSurname);
+      return {
+        bytIndex: i + 1,
+        bytRoman: roman,
+        bytLabel: `Byt č. ${roman}`,
+        householdId: hh.id ?? null,
+        headFullName:
+          hh.head_name ||
+          `${headGiven || ""} ${headSurname || ""}`.trim() ||
+          "Neznáma hlava domácnosti",
+        headGivenName: headGiven,
+        headSurname,
+        wifeFullName:
+          hh.wife_name ||
+          (wifeGiven ? `${wifeGiven}${wifeMaiden ? ` (rod. ${wifeMaiden})` : ""}` : null),
+        wifeGivenName: wifeGiven,
+        wifeMaidenSurname: wifeMaiden,
+        consensusSurname: consensus,
+        memberCount: hh.member_count ?? assignedMembers.length,
+        members: assignedMembers,
+      };
+    });
+    const map = new Map<number, BytSummaryGroup>();
+    for (const g of groups) {
+      for (const m of g.members) {
+        map.set(m.fact.id, g);
+      }
+    }
+    return { groups, memberBytMap: map };
+  }
+
+  const groups: BytSummaryGroup[] = bucketOrder.map((key, idx) => {
+    const groupMembers = buckets.get(key) || [];
+    const matchedHh =
+      rawHouseholds.find((hh) => {
+        if (key.startsWith("HH_") && hh.id === Number(key.slice(3))) return true;
+        const hhRoman = toRomanBytLabel(hh.dwelling_unit || hh.apartment_number);
+        return hhRoman === key;
+      }) || (idx === 0 ? rawHouseholds[0] : rawHouseholds[idx]);
+
+    const roman = key.startsWith("HH_") ? toRomanBytLabel(idx + 1) : toRomanBytLabel(key);
+    const headM =
+      groupMembers.find((m) => isHeadOfHouseholdRelation(m.fact.relation_to_head)) ||
+      groupMembers[0] ||
+      null;
+    const wifeM =
+      groupMembers.find((m) => {
+        const r = (m.fact.relation_to_head || "").toLowerCase();
+        return r === "manželka" || r === "družka";
+      }) || null;
+
+    const headGiven =
+      headM?.fact.given_name_sk ||
+      headM?.fact.given_name_raw ||
+      matchedHh?.head_given_name ||
+      null;
+    const headSurname =
+      headM?.fact.surname_raw || matchedHh?.head_surname || null;
+    const wifeGiven =
+      wifeM?.fact.given_name_sk ||
+      wifeM?.fact.given_name_raw ||
+      matchedHh?.wife_given_name ||
+      null;
+    const wifeMaiden =
+      wifeM?.fact.mother_maiden_surname || matchedHh?.wife_maiden_surname || null;
+    const consensus =
+      matchedHh?.consensus_surname ||
+      computeBytConsensusSurname(groupMembers, headSurname);
+
+    return {
+      bytIndex: idx + 1,
+      bytRoman: roman,
+      bytLabel: `Byt č. ${roman}`,
+      householdId: matchedHh?.id ?? null,
+      headFullName:
+        `${headGiven || ""} ${headSurname || ""}`.trim() ||
+        matchedHh?.head_name ||
+        "Neznáma hlava domácnosti",
+      headGivenName: headGiven,
+      headSurname,
+      wifeFullName: wifeGiven
+        ? `${wifeGiven}${wifeMaiden ? ` (rod. ${wifeMaiden})` : ""}`
+        : matchedHh?.wife_name || null,
+      wifeGivenName: wifeGiven,
+      wifeMaidenSurname: wifeMaiden,
+      consensusSurname: consensus,
+      memberCount: groupMembers.length,
+      members: groupMembers,
+    };
+  });
+
+  if (groups.length === 0 && detail.household) {
+    const hh = detail.household;
+    groups.push({
+      bytIndex: 1,
+      bytRoman: "I",
+      bytLabel: "Byt č. I",
+      householdId: hh.id,
+      headFullName:
+        `${hh.head_given_name || ""} ${hh.head_surname || ""}`.trim() ||
+        "Neznáma hlava domácnosti",
+      headGivenName: hh.head_given_name,
+      headSurname: hh.head_surname,
+      wifeFullName: hh.wife_given_name
+        ? `${hh.wife_given_name}${
+            hh.wife_maiden_surname ? ` (rod. ${hh.wife_maiden_surname})` : ""
+          }`
+        : null,
+      wifeGivenName: hh.wife_given_name,
+      wifeMaidenSurname: hh.wife_maiden_surname,
+      consensusSurname: hh.consensus_surname || hh.head_surname,
+      memberCount: hh.member_count || 0,
+      members: [],
+    });
+  }
+
+  const map = new Map<number, BytSummaryGroup>();
+  for (const g of groups) {
+    for (const m of g.members) {
+      map.set(m.fact.id, g);
+    }
+  }
+  return { groups, memberBytMap: map };
+}
+
+function normalizePlaceSpelling(text: string | null | undefined): string {
+  if (!text) return "";
+  return text.trim();
+}
+
+function formatHomeJurisdiction(raw: string | null | undefined): string | null {
+  if (!raw || !raw.trim()) return null;
+  let cleaned = normalizePlaceSpelling(raw.trim());
+  // Strip redundant trailing ", Slovensko" when displayed alongside citizenship
+  cleaned = cleaned.replace(/,\s*Slovensko$/i, "").trim();
+  return cleaned || null;
+}
+
+function formatStructuredBirthPlace(f: CensusPersonMember["fact"]): {
+  primary: string;
+  secondary: string | null;
+} {
+  const muni = normalizePlaceSpelling(f.birth_place_municipality?.trim() || "");
+  const dist = f.birth_place_district?.trim() || "";
+  const country = f.birth_place_country?.trim() || "";
+  if (muni || dist || country) {
+    const primary =
+      muni ||
+      normalizePlaceSpelling(f.birth_place_sk || f.birth_place_raw || "") ||
+      "—";
+    const subParts: string[] = [];
+    if (dist) subParts.push(`okr. ${dist}`);
+    if (country) subParts.push(country);
+    return {
+      primary,
+      secondary: subParts.length > 0 ? subParts.join(" · ") : null,
+    };
+  }
+  return {
+    primary:
+      normalizePlaceSpelling(f.birth_place_raw || f.birth_place_sk || "") || "—",
+    secondary: null,
+  };
+}
+
+export default function CensusSheetView({ lang, refreshStatus }: Props) {
+  const { sheetId } = useParams<{ sheetId: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { flags: featureFlags } = useFeatureFlags();
+  const [detail, setDetail] = useState<SheetDetailResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [processing, setProcessing] = useState(false);
+  const [switchingType, setSwitchingType] = useState(false);
+
+  // Scan viewer controls: side (`front` = _v, `back` = _r, or `page_3`..N) & mode (`overlay` vs `original`)
+  const [activeSide, setActiveSide] = useState<string>(() => {
+    const s = searchParams.get("side");
+    return s && s.trim() ? s.trim() : "front";
+  });
+  const [activeScanMode, setActiveScanMode] = useState<"overlay" | "original">(() =>
+    searchParams.get("mode") === "original" ? "original" : "overlay"
+  );
+  const [splitLayout, setSplitLayout] = useState<boolean>(
+    () => localStorage.getItem("matrika_census_split_view") !== "0"
+  );
+  const toggleSplitLayout = () => {
+    setSplitLayout((prev) => {
+      const next = !prev;
+      localStorage.setItem("matrika_census_split_view", next ? "1" : "0");
+      return next;
+    });
+  };
+
+  // Household member selection & drawer editing
+  const [selectedMemberId, setSelectedMemberId] = useState<number | null>(() => {
+    const r = Number(searchParams.get("row"));
+    return Number.isFinite(r) && r > 0 ? r : null;
+  });
+  const [editingMemberId, setEditingMemberId] = useState<number | null>(() => {
+    const r = Number(searchParams.get("editRow"));
+    return Number.isFinite(r) && r > 0 ? r : null;
+  });
+  const [editForm, setEditForm] = useState<Record<string, any>>({});
+  const [savingId, setSavingId] = useState<number | null>(null);
+
+  // Overview house selection & drawer editing
+  const [selectedHouseId, setSelectedHouseId] = useState<number | null>(() => {
+    const h = Number(searchParams.get("house"));
+    return Number.isFinite(h) && h > 0 ? h : null;
+  });
+  const [editingHouseId, setEditingHouseId] = useState<number | null>(null);
+  const [houseEditForm, setHouseEditForm] = useState<Record<string, any>>({});
+  const [savingHouseId, setSavingHouseId] = useState<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmDeleteMemberId, setConfirmDeleteMemberId] = useState<number | null>(null);
+  const [deletingMemberId, setDeletingMemberId] = useState<number | null>(null);
+  const [confirmDeleteHouseId, setConfirmDeleteHouseId] = useState<number | null>(null);
+  const [deletingHouseId, setDeletingHouseId] = useState<number | null>(null);
+
+  const highlightPersonQuery = (
+    searchParams.get("meno") ||
+    searchParams.get("person_name") ||
+    searchParams.get("q") ||
+    ""
+  ).trim();
+
+  // Sync active side, scan mode, and selected row/house to URL query params
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (activeSide && activeSide !== "front") next.set("side", activeSide);
+    if (activeScanMode === "original") next.set("mode", "original");
+    if (selectedMemberId !== null) next.set("row", String(selectedMemberId));
+    if (editingMemberId !== null) next.set("editRow", String(editingMemberId));
+    if (selectedHouseId !== null) next.set("house", String(selectedHouseId));
+    if (highlightPersonQuery) next.set("meno", highlightPersonQuery);
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true });
+    }
+  }, [activeSide, activeScanMode, selectedMemberId, editingMemberId, selectedHouseId, highlightPersonQuery]);
+
+  const loadDetail = async () => {
+    if (!sheetId) return;
+    try {
+      const r = await fetch(`/api/census/sheets/${sheetId}`);
+      if (r.ok) {
+        const data = (await r.json()) as SheetDetailResponse;
+        setDetail(data);
+        if (data.sheet?.slovakiana_id) {
+          const canonicalPath = `/scitacie-harky/${data.sheet.slovakiana_id}`;
+          if (location.pathname !== canonicalPath) {
+            navigate(`${canonicalPath}${location.search}`, { replace: true });
+          }
+        }
+        if (data.members?.length > 0) {
+          setSelectedMemberId((prev) => {
+            if (prev && data.members.some((m) => m.fact.id === prev)) {
+              return prev;
+            }
+            if (highlightPersonQuery) {
+              const fuzzyMatched = data.members.find((m) =>
+                matchesPersonNameQuery(
+                  [
+                    m.fact.given_name_raw,
+                    m.fact.given_name_sk,
+                    m.fact.surname_raw,
+                    m.fact.surname_normalized,
+                    m.fact.mother_maiden_surname,
+                    m.fact.observationes_raw,
+                  ],
+                  highlightPersonQuery
+                )
+              );
+              if (fuzzyMatched) return fuzzyMatched.fact.id;
+            }
+            return data.members[0].fact.id;
+          });
+        }
+        if (data.overview_houses && data.overview_houses.length > 0) {
+          setSelectedHouseId((prev) => {
+            if (prev && data.overview_houses!.some((h) => h.id === prev)) {
+              return prev;
+            }
+            if (highlightPersonQuery) {
+              const fuzzyHouse = data.overview_houses!.find((h) =>
+                matchesPersonNameQuery(
+                  [h.owner_name, h.matched_head_name, h.remarks],
+                  highlightPersonQuery
+                )
+              );
+              if (fuzzyHouse) return fuzzyHouse.id;
+            }
+            return data.overview_houses![0].id;
+          });
+        }
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    loadDetail();
+  }, [sheetId]);
+
+  const handleDownloadAndProcess = async () => {
+    if (!sheetId) return;
+    setProcessing(true);
+    try {
+      await fetch(
+        `/api/census/sheets/${sheetId}/download-and-process?run_pipeline=true&run_mcp=true`,
+        { method: "POST" }
+      );
+      await loadDetail();
+      refreshStatus();
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const handleToggleSheetType = async () => {
+    if (!detail) return;
+    const currentType = detail.sheet.sheet_type === "overview" ? "overview" : "household";
+    const nextType = currentType === "overview" ? "household" : "overview";
+    const sheetRef = detail.sheet.slovakiana_id || String(detail.sheet.id);
+    setSwitchingType(true);
+    try {
+      const r = await fetch(`/api/census/sheets/${sheetRef}/set-type`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sheet_type: nextType,
+          reprocess: true,
+          run_extract: true,
+        }),
+      });
+      if (r.ok) {
+        await loadDetail();
+        refreshStatus();
+      }
+    } finally {
+      setSwitchingType(false);
+    }
+  };
+
+  const startEditMember = (m: CensusPersonMember, inferredBytRoman?: string) => {
+    const f = m.fact;
+    const explicitByt = getExplicitMemberBytRoman(m);
+    setSelectedMemberId(f.id);
+    setEditingMemberId(f.id);
+    setEditForm({
+      person_row_number: f.person_row_number ?? "",
+      dwelling_unit: explicitByt || inferredBytRoman || "",
+      surname_raw: f.surname_raw ?? "",
+      mother_maiden_surname: f.mother_maiden_surname ?? "",
+      given_name_raw: f.given_name_raw ?? "",
+      relation_to_head: f.relation_to_head ?? "",
+      sex: f.sex ?? "",
+      birth_or_event_date: f.birth_or_event_date ?? "",
+      marital_status: f.marital_status ?? "",
+      marriage_date: f.marriage_date ?? f.marriage_date_raw ?? "",
+      spouse_name: f.spouse_name ?? "",
+      father_name: f.father_name ?? "",
+      mother_name: f.mother_name ?? "",
+      children_born_count: f.children_born_count ?? "",
+      children_deceased_count: f.children_deceased_count ?? f.children_dead_count ?? "",
+      birth_place_municipality: f.birth_place_municipality ?? "",
+      birth_place_district: f.birth_place_district ?? "",
+      birth_place_country: f.birth_place_country ?? "",
+      birth_place_raw: f.birth_place_raw ?? "",
+      moved_in_date: f.moved_in_date ?? "",
+      previous_residence: f.previous_residence ?? "",
+      home_jurisdiction: f.home_jurisdiction ?? "",
+      citizenship: f.citizenship ?? "",
+      nationality: f.nationality ?? "",
+      religion: f.religion ?? "",
+      literacy: f.literacy ?? "",
+      social_status_or_occupation: f.social_status_or_occupation ?? "",
+      occupation_position: f.occupation_position ?? "",
+      employer_workplace: f.employer_workplace ?? "",
+      presence_status: f.presence_status ?? f.presence_type ?? "trvale",
+      observationes_raw: f.observationes_raw ?? "",
+    });
+  };
+
+  const handleSaveMember = async (factId: number) => {
+    setSavingId(factId);
+    try {
+      let nextObservationes = String(editForm.observationes_raw || "").trim();
+      const chosenByt = String(editForm.dwelling_unit || "").trim();
+      if (chosenByt) {
+        const roman = toRomanBytLabel(chosenByt);
+        if (/\bByt\s*(?:č\.?|c\.?)?\s*[IVX0-9]+\b/i.test(nextObservationes)) {
+          nextObservationes = nextObservationes.replace(
+            /\bByt\s*(?:č\.?|c\.?)?\s*[IVX0-9]+\b/i,
+            `Byt č. ${roman}`
+          );
+        } else {
+          nextObservationes = nextObservationes
+            ? `Byt č. ${roman} · ${nextObservationes}`
+            : `Byt č. ${roman}`;
+        }
+      }
+      const payload = {
+        ...editForm,
+        dwelling_unit: chosenByt ? toRomanBytLabel(chosenByt) : undefined,
+        observationes_raw: nextObservationes,
+        maiden_surname: editForm.mother_maiden_surname,
+        marriage_date_raw: editForm.marriage_date,
+        children_dead_count: editForm.children_deceased_count,
+        presence_type: editForm.presence_status,
+        person_row_number: editForm.person_row_number
+          ? Number(editForm.person_row_number) || editForm.person_row_number
+          : null,
+      };
+      let res = await fetch(`/api/census/facts/${factId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        res = await fetch(`/api/census/persons/${factId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setActionError(
+          err.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa uložiť zmeny osoby."
+              : "Failed to save person changes.")
+        );
+        return;
+      }
+      setActionError(null);
+      setEditingMemberId(null);
+      await loadDetail();
+      refreshStatus();
+    } catch {
+      setActionError(
+        lang === "sk"
+          ? "Chyba spojenia so serverom pri ukladaní osoby."
+          : "Network error while saving person."
+      );
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const handleDeleteMember = async (factId: number) => {
+    setDeletingMemberId(factId);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/census/persons/${factId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setActionError(
+          err.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa vymazať osobu z hárku."
+              : "Failed to delete person from sheet.")
+        );
+        return;
+      }
+      setConfirmDeleteMemberId(null);
+      if (editingMemberId === factId) setEditingMemberId(null);
+      await loadDetail();
+      refreshStatus();
+    } catch {
+      setActionError(
+        lang === "sk"
+          ? "Chyba spojenia pri mazaní osoby."
+          : "Network error while deleting person."
+      );
+    } finally {
+      setDeletingMemberId(null);
+    }
+  };
+
+  const handleAddPerson = async () => {
+    if (!sheetId) return;
+    const nextRow = (detail?.members.length || 0) + 1;
+    const r = await fetch(`/api/census/sheets/${sheetId}/persons`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        person_row_number: nextRow,
+        surname_raw: detail?.household?.head_surname || "",
+        given_name_raw: "",
+        relation_to_head: nextRow === 1 ? "hlava domácnosti" : "syn",
+      }),
+    });
+    if (r.ok) {
+      await loadDetail();
+      refreshStatus();
+    }
+  };
+
+  const selectHouseAndSyncPage = (h: CensusOverviewHouseRow) => {
+    setSelectedHouseId(h.id);
+    const targetSide =
+      h.page_side ||
+      (detail?.back_scan && h.scan_id === detail.back_scan.id ? "back" : "front");
+    if (targetSide && targetSide !== activeSide) {
+      setActiveSide(targetSide);
+    }
+  };
+
+  const startEditHouse = (h: CensusOverviewHouseRow) => {
+    selectHouseAndSyncPage(h);
+    setEditingHouseId(h.id);
+    setHouseEditForm({
+      ordinal_number: h.ordinal_number ?? "",
+      settlement_name: h.settlement_name ?? "",
+      house_number: h.house_number ?? "",
+      is_inhabited: h.is_inhabited !== false,
+      owner_name: h.owner_name ?? "",
+      household_count: h.household_count ?? "",
+      present_persons_count: h.present_persons_count ?? "",
+      remarks: h.remarks ?? "",
+    });
+  };
+
+  const handleSaveHouse = async (houseId: number) => {
+    setSavingHouseId(houseId);
+    setActionError(null);
+    try {
+      const payload = {
+        ordinal_number:
+          houseEditForm.ordinal_number !== "" ? Number(houseEditForm.ordinal_number) : null,
+        settlement_name: houseEditForm.settlement_name || null,
+        house_number: houseEditForm.house_number || null,
+        is_inhabited: Boolean(houseEditForm.is_inhabited),
+        owner_name: houseEditForm.owner_name || null,
+        household_count:
+          houseEditForm.household_count !== "" ? Number(houseEditForm.household_count) : null,
+        present_persons_count:
+          houseEditForm.present_persons_count !== ""
+            ? Number(houseEditForm.present_persons_count)
+            : null,
+        remarks: houseEditForm.remarks || null,
+      };
+      const res = await fetch(`/api/census/overview-houses/${houseId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setActionError(
+          err.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa uložiť zmeny záznamu domu."
+              : "Failed to save house row changes.")
+        );
+        return;
+      }
+      setEditingHouseId(null);
+      await loadDetail();
+      refreshStatus();
+    } catch {
+      setActionError(
+        lang === "sk"
+          ? "Chyba spojenia so serverom pri ukladaní domu."
+          : "Network error while saving house row."
+      );
+    } finally {
+      setSavingHouseId(null);
+    }
+  };
+
+  const handleDeleteHouse = async (houseId: number) => {
+    setDeletingHouseId(houseId);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/census/overview-houses/${houseId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setActionError(
+          err.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa vymazať riadok domu z prehľadu obvodu."
+              : "Failed to delete house row from district overview.")
+        );
+        return;
+      }
+      setConfirmDeleteHouseId(null);
+      if (editingHouseId === houseId) setEditingHouseId(null);
+      await loadDetail();
+      refreshStatus();
+    } catch {
+      setActionError(
+        lang === "sk"
+          ? "Chyba spojenia pri mazaní domu."
+          : "Network error while deleting house row."
+      );
+    } finally {
+      setDeletingHouseId(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="p-8 text-center text-stone-600">
+        {lang === "sk" ? "Načítavam sčítací hárok…" : "Loading census sheet…"}
+      </div>
+    );
+  }
+  if (!detail) {
+    return (
+      <div className="p-8 text-center text-red-700">
+        {lang === "sk" ? "Sčítací hárok sa nenašiel." : "Census sheet not found."}
+      </div>
+    );
+  }
+
+  const {
+    sheet,
+    front_scan,
+    back_scan,
+    household,
+    members,
+    rows = [],
+    overview_houses = [],
+    linked_overview_house,
+  } = detail;
+  const linkedHouseSheets: LinkedHouseSheet[] = (
+    detail.linked_house_sheets ||
+    sheet.linked_house_sheets ||
+    []
+  ).filter((linked) => linked.census_year !== sheet.census_year);
+  const sameYearHouseSheets: LinkedHouseSheet[] =
+    detail.same_year_house_sheets || sheet.same_year_house_sheets || [];
+
+  const isOverviewSheet =
+    featureFlags.census_overview_sheets && sheet.sheet_type === "overview";
+
+  // Build Byt (dwelling unit / household) groups across the sheet
+  const { groups: bytGroups, memberBytMap } = buildBytGroups(
+    detail,
+    featureFlags.census_multi_byt
+  );
+  const hasMultipleByty = bytGroups.length >= 2;
+
+  // Resolve scan URLs for front (_v), back (_r), and any extra pages
+  const frontOriginalUrl =
+    detail.front_scan_url ||
+    front_scan?.original_url ||
+    front_scan?.image_url ||
+    sheet.front_image_url ||
+    (front_scan ? `/media/uploads/${front_scan.filename}` : null);
+  const backOriginalUrl =
+    detail.back_scan_url ||
+    back_scan?.original_url ||
+    back_scan?.image_url ||
+    sheet.back_image_url ||
+    (back_scan ? `/media/uploads/${back_scan.filename}` : null);
+
+  const extraPages = (detail.pages || []).filter(
+    (p) => p.page_side !== "front" && p.page_side !== "back"
+  );
+  const activePageObj = (detail.pages || []).find((p) => p.page_side === activeSide) || null;
+
+  const activeScan =
+    activeSide === "front"
+      ? front_scan
+      : activeSide === "back"
+      ? back_scan
+      : activePageObj
+      ? {
+          id: activePageObj.scan_id || 0,
+          filename: activePageObj.page_side,
+          image_url: activePageObj.scan_url,
+          original_url: activePageObj.scan_url,
+          overlay_path: activePageObj.overlay_url,
+          header_crop_path: activePageObj.header_crop_url,
+          width: activePageObj.width,
+          height: activePageObj.height,
+          page_side: activePageObj.page_side,
+        }
+      : front_scan;
+  const activeOriginalUrl =
+    activeSide === "front"
+      ? frontOriginalUrl
+      : activeSide === "back"
+      ? backOriginalUrl
+      : activePageObj?.scan_url || frontOriginalUrl;
+  const activeOverlayUrl = activeScan?.overlay_path
+    ? `${activeScan.overlay_path}${activeScan.overlay_path.includes("?") ? "&" : "?"}v=flat`
+    : activeOriginalUrl;
+  const activeViewerSrc =
+    activeScanMode === "overlay" ? activeOverlayUrl : activeOriginalUrl;
+
+  // Map rows by id and crop path for quick lookup
+  const rowsById = new Map<number, ScanRowRecord>();
+  const rowsByCrop = new Map<string, ScanRowRecord>();
+  for (const r of rows) {
+    rowsById.set(r.id, r);
+    if (r.stitched_crop_path) {
+      rowsByCrop.set(r.stitched_crop_path, r);
+    }
+  }
+  for (const m of members) {
+    if (m.row && m.row.id) {
+      rowsById.set(m.row.id, m.row);
+    }
+  }
+
+  const resolveOverviewHouseRow = (h: CensusOverviewHouseRow): ScanRowRecord | null => {
+    if (h.row_id && rowsById.has(h.row_id)) {
+      return rowsById.get(h.row_id)!;
+    }
+    if (h.stitched_crop_path && rowsByCrop.has(h.stitched_crop_path)) {
+      return rowsByCrop.get(h.stitched_crop_path)!;
+    }
+    return (
+      rows.find(
+        (r) =>
+          (h.scan_id ? r.scan_id === h.scan_id : true) &&
+          (r.entry_number === String(h.ordinal_number ?? h.row_index) ||
+            r.row_index === h.row_index)
+      ) || null
+    );
+  };
+
+  const selectedMember =
+    members.find((m) => m.fact.id === selectedMemberId) || members[0] || null;
+  const selectedMemberRow = selectedMember
+    ? selectedMember.row || rowsById.get(selectedMember.fact.row_id) || null
+    : null;
+
+  const selectedHouse =
+    overview_houses.find((h) => h.id === selectedHouseId) || overview_houses[0] || null;
+
+  // Determine active row crop props for <HoverZoomRowCrop>
+  let activeCropUrl: string | null = null;
+  let activeHeaderCropUrl: string | null =
+    activeScan?.header_crop_path ||
+    activeScan?.header_crop_url ||
+    front_scan?.header_crop_path ||
+    front_scan?.header_crop_url ||
+    null;
+  let activeRowYStart: number | null = null;
+  let activeRowYEnd: number | null = null;
+  let activeRowLabel = "";
+  let activeRowScanUrl: string | null = frontOriginalUrl;
+  let activeRowScanHeight: number | null = front_scan?.height || null;
+  let activeRowScanWidth: number | null = front_scan?.width || null;
+
+  if (isOverviewSheet && selectedHouse) {
+    activeCropUrl = selectedHouse.stitched_crop_path;
+    const matchRow = resolveOverviewHouseRow(selectedHouse);
+    activeRowYStart = selectedHouse.y_start ?? matchRow?.y_start ?? null;
+    activeRowYEnd = selectedHouse.y_end ?? matchRow?.y_end ?? null;
+    const housePageSide =
+      selectedHouse.page_side ||
+      (selectedHouse.scan_id && back_scan && selectedHouse.scan_id === back_scan.id
+        ? "back"
+        : "front");
+    const housePageObj = (detail.pages || []).find(
+      (p) =>
+        (selectedHouse.scan_id && p.scan_id === selectedHouse.scan_id) ||
+        p.page_side === housePageSide
+    );
+    const houseScan =
+      housePageSide === "back" && back_scan
+        ? back_scan
+        : housePageSide === "front" && front_scan
+        ? front_scan
+        : housePageObj
+        ? {
+            id: housePageObj.scan_id || 0,
+            header_crop_path: housePageObj.header_crop_url,
+            header_crop_url: housePageObj.header_crop_url,
+            height: housePageObj.height,
+            width: housePageObj.width,
+          }
+        : front_scan;
+    activeRowScanUrl =
+      housePageSide === "back"
+        ? backOriginalUrl
+        : housePageSide === "front"
+        ? frontOriginalUrl
+        : housePageObj?.scan_url || frontOriginalUrl;
+    activeHeaderCropUrl =
+      selectedHouse.header_crop_url ||
+      houseScan?.header_crop_path ||
+      houseScan?.header_crop_url ||
+      (houseScan?.id ? `/media/crops/scan_${houseScan.id}/header.jpg` : activeHeaderCropUrl);
+    activeRowScanHeight = houseScan?.height || null;
+    activeRowScanWidth = houseScan?.width || null;
+    activeRowLabel =
+      lang === "sk"
+        ? `Výrez vybraného domu (riadok č. ${
+            selectedHouse.ordinal_number || selectedHouse.row_index
+          }${selectedHouse.booklet_page ? ` · strana ${selectedHouse.booklet_page}` : ""}): dom č. ${
+            selectedHouse.house_number || "—"
+          } – ${selectedHouse.owner_name || "neznámy majiteľ"}`
+        : `Selected house crop (row #${
+            selectedHouse.ordinal_number || selectedHouse.row_index
+          }${selectedHouse.booklet_page ? ` · page ${selectedHouse.booklet_page}` : ""}): house #${
+            selectedHouse.house_number || "—"
+          } – ${selectedHouse.owner_name || "unknown owner"}`;
+  } else if (selectedMember) {
+    activeCropUrl =
+      selectedMemberRow?.stitched_crop_path || selectedMember.stitched_crop_url || null;
+    activeRowYStart = selectedMemberRow?.y_start ?? null;
+    activeRowYEnd = selectedMemberRow?.y_end ?? null;
+    activeHeaderCropUrl =
+      activeScan?.header_crop_path ||
+      activeScan?.header_crop_url ||
+      front_scan?.header_crop_path ||
+      front_scan?.header_crop_url ||
+      (front_scan?.id ? `/media/crops/scan_${front_scan.id}/header.jpg` : null);
+    activeRowLabel =
+      lang === "sk"
+        ? `Výrez vybraného riadku č. ${
+            selectedMember.fact.person_row_number || "—"
+          }: ${selectedMember.fact.given_name_raw || ""} ${
+            selectedMember.fact.surname_raw || ""
+          }`.trim()
+        : `Selected row crop #${
+            selectedMember.fact.person_row_number || "—"
+          }: ${selectedMember.fact.given_name_raw || ""} ${
+            selectedMember.fact.surname_raw || ""
+          }`.trim();
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Top Header Bar */}
+      <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <Link
+              to={
+                sheet.municipality_name
+                  ? `/scitacie-harky?obec=${encodeURIComponent(
+                      normalizePlaceSpelling(sheet.municipality_name)
+                    )}${
+                      sheet.district_name
+                        ? `&okres=${encodeURIComponent(sheet.district_name)}`
+                        : ""
+                    }`
+                  : "/scitacie-harky"
+              }
+              className="p-2 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-800"
+              title={
+                sheet.municipality_name
+                  ? `Späť na prehľad obce ${normalizePlaceSpelling(
+                      sheet.municipality_name
+                    )}`
+                  : "Späť na zoznam hárkov"
+              }
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </Link>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
+                  {sheet.slovakiana_id}
+                </span>
+
+                {/* Sheet Type Badge */}
+                {isOverviewSheet ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-purple-100 text-purple-900 border border-purple-300 text-xs font-bold inline-flex items-center gap-1">
+                    <Building2 className="w-3.5 h-3.5" />
+                    <span>
+                      {lang === "sk"
+                        ? "Prehľad sčítacieho obvodu"
+                        : "District Overview Sheet"}
+                    </span>
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full bg-stone-100 text-stone-800 border border-stone-300 text-xs font-bold inline-flex items-center gap-1">
+                    <Home className="w-3.5 h-3.5 text-amber-700" />
+                    <span>
+                      {lang === "sk"
+                        ? "Sčítací hárok domácnosti"
+                        : "Household Census Sheet"}
+                    </span>
+                  </span>
+                )}
+
+                <h2 className="text-lg font-bold text-stone-900">
+                  {normalizePlaceSpelling(sheet.municipality_name)}
+                  {!isOverviewSheet &&
+                  (sheet.house_number_conscription || sheet.house_number_raw)
+                    ? ` – ${lang === "sk" ? "dom č." : "house #"}${
+                        sheet.house_number_conscription || sheet.house_number_raw
+                      }`
+                    : ""}
+                  {isOverviewSheet && sheet.obvod_number
+                    ? ` – ${lang === "sk" ? "obvod č." : "district #"}${
+                        sheet.obvod_number
+                      }`
+                    : ""}
+                </h2>
+
+                <span
+                  className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                    sheet.census_year === 1930
+                      ? "bg-emerald-100 text-emerald-900"
+                      : "bg-amber-100 text-amber-900"
+                  }`}
+                >
+                  {lang === "sk" ? "Sčítanie" : "Census"} {sheet.census_year}
+                  {sheet.is_blackened
+                    ? lang === "sk"
+                      ? " (čiastočne začiernený)"
+                      : " (partially redacted)"
+                    : lang === "sk"
+                    ? " (plný hárok)"
+                    : " (full sheet)"}
+                </span>
+
+                {/* Cross-Year Connected House Sheet Badges (1930 <-> 1940) */}
+                {!isOverviewSheet &&
+                  linkedHouseSheets.map((linked) => {
+                    const targetRef =
+                      linked.cair_id || linked.slovakiana_key || String(linked.id);
+                    const summaryParts: string[] = [];
+                    if (linked.head_of_household) {
+                      summaryParts.push(linked.head_of_household);
+                    }
+                    if (linked.persons_count > 0) {
+                      summaryParts.push(
+                        `${linked.persons_count} ${
+                          linked.persons_count === 1
+                            ? "osoba"
+                            : linked.persons_count >= 2 && linked.persons_count <= 4
+                            ? "osoby"
+                            : "osôb"
+                        }`
+                      );
+                    }
+                    return (
+                      <Link
+                        key={`${linked.id}-${linked.cair_id}`}
+                        to={`/scitacie-harky/${targetRef}`}
+                        className="px-2.5 py-0.5 rounded-full bg-indigo-100 hover:bg-indigo-200 text-indigo-950 border border-indigo-300 text-xs font-bold inline-flex items-center gap-1 transition"
+                        title={`Prejsť na prepojený sčítací hárok pre dom č. ${
+                          linked.house_number || sheet.house_number_raw || "—"
+                        } z roku ${linked.census_year} (${targetRef})`}
+                      >
+                        <span>
+                          🔗 Sčítanie {linked.census_year} · Dom č.{" "}
+                          {linked.house_number || sheet.house_number_raw || "—"}
+                          {linkedHouseSheets.length > 1 && linked.sheet_number
+                            ? ` · hárok č. ${linked.sheet_number}`
+                            : ""}
+                          {summaryParts.length > 0
+                            ? ` (${summaryParts.join(", ")})`
+                            : ""}{" "}
+                          →
+                        </span>
+                      </Link>
+                    );
+                  })}
+              </div>
+
+              <div className="text-xs sm:text-sm text-stone-700 mt-1 flex flex-wrap items-center gap-2">
+                <span>
+                  {lang === "sk" ? "Okres:" : "District:"} {sheet.district_name || "—"}
+                </span>
+                {sheet.street_name && (
+                  <span>
+                    · {lang === "sk" ? "Ulica/osada:" : "Street/settlement:"} {sheet.street_name}
+                  </span>
+                )}
+                {sheet.box_number && (
+                  <span>
+                    · {lang === "sk" ? "Škatuľa:" : "Box:"} {sheet.box_number}
+                  </span>
+                )}
+                {sheet.sheet_number && (
+                  <span>
+                    · {lang === "sk" ? "Hárok č.:" : "Sheet #:"} {sheet.sheet_number}
+                  </span>
+                )}
+                {sheet.obvod_number && (
+                  <span>
+                    · {lang === "sk" ? "Obvod č.:" : "District #:"} {sheet.obvod_number}
+                  </span>
+                )}
+                {sheet.commissioner_name && (
+                  <span>
+                    · {lang === "sk" ? "Komisár:" : "Commissioner:"} {sheet.commissioner_name}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Manual Type Switch Button */}
+            {featureFlags.census_overview_sheets && (
+              <button
+                type="button"
+                onClick={handleToggleSheetType}
+                disabled={switchingType || processing}
+                title={
+                  lang === "sk"
+                    ? "Manuálne prepnúť typ hárku a prepočítať extrakciu"
+                    : "Manually switch sheet type and re-run extraction"
+                }
+                className="px-3 py-1.5 min-h-[34px] rounded-lg border border-purple-300 bg-purple-50 hover:bg-purple-100 text-purple-900 text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>
+                  {switchingType
+                    ? lang === "sk"
+                      ? "Prepínam typ…"
+                      : "Switching type…"
+                    : isOverviewSheet
+                    ? lang === "sk"
+                      ? "Prepnúť na hárok domácnosti"
+                      : "Switch to Household Sheet"
+                    : lang === "sk"
+                    ? "Označiť ako Prehľad obvodu"
+                    : "Mark as District Overview"}
+                </span>
+              </button>
+            )}
+
+            <a
+              href={
+                sheet.source_web_url ||
+                `https://slovakiana.sk/kulturne-objekty/${sheet.slovakiana_id}`
+              }
+              target="_blank"
+              rel="noreferrer"
+              className="px-3 py-1.5 min-h-[34px] rounded-lg border border-stone-300 hover:bg-stone-100 text-xs font-semibold flex items-center gap-1.5"
+            >
+              <span>
+                {lang === "sk" ? "Slovakiana originál" : "Slovakiana original"}
+              </span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+            <button
+              onClick={handleDownloadAndProcess}
+              disabled={processing}
+              className="px-3.5 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              {processing ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
+              <span>
+                {sheet.download_status === "downloaded" ||
+                sheet.download_status === "extracted" ||
+                sheet.download_status === "matched"
+                  ? lang === "sk"
+                    ? "Znova spustiť AI OCR & párovanie"
+                    : "Re-run AI OCR & matching"
+                  : lang === "sk"
+                  ? "Stiahnuť skeny (_v + _r) & Spustiť AI OCR"
+                  : "Download scans (_v + _r) & Run AI OCR"}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Slovakiana CC BY-NC-ND 4.0 Attribution & License Badge */}
+        <div className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-700">
+          <div className="flex flex-wrap items-center gap-2">
+            <Scale className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+            <span>
+              {lang === "sk" ? "Zdroj:" : "Source:"}{" "}
+              <strong>
+                Slovenský národný archív (SNA) / Slovakiana (Národné osvetové centrum)
+              </strong>
+            </span>
+            <span>·</span>
+            <a
+              href={`https://slovakiana.sk/kulturne-objekty/${sheet.slovakiana_id}`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-amber-900 hover:underline font-semibold inline-flex items-center gap-1 py-0.5"
+            >
+              <span>
+                {lang === "sk" ? "Objekt" : "Object"} {sheet.slovakiana_id}
+              </span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+            {sheet.urn_nbn && (
+              <>
+                <span>·</span>
+                <span className="font-mono text-stone-600">
+                  URN:NBN: {sheet.urn_nbn}
+                </span>
+              </>
+            )}
+          </div>
+          <a
+            href="https://creativecommons.org/licenses/by-nc-nd/4.0/"
+            target="_blank"
+            rel="noreferrer"
+            className="px-2.5 py-1 min-h-[28px] rounded bg-amber-100/80 hover:bg-amber-200/80 text-amber-950 border border-amber-300 font-bold inline-flex items-center gap-1"
+            title="Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International"
+          >
+            <span>
+              {lang === "sk" ? "Licencia: CC BY-NC-ND 4.0" : "License: CC BY-NC-ND 4.0"}
+            </span>
+            <ExternalLink className="w-3 h-3" />
+          </a>
+        </div>
+
+        {actionError && (
+          <div className="bg-red-50 border border-red-400 rounded-lg p-3 flex items-center gap-2 text-red-900 font-medium text-xs">
+            <AlertCircle className="w-4 h-4 text-red-700 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+        )}
+
+        {/* Linked Overview House Banner (when viewing a household sheet matched to an Obvod Overview row) */}
+        {featureFlags.census_overview_sheets &&
+          !isOverviewSheet &&
+          linked_overview_house && (
+          <div className="bg-purple-50/90 border border-purple-200 rounded-lg px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm text-purple-950">
+            <div className="flex flex-wrap items-center gap-2">
+              <Building2 className="w-4 h-4 text-purple-700 shrink-0" />
+              <span>
+                {lang === "sk"
+                  ? "Zápis z prehľadu obvodu pre dom č."
+                  : "District overview entry for house #"}{" "}
+                <strong>{linked_overview_house.house_number || sheet.house_number_raw || "—"}</strong>
+                : {lang === "sk" ? "majiteľ" : "owner"}{" "}
+                <strong>{linked_overview_house.owner_name || (lang === "sk" ? "neznámy" : "unknown")}</strong> (
+                {linked_overview_house.present_persons_count ?? members.length}{" "}
+                {lang === "sk" ? "osôb" : "people"}
+                {linked_overview_house.settlement_name
+                  ? `, ${lang === "sk" ? "osada" : "settlement"}: ${linked_overview_house.settlement_name}`
+                  : ""}
+                )
+              </span>
+            </div>
+            {(linked_overview_house.overview_slovakiana_key ||
+              linked_overview_house.census_sheet_id) && (
+              <Link
+                to={`/scitacie-harky/${
+                  linked_overview_house.overview_slovakiana_key ||
+                  linked_overview_house.census_sheet_id
+                }`}
+                className="px-3 py-1.5 min-h-[32px] rounded-lg bg-purple-700 hover:bg-purple-800 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>
+                  {lang === "sk"
+                    ? "Otvoriť prehľad sčítacieho obvodu"
+                    : "Open district overview"}
+                </span>
+              </Link>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Responsive Side-by-Side Split Workspace (or Stacked) */}
+      <div
+        className={
+          splitLayout
+            ? "grid grid-cols-1 xl:grid-cols-12 gap-4 items-start"
+            : "space-y-4"
+        }
+      >
+      {/* Zobrazenie hárku: Zoomable Scan Viewer & Hover-to-Zoom-Out Row Crop */}
+      <div
+        className={`bg-white rounded-xl p-4 border border-stone-300 space-y-3 ${
+          splitLayout ? "xl:col-span-5 xl:sticky xl:top-3" : ""
+        }`}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h3 className="text-base font-bold text-stone-900">
+              {lang === "sk" ? "Zobrazenie hárku" : "Sheet Scan Viewer"}
+            </h3>
+
+            {/* Side Tabs: Predná strana (_v) vs Zadná strana (_r) + any extra pages */}
+            <div className="inline-flex rounded-lg bg-stone-100 p-1 border border-stone-200">
+              <button
+                type="button"
+                onClick={() => setActiveSide("front")}
+                className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold cursor-pointer transition ${
+                  activeSide === "front"
+                    ? "bg-stone-900 text-white shadow-xs"
+                    : "text-stone-700 hover:text-stone-900"
+                }`}
+              >
+                {lang === "sk" ? "Predná strana (_v)" : "Front Side (_v)"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSide("back")}
+                className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold cursor-pointer transition ${
+                  activeSide === "back"
+                    ? "bg-stone-900 text-white shadow-xs"
+                    : "text-stone-700 hover:text-stone-900"
+                }`}
+              >
+                {lang === "sk" ? "Zadná strana (_r)" : "Back Side (_r)"}
+              </button>
+              {extraPages.map((ep) => (
+                <button
+                  key={ep.page_side}
+                  type="button"
+                  onClick={() => setActiveSide(ep.page_side)}
+                  className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold cursor-pointer transition ${
+                    activeSide === ep.page_side
+                      ? "bg-stone-900 text-white shadow-xs"
+                      : "text-stone-700 hover:text-stone-900"
+                  }`}
+                >
+                  {ep.label || `${lang === "sk" ? "Strana" : "Page"} ${ep.page_number}`}
+                </button>
+              ))}
+            </div>
+
+            {/* Mode Tabs: Originálny sken vs Detekované riadky (Overlay) */}
+            <div className="inline-flex rounded-lg bg-stone-100 p-1 border border-stone-200">
+              <button
+                type="button"
+                onClick={() => setActiveScanMode("original")}
+                className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold cursor-pointer transition ${
+                  activeScanMode === "original"
+                    ? "bg-amber-600 text-white shadow-xs"
+                    : "text-stone-700 hover:text-stone-900"
+                }`}
+              >
+                {lang === "sk" ? "Originálny sken" : "Original Scan"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveScanMode("overlay")}
+                className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold cursor-pointer transition ${
+                  activeScanMode === "overlay"
+                    ? "bg-amber-600 text-white shadow-xs"
+                    : "text-stone-700 hover:text-stone-900"
+                }`}
+              >
+                {lang === "sk" ? "Detekované riadky (Overlay)" : "Detected Rows (Overlay)"}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {!isOverviewSheet && (household || bytGroups.length > 0) && (
+              <div className="text-xs sm:text-sm font-semibold text-stone-800 flex items-center gap-1.5">
+                <Users className="w-4 h-4 text-amber-600" />
+                {hasMultipleByty ? (
+                  <span>
+                    {bytGroups.length} {lang === "sk" ? "byty na hárku" : "units on sheet"} (
+                    {bytGroups.map((g) => `${g.bytLabel}: ${g.consensusSurname || g.headSurname || "—"}`).join(" · ")}
+                    ) · {members.length} {lang === "sk" ? "osôb" : "people"}
+                  </span>
+                ) : (
+                  <span>
+                    {lang === "sk" ? "Domácnosť:" : "Household:"}{" "}
+                    {bytGroups[0]?.headFullName ||
+                      [household?.head_given_name, household?.head_surname]
+                        .filter(Boolean)
+                        .join(" ") ||
+                      "—"}{" "}
+                    ({members.length} {lang === "sk" ? "osôb" : "people"})
+                  </span>
+                )}
+              </div>
+            )}
+
+            {isOverviewSheet && (
+              <div className="text-xs sm:text-sm font-semibold text-purple-900 flex items-center gap-1.5">
+                <Building2 className="w-4 h-4 text-purple-700" />
+                <span>
+                  {lang === "sk" ? "Prehľad obvodu" : "District overview"}{" "}
+                  {sheet.obvod_number ? `č. ${sheet.obvod_number}` : ""} ·{" "}
+                  {overview_houses.length}{" "}
+                  {lang === "sk" ? "zaznamenaných domov" : "recorded houses"}
+                </span>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={toggleSplitLayout}
+              className="hidden xl:inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[32px] rounded-lg bg-stone-100 hover:bg-stone-200 border border-stone-300 text-xs font-semibold text-stone-800 cursor-pointer"
+              title={
+                lang === "sk"
+                  ? "Prepnúť zobrazenie: Vedľa seba (Split View) vs. Pod sebou (Na celú šírku)"
+                  : "Toggle layout: Side-by-side Split View vs. Full-width Stacked"
+              }
+            >
+              <Layers className="w-3.5 h-3.5 text-amber-700" />
+              <span>
+                {splitLayout
+                  ? lang === "sk"
+                    ? "Pod sebou (celá šírka)"
+                    : "Full-width stacked"
+                  : lang === "sk"
+                  ? "Vedľa seba (Split)"
+                  : "Side-by-side split"}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <ZoomableScanViewer
+          src={activeViewerSrc}
+          alt={`${sheet.slovakiana_id} (${activeSide})`}
+          title={`${sheet.slovakiana_id} · ${
+            activeSide === "front"
+              ? lang === "sk"
+                ? "Predná strana (_v)"
+                : "Front Side (_v)"
+              : lang === "sk"
+              ? "Zadná strana (_r)"
+              : "Back Side (_r)"
+          }`}
+          subtitle={
+            activeScanMode === "overlay"
+              ? lang === "sk"
+                ? "Detekované riadky (Overlay)"
+                : "Detected Rows (Overlay)"
+              : lang === "sk"
+              ? "Originálny sken (kliknite na riadok pre výber)"
+              : "Original Scan (click a row to select)"
+          }
+          defaultHeightClass="max-h-[340px]"
+          expandedHeightClass="max-h-[85vh]"
+          emptyMessage={
+            lang === "sk"
+              ? "Sken zatiaľ nebol stiahnutý do lokálneho úložiska. Kliknite na „Stiahnuť skeny (_v + _r)“."
+              : "Scan has not yet been downloaded locally. Click 'Download scans (_v + _r)'."
+          }
+          lang={lang}
+        >
+          {/* Interactive row bounding-box overlay when in original scan mode */}
+          {activeScanMode === "original" &&
+            activeSide === "front" &&
+            front_scan?.height &&
+            front_scan.height > 0 &&
+            !isOverviewSheet &&
+            members.map((m) => {
+              const r = m.row || rowsById.get(m.fact.row_id);
+              if (!r || r.y_end <= r.y_start) return null;
+              const topPct = (r.y_start / front_scan.height!) * 100;
+              const heightPct = ((r.y_end - r.y_start) / front_scan.height!) * 100;
+              const isSel = selectedMember?.fact.id === m.fact.id;
+              return (
+                <div
+                  key={m.fact.id}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedMemberId(m.fact.id);
+                  }}
+                  title={`Riadok č. ${m.fact.person_row_number || r.row_index}: ${
+                    m.fact.given_name_raw || ""
+                  } ${m.fact.surname_raw || ""}`}
+                  style={{
+                    top: `${topPct}%`,
+                    height: `${heightPct}%`,
+                  }}
+                  className={`absolute left-1 right-1 rounded transition pointer-events-auto cursor-pointer ${
+                    isSel
+                      ? "border-2 border-amber-500 bg-amber-500/15"
+                      : "border border-transparent hover:border-amber-400/80 hover:bg-amber-400/10"
+                  }`}
+                />
+              );
+            })}
+        </ZoomableScanViewer>
+
+        {/* Selected Row Crop Preview with Hover-to-Zoom-Out Context & Pinned Column Header */}
+        {activeCropUrl && (
+          <HoverZoomRowCrop
+            cropUrl={activeCropUrl}
+            headerCropUrl={activeHeaderCropUrl}
+            scanUrl={featureFlags.hover_row_zoom ? activeRowScanUrl : null}
+            yStart={featureFlags.hover_row_zoom ? activeRowYStart : null}
+            yEnd={featureFlags.hover_row_zoom ? activeRowYEnd : null}
+            scanHeight={activeRowScanHeight}
+            scanWidth={activeRowScanWidth}
+            rowLabel={activeRowLabel}
+            lang={lang}
+          />
+        )}
+
+        <div className="text-xs text-stone-600 pt-1">
+          {lang === "sk"
+            ? "Poznámka k licencii CC BY-NC-ND 4.0: Vizuálna mriežka (Overlay) a výrezy riadkov sa generujú iba lokálne ako dočasná pomôcka pri čítaní na nekomerčný genealogický výskum (NC). Upravené výrezy ďalej nešírte (ND); pri citovaní vždy odkazujte na nemodifikovaný originálny sken na portáli Slovakiana."
+            : "CC BY-NC-ND 4.0 Notice: OpenCV row overlays and crops are generated strictly locally as a transient reading aid for non-commercial genealogical research (NC). Do not redistribute modified or cropped images (ND); always cite the unmodified original scan on Slovakiana."}
+        </div>
+      </div>
+
+      {/* RIGHT COLUMN IN SPLIT VIEW: Household Overview & Members Table */}
+      <div className={splitLayout ? "xl:col-span-7 space-y-4 min-w-0" : "space-y-4"}>
+      {/* Global datalist for Pomer k hlave domácnosti */}
+      <datalist id="relation-to-head-options">
+        {ALL_RELATION_TO_HEAD_OPTIONS.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        ))}
+      </datalist>
+
+      {/* Prepojený sčítací hárok pre ten istý dom (1930 ↔ 1940) */}
+      {!isOverviewSheet && linkedHouseSheets.length > 0 && (
+        <div className="bg-indigo-50/70 rounded-xl p-4 border border-indigo-200 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-200/80 pb-2.5">
+            <div className="flex items-center gap-2">
+              <Home className="w-4 h-4 text-indigo-700" />
+              <h3 className="text-base font-bold text-indigo-950">
+                Prepojený sčítací hárok pre ten istý dom (1930 ↔ 1940)
+              </h3>
+              <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-900 border border-indigo-300 text-xs font-bold">
+                {linkedHouseSheets.length}{" "}
+                {linkedHouseSheets.length === 1
+                  ? "prepojený hárok"
+                  : linkedHouseSheets.length >= 2 && linkedHouseSheets.length <= 4
+                  ? "prepojené hárky"
+                  : "prepojených hárkov"}
+              </span>
+            </div>
+            <div className="text-xs text-indigo-900">
+              Obec{" "}
+              <strong>{normalizePlaceSpelling(sheet.municipality_name)}</strong> · Dom č.{" "}
+              <strong>
+                {sheet.house_number_conscription || sheet.house_number_raw || "—"}
+              </strong>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {linkedHouseSheets.map((linked) => {
+              const targetRef =
+                linked.cair_id || linked.slovakiana_key || String(linked.id);
+              const isOtherYear = linked.census_year !== sheet.census_year;
+              return (
+                <div
+                  key={`${linked.id}-${targetRef}`}
+                  className="bg-white rounded-xl p-3.5 border border-indigo-200 shadow-2xs flex flex-col justify-between gap-3"
+                >
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                            linked.census_year === 1930
+                              ? "bg-emerald-100 text-emerald-900 border border-emerald-300"
+                              : "bg-amber-100 text-amber-900 border border-amber-300"
+                          }`}
+                        >
+                          Sčítanie {linked.census_year}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
+                          {targetRef}
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-stone-100 text-stone-800 border border-stone-200 text-xs font-semibold">
+                          Dom č. {linked.house_number || sheet.house_number_raw || "—"}
+                        </span>
+                        {isOtherYear && (
+                          <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-900 text-[11px] font-bold">
+                            {sheet.census_year} ↔ {linked.census_year}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-xs font-semibold text-stone-600">
+                        {linked.persons_count > 0
+                          ? `${linked.persons_count} ${
+                              linked.persons_count === 1
+                                ? "osoba"
+                                : linked.persons_count >= 2 && linked.persons_count <= 4
+                                ? "osoby"
+                                : "osôb"
+                            }`
+                          : linked.is_blackened
+                          ? "Čiastočne začiernený"
+                          : "Katalogizovaný hárok"}
+                      </span>
+                    </div>
+
+                    <div className="text-xs text-stone-700 space-y-1">
+                      <div>
+                        <span className="text-stone-500">Obec / Osada: </span>
+                        <strong className="text-stone-900">
+                          {normalizePlaceSpelling(linked.municipality)}
+                          {linked.settlement &&
+                          normalizePlaceSpelling(linked.settlement) !==
+                            normalizePlaceSpelling(linked.municipality)
+                            ? ` (${normalizePlaceSpelling(linked.settlement)})`
+                            : ""}
+                        </strong>
+                        {linked.district && (
+                          <span className="text-stone-500"> · okr. {linked.district}</span>
+                        )}
+                        {linked.enumeration_district && (
+                          <span className="text-stone-500">
+                            {" "}
+                            · obvod č. {linked.enumeration_district}
+                          </span>
+                        )}
+                        {linked.sheet_number && (
+                          <span className="text-stone-500">
+                            {" "}
+                            · hárok č. {linked.sheet_number}
+                          </span>
+                        )}
+                      </div>
+                      <div>
+                        <span className="text-stone-500">Hlava domácnosti: </span>
+                        <strong className="text-stone-900">
+                          {linked.head_of_household || "Zatiaľ neextrahované (stiahnite a spustite OCR)"}
+                        </strong>
+                      </div>
+                    </div>
+
+                    {linked.persons_preview && linked.persons_preview.length > 0 && (
+                      <div className="pt-1">
+                        <div className="text-[11px] font-semibold text-stone-500 mb-1">
+                          Zapísané osoby v dome ({linked.census_year}):
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {linked.persons_preview.map((p, idx) => (
+                            <span
+                              key={idx}
+                              className="px-2 py-0.5 rounded-md bg-stone-100 border border-stone-200 text-stone-800 text-[11px]"
+                            >
+                              <strong>
+                                {[p.given_name, p.surname].filter(Boolean).join(" ") || "—"}
+                              </strong>
+                              {p.relation_to_head ? ` (${p.relation_to_head})` : ""}
+                              {p.birth_year ? ` · *${p.birth_year}` : ""}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="pt-2 border-t border-stone-100 flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-stone-500">
+                      Rovnaká obec ({normalizePlaceSpelling(linked.municipality)}) a rovnaké č. domu (
+                      {linked.house_number})
+                    </span>
+                    <Link
+                      to={`/scitacie-harky/${targetRef}`}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition"
+                    >
+                      <span>Prejsť na hárok z roku {linked.census_year}</span>
+                      <span>→</span>
+                    </Link>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Ďalšie bytové/domové hárky pre ten istý dom v tom istom roku sčítania */}
+      {!isOverviewSheet && sameYearHouseSheets.length > 0 && (
+        <div className="bg-stone-50 rounded-xl px-4 py-3 border border-stone-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="text-stone-700">
+            <strong>
+              Ďalšie bytové hárky pre dom č.{" "}
+              {sheet.house_number_conscription || sheet.house_number_raw || "—"} v sčítaní{" "}
+              {sheet.census_year} ({sameYearHouseSheets.length}):
+            </strong>{" "}
+            <span className="text-stone-500">
+              Viacbytový dom s viacerými samostatnými hárkami v roku {sheet.census_year}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {sameYearHouseSheets.map((sib) => {
+              const sibRef = sib.cair_id || sib.slovakiana_key || String(sib.id);
+              return (
+                <Link
+                  key={`${sib.id}-${sibRef}`}
+                  to={`/scitacie-harky/${sibRef}`}
+                  className="px-2.5 py-1 rounded-md bg-white hover:bg-amber-50 text-stone-800 border border-stone-300 font-semibold inline-flex items-center gap-1 transition"
+                  title={`Otvoriť ďalší hárok pre dom č. ${
+                    sib.house_number || sheet.house_number_raw || "—"
+                  } z roku ${sib.census_year} (${sibRef})`}
+                >
+                  <span className="font-mono text-[11px] text-amber-800 font-bold">
+                    {sibRef}
+                  </span>
+                  {sib.sheet_number && (
+                    <span className="text-stone-600">· hárok č. {sib.sheet_number}</span>
+                  )}
+                  {sib.head_of_household && (
+                    <span className="text-stone-700">({sib.head_of_household})</span>
+                  )}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Prehľad domácnosti / Prehľad bytov a domácností na hárku */}
+      {!isOverviewSheet && bytGroups.length > 0 && (
+        <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 pb-2.5">
+            <div className="flex items-center gap-2">
+              <Home className="w-4 h-4 text-amber-700" />
+              <h3 className="text-base font-bold text-stone-900">
+                {hasMultipleByty
+                  ? lang === "sk"
+                    ? "Prehľad bytov a domácností na hárku"
+                    : "Dwelling Units & Households Overview"
+                  : lang === "sk"
+                  ? "Prehľad domácnosti"
+                  : "Household Overview"}
+              </h3>
+              {hasMultipleByty && (
+                <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold">
+                  {bytGroups.length} byty ({bytGroups.map((g) => g.bytLabel).join(", ")})
+                </span>
+              )}
+            </div>
+            <div className="text-xs text-stone-600">
+              Dom č.{" "}
+              <strong className="text-stone-900">
+                {sheet.house_number_conscription || sheet.house_number_raw || "—"}
+              </strong>{" "}
+              · Celkom <strong className="text-stone-900">{members.length}</strong> osôb
+            </div>
+          </div>
+
+          <div
+            className={`grid grid-cols-1 ${
+              hasMultipleByty ? "md:grid-cols-2" : "md:grid-cols-1"
+            } gap-3`}
+          >
+            {bytGroups.map((bg) => (
+              <div
+                key={bg.bytLabel}
+                className="rounded-xl p-3.5 border border-amber-300/80 bg-amber-50/40 space-y-2"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2.5 py-0.5 rounded bg-stone-900 text-amber-300 font-bold text-xs">
+                      {bg.bytLabel}
+                    </span>
+                    <span className="font-bold text-sm text-stone-900">
+                      {lang === "sk" ? "Hlava domácnosti:" : "Head of household:"} {bg.headFullName}
+                    </span>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-white border border-stone-300 text-stone-800 text-xs font-semibold">
+                    {bg.memberCount}{" "}
+                    {lang === "sk"
+                      ? bg.memberCount === 1
+                        ? "osoba"
+                        : bg.memberCount >= 2 && bg.memberCount <= 4
+                        ? "osoby"
+                        : "osôb"
+                      : bg.memberCount === 1
+                      ? "person"
+                      : "people"}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs sm:text-sm pt-1">
+                  <div className="bg-white rounded-lg px-3 py-2 border border-stone-200">
+                    <span className="text-stone-600 block text-xs">
+                      {lang === "sk" ? "Hlava domácnosti" : "Head of household"}
+                    </span>
+                    <strong className="text-stone-900">{bg.headFullName || "—"}</strong>
+                  </div>
+                  <div className="bg-white rounded-lg px-3 py-2 border border-stone-200">
+                    <span className="text-stone-600 block text-xs">
+                      {lang === "sk" ? "Manželka" : "Wife"}
+                    </span>
+                    <strong className="text-stone-900">{bg.wifeFullName || "—"}</strong>
+                  </div>
+                  <div className="bg-white rounded-lg px-3 py-2 border border-stone-200">
+                    <span className="text-stone-600 block text-xs">
+                      {lang === "sk"
+                        ? "Priezvisko bytu (konsenzus)"
+                        : "Household surname (consensus)"}
+                    </span>
+                    <strong className="text-amber-900">
+                      {bg.consensusSurname || bg.headSurname || "—"}
+                    </strong>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* SECTION 6: Overview Sheet Panel OR SECTION 3: Household Table with Expandable Drawer */}
+      {isOverviewSheet ? (
+        <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-4">
+          {/* Obvod Metadata Summary Cards */}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3">
+            <div>
+              <h3 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                <Building2 className="w-5 h-5 text-purple-700" />
+                <span>
+                  {lang === "sk"
+                    ? "Prehľad sčítacieho obvodu – Zoznam domov a majiteľov"
+                    : "District Overview – Directory of Houses & Owners"}
+                </span>
+              </h3>
+              <p className="text-xs text-stone-600 mt-0.5">
+                {lang === "sk"
+                  ? "Kliknite na riadok domu pre zobrazenie výrezu s kontextom okolitých riadkov alebo úpravu údajov."
+                  : "Click a house row to view the crop with neighboring rows context or edit house fields."}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm">
+              <div className="px-3 py-1.5 rounded-lg bg-stone-100 border border-stone-200">
+                <span className="text-stone-600">
+                  {lang === "sk" ? "Obec / Okres: " : "Municipality / District: "}
+                </span>
+                <strong className="text-stone-900">
+                  {sheet.municipality_name} ({sheet.district_name || "—"})
+                </strong>
+              </div>
+              <div className="px-3 py-1.5 rounded-lg bg-purple-50 border border-purple-200">
+                <span className="text-purple-800">
+                  {lang === "sk" ? "Číslo obvodu: " : "District #: "}
+                </span>
+                <strong className="text-purple-950">{sheet.obvod_number || "—"}</strong>
+              </div>
+              <div className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200">
+                <span className="text-amber-900">
+                  {lang === "sk" ? "Sčítací komisár: " : "Commissioner: "}
+                </span>
+                <strong className="text-amber-950">{sheet.commissioner_name || "—"}</strong>
+              </div>
+              <div className="px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200">
+                <span className="text-emerald-900">
+                  {lang === "sk" ? "Počet zaznamenaných domov: " : "Recorded houses: "}
+                </span>
+                <strong className="text-emerald-950">{overview_houses.length}</strong>
+              </div>
+            </div>
+          </div>
+
+          {overview_houses.length === 0 ? (
+            <div className="text-center py-8 text-stone-600 text-sm">
+              {lang === "sk" ? (
+                <>
+                  Zatiaľ neboli z tohto prehľadu obvodu extrahované žiadne domy. Kliknite vyššie na{" "}
+                  <strong>„Znova spustiť AI OCR & párovanie“</strong>.
+                </>
+              ) : (
+                <>
+                  No houses have been extracted from this district overview yet. Click{" "}
+                  <strong>"Re-run AI OCR & matching"</strong> above.
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="w-full overflow-x-auto">
+              <table className="w-full table-auto text-left border-collapse text-xs sm:text-sm">
+                <thead>
+                  <tr className="border-b border-stone-300 bg-stone-100 text-stone-800 font-bold">
+                    <th className="py-2.5 px-1.5">
+                      {lang === "sk" ? "Radové č." : "Ord. #"}
+                    </th>
+                    {!splitLayout && (
+                      <th className="py-2.5 px-1.5">
+                        {lang === "sk" ? "Meno osady" : "Settlement"}
+                      </th>
+                    )}
+                    <th className="py-2.5 px-1.5">
+                      {lang === "sk" ? "Popisné č. domu" : "House #"}
+                    </th>
+                    {!splitLayout && (
+                      <th className="py-2.5 px-1.5">
+                        {lang === "sk" ? "Obývaný" : "Inhabited"}
+                      </th>
+                    )}
+                    <th className="py-2.5 px-1.5">
+                      {lang === "sk" ? "Meno majiteľa domu" : "House owner"}
+                    </th>
+                    {!splitLayout && (
+                      <th className="py-2.5 px-1.5 text-center">
+                        {lang === "sk" ? "Bytové strany" : "Units"}
+                      </th>
+                    )}
+                    <th className="py-2.5 px-1.5 text-center">
+                      {lang === "sk" ? "Prítomné osoby" : "Residents"}
+                    </th>
+                    <th className="py-2.5 px-1.5">
+                      {lang === "sk" ? "Poznámka" : "Remarks"}
+                    </th>
+                    <th className="py-2.5 px-1.5">
+                      {lang === "sk" ? "Prepojený sčítací hárok" : "Linked census sheet"}
+                    </th>
+                    <th className="py-2.5 px-1.5 text-right">
+                      {lang === "sk" ? "Akcia" : "Action"}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-200">
+                  {overview_houses.map((h) => {
+                    const isSelected = selectedHouse?.id === h.id;
+                    const isEditing = editingHouseId === h.id;
+                    const isFuzzyQueryMatch =
+                      Boolean(highlightPersonQuery) &&
+                      matchesPersonNameQuery(
+                        [h.owner_name, h.matched_head_name, h.remarks],
+                        highlightPersonQuery
+                      );
+                    const linkedTarget = h.matched_slovakiana_key || h.matched_sheet_id;
+                    return (
+                      <React.Fragment key={h.id}>
+                        <tr
+                          onClick={() => selectHouseAndSyncPage(h)}
+                          className={`cursor-pointer transition ${
+                            isSelected
+                              ? "bg-amber-50/80"
+                              : isFuzzyQueryMatch
+                              ? "bg-emerald-50/80 ring-1 ring-inset ring-emerald-300"
+                              : "hover:bg-stone-50"
+                          }`}
+                        >
+                          <td className="py-2.5 px-2 align-middle font-mono font-bold text-stone-800 whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5">
+                              <span>{h.ordinal_number ?? h.row_index}</span>
+                              {(h.booklet_page || h.page_side === "back") && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded bg-stone-200 text-stone-800 text-xs font-sans font-semibold"
+                                  title={
+                                    h.page_side === "back"
+                                      ? "Zadná strana skenu (_r)"
+                                      : "Predná strana skenu (_v)"
+                                  }
+                                >
+                                  str. {h.booklet_page || (h.page_side === "back" ? 2 : 1)}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          {!splitLayout && (
+                            <td className="py-2.5 px-2 align-middle text-stone-800">
+                              {normalizePlaceSpelling(h.settlement_name) || "—"}
+                            </td>
+                          )}
+                          <td className="py-2.5 px-2 align-middle whitespace-nowrap">
+                            <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-bold">
+                              Dom č. {h.house_number || "—"}
+                            </span>
+                          </td>
+                          {!splitLayout && (
+                            <td className="py-2.5 px-2 align-middle whitespace-nowrap">
+                              {h.is_inhabited === false ? (
+                                <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded bg-stone-200 text-stone-800 text-xs">
+                                  {lang === "sk" ? "Neobývaný" : "Uninhabited"}
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 text-xs font-semibold">
+                                  {lang === "sk" ? "Áno" : "Yes"}
+                                </span>
+                              )}
+                            </td>
+                          )}
+                          <td className="py-2.5 px-2 align-middle font-semibold text-stone-900">
+                            {h.owner_name || "—"}
+                          </td>
+                          {!splitLayout && (
+                            <td className="py-2.5 px-2 align-middle text-center font-semibold text-stone-800">
+                              {h.household_count ?? "—"}
+                            </td>
+                          )}
+                          <td className="py-2.5 px-2 align-middle text-center font-bold text-amber-900">
+                            {h.present_persons_count ?? "—"}
+                          </td>
+                          <td className="py-2.5 px-2 align-middle text-stone-700 break-words max-w-[200px]">
+                            {h.remarks || "—"}
+                          </td>
+                          <td className="py-2.5 px-2 align-middle">
+                            {h.matched_sheets && h.matched_sheets.length > 0 ? (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {h.matched_sheets.map((ms) => {
+                                  const msRef =
+                                    ms.cair_id || ms.slovakiana_key || String(ms.id);
+                                  const isSameYear = ms.census_year === h.census_year;
+                                  return (
+                                    <Link
+                                      key={`${ms.id}-${msRef}`}
+                                      to={`/scitacie-harky/${msRef}`}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className={`px-2.5 py-1 min-h-[32px] rounded-md text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap ${
+                                        isSameYear
+                                          ? "bg-emerald-100 hover:bg-emerald-200 text-emerald-950"
+                                          : "bg-indigo-100 hover:bg-indigo-200 text-indigo-950 border border-indigo-300"
+                                      }`}
+                                      title={`Sčítanie ${ms.census_year} · ${msRef}`}
+                                    >
+                                      <FileSpreadsheet
+                                        className={`w-3.5 h-3.5 shrink-0 ${
+                                          isSameYear ? "text-emerald-700" : "text-indigo-700"
+                                        }`}
+                                      />
+                                      <span>
+                                        {ms.census_year}: {msRef}
+                                      </span>
+                                      {(ms.head_of_household ||
+                                        (isSameYear && h.matched_head_name)) && (
+                                        <span className="opacity-85 font-normal">
+                                          ({ms.head_of_household || h.matched_head_name})
+                                        </span>
+                                      )}
+                                    </Link>
+                                  );
+                                })}
+                              </div>
+                            ) : linkedTarget ? (
+                              <Link
+                                to={`/scitacie-harky/${linkedTarget}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="px-2.5 py-1 min-h-[32px] rounded-md bg-emerald-100 hover:bg-emerald-200 text-emerald-950 text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+                              >
+                                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                                <span>{h.matched_slovakiana_key || `Hárok #${linkedTarget}`}</span>
+                                {h.matched_head_name && (
+                                  <span className="text-emerald-800 font-normal">
+                                    ({h.matched_head_name})
+                                  </span>
+                                )}
+                              </Link>
+                            ) : (
+                              <span className="text-stone-600 text-xs">
+                                {lang === "sk" ? "Nespárované" : "Unpaired"}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-2 align-middle text-right whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (isEditing) {
+                                    setEditingHouseId(null);
+                                  } else {
+                                    startEditHouse(h);
+                                  }
+                                }}
+                                className="px-3 py-1.5 min-h-[32px] rounded-md bg-stone-200 hover:bg-stone-300 text-stone-800 text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap cursor-pointer"
+                              >
+                                <Edit3 className="w-3.5 h-3.5 shrink-0" />
+                                <span>
+                                  {isEditing
+                                    ? lang === "sk"
+                                      ? "Zavrieť"
+                                      : "Close"
+                                    : lang === "sk"
+                                    ? "Upraviť"
+                                    : "Edit"}
+                                </span>
+                              </button>
+                              {confirmDeleteHouseId === h.id ? (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="inline-flex items-center gap-1.5 bg-red-50 border border-red-300 rounded-md px-2.5 py-1 min-h-[32px]"
+                                >
+                                  <button
+                                    type="button"
+                                    disabled={deletingHouseId === h.id}
+                                    onClick={() => handleDeleteHouse(h.id)}
+                                    className="text-xs font-bold text-red-700 hover:underline cursor-pointer"
+                                  >
+                                    {deletingHouseId === h.id
+                                      ? "…"
+                                      : lang === "sk"
+                                      ? "Vymazať"
+                                      : "Delete"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteHouseId(null)}
+                                    className="text-xs text-stone-600 hover:text-stone-900 cursor-pointer ml-1 px-1"
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setConfirmDeleteHouseId(h.id);
+                                  }}
+                                  title={
+                                    lang === "sk"
+                                      ? "Vymazať riadok domu"
+                                      : "Delete house row"
+                                  }
+                                  className="p-2 min-h-[32px] min-w-[32px] inline-flex items-center justify-center rounded-md bg-stone-200 hover:bg-red-100 text-stone-700 hover:text-red-700 cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+
+                        {isEditing && (
+                          <tr>
+                            <td
+                              colSpan={10}
+                              className="bg-amber-50/70 border-b border-amber-200 p-4"
+                            >
+                              <div className="space-y-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <h4 className="text-xs font-bold uppercase tracking-wider text-amber-950">
+                                    {lang === "sk"
+                                      ? `Úprava záznamu domu v prehľade obvodu (riadok #${h.row_index})`
+                                      : `Edit District Overview House Row (#${h.row_index})`}
+                                  </h4>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSaveHouse(h.id)}
+                                      disabled={savingHouseId === h.id}
+                                      className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <Save className="w-3.5 h-3.5" />
+                                      <span>
+                                        {lang === "sk" ? "Uložiť zmeny" : "Save changes"}
+                                      </span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingHouseId(null)}
+                                      className="px-3 py-1.5 rounded-lg bg-stone-200 hover:bg-stone-300 text-stone-800 font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                      <span>{lang === "sk" ? "Zrušiť" : "Cancel"}</span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {h.stitched_crop_path && (
+                                  <HoverZoomRowCrop
+                                    cropUrl={h.stitched_crop_path}
+                                    headerCropUrl={h.header_crop_url || activeHeaderCropUrl}
+                                    scanUrl={featureFlags.hover_row_zoom ? activeRowScanUrl : null}
+                                    yStart={
+                                      featureFlags.hover_row_zoom
+                                        ? h.y_start ??
+                                          resolveOverviewHouseRow(h)?.y_start ??
+                                          null
+                                        : null
+                                    }
+                                    yEnd={
+                                      featureFlags.hover_row_zoom
+                                        ? h.y_end ??
+                                          resolveOverviewHouseRow(h)?.y_end ??
+                                          null
+                                        : null
+                                    }
+                                    scanHeight={activeRowScanHeight}
+                                    scanWidth={activeRowScanWidth}
+                                    rowLabel={`Výrez domu (riadok č. ${
+                                      h.ordinal_number || h.row_index
+                                    }${h.booklet_page ? ` · strana ${h.booklet_page}` : ""}): dom č. ${
+                                      h.house_number || "—"
+                                    } – ${h.owner_name || ""}`.trim()}
+                                  />
+                                )}
+
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                  <div>
+                                    <label className="block font-semibold text-stone-700 mb-1">
+                                      Radové č. (stĺpec 1)
+                                    </label>
+                                    <input
+                                      type="number"
+                                      value={houseEditForm.ordinal_number}
+                                      onChange={(e) =>
+                                        setHouseEditForm({
+                                          ...houseEditForm,
+                                          ordinal_number: e.target.value,
+                                        })
+                                      }
+                                      className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block font-semibold text-stone-700 mb-1">
+                                      Meno osady (stĺpec 2)
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={houseEditForm.settlement_name}
+                                      onChange={(e) =>
+                                        setHouseEditForm({
+                                          ...houseEditForm,
+                                          settlement_name: e.target.value,
+                                        })
+                                      }
+                                      className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block font-semibold text-stone-700 mb-1">
+                                      Popisné č. domu (stĺpec 3)
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={houseEditForm.house_number}
+                                      onChange={(e) =>
+                                        setHouseEditForm({
+                                          ...houseEditForm,
+                                          house_number: e.target.value,
+                                        })
+                                      }
+                                      className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block font-semibold text-stone-700 mb-1">
+                                      Meno majiteľa domu (stĺpec 6)
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={houseEditForm.owner_name}
+                                      onChange={(e) =>
+                                        setHouseEditForm({
+                                          ...houseEditForm,
+                                          owner_name: e.target.value,
+                                        })
+                                      }
+                                      className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block font-semibold text-stone-700 mb-1">
+                                      Počet bytových strán (stĺpec 7)
+                                    </label>
+                                    <input
+                                      type="number"
+                                      value={houseEditForm.household_count}
+                                      onChange={(e) =>
+                                        setHouseEditForm({
+                                          ...houseEditForm,
+                                          household_count: e.target.value,
+                                        })
+                                      }
+                                      className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block font-semibold text-stone-700 mb-1">
+                                      Počet prítomných osôb (stĺpec 8)
+                                    </label>
+                                    <input
+                                      type="number"
+                                      value={houseEditForm.present_persons_count}
+                                      onChange={(e) =>
+                                        setHouseEditForm({
+                                          ...houseEditForm,
+                                          present_persons_count: e.target.value,
+                                        })
+                                      }
+                                      className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block font-semibold text-stone-700 mb-1">
+                                      Obývaný dom (stĺpce 4–5)
+                                    </label>
+                                    <select
+                                      value={houseEditForm.is_inhabited ? "1" : "0"}
+                                      onChange={(e) =>
+                                        setHouseEditForm({
+                                          ...houseEditForm,
+                                          is_inhabited: e.target.value === "1",
+                                        })
+                                      }
+                                      className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                    >
+                                      <option value="1">Obývaný</option>
+                                      <option value="0">Neobývaný</option>
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="block font-semibold text-stone-700 mb-1">
+                                      Poznámka (stĺpec 9)
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={houseEditForm.remarks}
+                                      onChange={(e) =>
+                                        setHouseEditForm({
+                                          ...houseEditForm,
+                                          remarks: e.target.value,
+                                        })
+                                      }
+                                      className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* SECTION 3: Household Table (`Členovia domácnosti`) with Expandable Inline Edit Drawer */
+        <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-base font-bold text-stone-900">
+                {lang === "sk"
+                  ? `Členovia domácnosti na sčítacom hárku (${members.length})`
+                  : `Household Members on Census Sheet (${members.length})`}
+              </h3>
+              <p className="text-xs text-stone-500">
+                {lang === "sk"
+                  ? "Kliknite na riadok pre náhľad výrezu alebo na „Upraviť“ pre rozbalenie všetkých stĺpcov sčítacieho hárku (1–24)."
+                  : "Click a row to preview its crop or click 'Edit' to expand all census columns (1–24)."}
+              </p>
+            </div>
+            <button
+              onClick={handleAddPerson}
+              className="px-3.5 py-2 min-h-[36px] rounded-lg bg-stone-900 hover:bg-stone-800 text-white font-semibold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>
+                {lang === "sk" ? "Pridať osobu do domácnosti" : "Add Person to Household"}
+              </span>
+            </button>
+          </div>
+
+          <div className="w-full overflow-x-auto">
+            <table className="w-full table-auto text-left border-collapse text-xs sm:text-sm">
+              <thead>
+                <tr className="border-b border-stone-300 bg-stone-100 text-stone-800 font-bold">
+                  <th className="py-2.5 px-1.5 whitespace-nowrap">#</th>
+                  <th className="py-2.5 px-1.5">
+                    {lang === "sk" ? "Priezvisko (a rodné)" : "Surname (& maiden)"}
+                  </th>
+                  <th className="py-2.5 px-1.5">
+                    {lang === "sk" ? "Krstné meno" : "Given name"}
+                  </th>
+                  <th className="py-2.5 px-1.5">
+                    {lang === "sk" ? "Pomer k hlave" : "Relation to head"}
+                  </th>
+                  {!splitLayout && (
+                    <th className="py-2.5 px-1.5 text-center">
+                      {lang === "sk" ? "Pohl." : "Sex"}
+                    </th>
+                  )}
+                  <th className="py-2.5 px-1.5">
+                    {lang === "sk" ? "Dátum nar. / Stav" : "Birth date / Status"}
+                  </th>
+                  <th className="py-2.5 px-1.5">
+                    {lang === "sk"
+                      ? splitLayout
+                        ? "Rodisko"
+                        : "Rodisko (Obec, Okres, Krajina)"
+                      : "Birthplace"}
+                  </th>
+                  {!splitLayout && (
+                    <>
+                      <th className="py-2.5 px-1.5">
+                        {lang === "sk" ? "Domovská a štátna prísl." : "Domicile & Citizenship"}
+                      </th>
+                      <th className="py-2.5 px-1.5">
+                        {lang === "sk" ? "Národnosť / Nábož." : "Nationality / Religion"}
+                      </th>
+                    </>
+                  )}
+                  <th className="py-2.5 px-1.5">
+                    {lang === "sk" ? "Povolanie / Prepojenia" : "Occupation / Links"}
+                  </th>
+                  <th className="py-2.5 px-1.5 text-right whitespace-nowrap">
+                    {lang === "sk" ? "Akcia" : "Action"}
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-200">
+                {members.length === 0 && (
+                  <tr>
+                    <td colSpan={11} className="py-6 px-4 text-center text-xs text-stone-600">
+                      {linked_overview_house?.is_inhabited === false ||
+                      sheet.household_owner?.toLowerCase().includes("neobývaný") ? (
+                        <div className="inline-flex flex-col items-center gap-1 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-amber-950">
+                          <span className="font-bold text-sm">
+                            Neobývaný dom (0 zapísaných obyvateľov na hárku)
+                          </span>
+                          <span>
+                            Majiteľ domu:{" "}
+                            <strong>
+                              {linked_overview_house?.owner_name ||
+                                sheet.household_owner ||
+                                "neznámy"}
+                            </strong>
+                            {linked_overview_house?.settlement_name
+                              ? ` · Osada: ${linked_overview_house.settlement_name}`
+                              : ""}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="inline-flex flex-col items-center gap-2 bg-stone-50 border border-stone-200 rounded-xl px-5 py-4 text-stone-700 max-w-lg mx-auto">
+                          <span className="font-semibold text-sm text-stone-900">
+                            {lang === "sk"
+                              ? "Na tomto sčítacom hárku zatiaľ nie sú zapísané žiadne osoby."
+                              : "No persons have been recorded on this census sheet yet."}
+                          </span>
+                          {sheet.is_blackened && (
+                            <span className="text-xs text-stone-600 leading-relaxed">
+                              {lang === "sk"
+                                ? "Poznámka: Hárok zo sčítania 1940 je čiastočne začiernený archívom (ochrana osobných údajov). Môžete spustiť AI OCR na viditeľné riadky alebo pridať čitateľné osoby ručne."
+                                : "Note: This 1940 census sheet is partially redacted by the archive. You can run AI OCR on visible rows or add readable persons manually."}
+                            </span>
+                          )}
+                          <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={handleDownloadAndProcess}
+                              disabled={processing}
+                              className="px-3.5 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>
+                                {lang === "sk"
+                                  ? "Spustiť AI OCR hárku"
+                                  : "Run AI OCR on sheet"}
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleAddPerson}
+                              className="px-3.5 py-1.5 min-h-[34px] rounded-lg bg-stone-900 hover:bg-stone-800 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>
+                                {lang === "sk" ? "Pridať osobu ručne" : "Add person manually"}
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )}
+                {members.map((m, memberIdx) => {
+                  const f = m.fact;
+                  const isEditing = editingMemberId === f.id;
+                  const isSelected = selectedMemberId === f.id;
+                  const isFuzzyQueryMatch =
+                    Boolean(highlightPersonQuery) &&
+                    matchesPersonNameQuery(
+                      [
+                        f.given_name_raw,
+                        f.given_name_sk,
+                        f.surname_raw,
+                        f.surname_normalized,
+                        f.mother_maiden_surname,
+                        f.observationes_raw,
+                      ],
+                      highlightPersonQuery
+                    );
+                  const bp = formatStructuredBirthPlace(f);
+                  const homeJur = formatHomeJurisdiction(f.home_jurisdiction);
+                  const hasOccupation = Boolean(
+                    (f.social_status_or_occupation &&
+                      f.social_status_or_occupation !== "—") ||
+                      f.occupation_position ||
+                      f.employer_workplace
+                  );
+                  const bytGroup = memberBytMap.get(f.id) || bytGroups[0] || null;
+                  const prevMember = memberIdx > 0 ? members[memberIdx - 1] : null;
+                  const prevBytGroup = prevMember
+                    ? memberBytMap.get(prevMember.fact.id) || bytGroups[0] || null
+                    : null;
+                  const showBytSubheader =
+                    hasMultipleByty &&
+                    bytGroup &&
+                    (memberIdx === 0 || prevBytGroup?.bytLabel !== bytGroup.bytLabel);
+
+                  const consensusInfo = detectSurnameConsensusUnification(
+                    m,
+                    bytGroup?.consensusSurname || null,
+                    featureFlags.census_surname_consensus
+                  );
+
+                  return (
+                    <React.Fragment key={f.id}>
+                      {showBytSubheader && bytGroup && (
+                        <tr className="bg-amber-100/80 border-y border-amber-300">
+                          <td colSpan={11} className="py-1.5 px-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded bg-stone-900 text-amber-300 font-bold">
+                                  {bytGroup.bytLabel}
+                                </span>
+                                <span className="font-bold text-stone-900">
+                                  {bytGroup.bytLabel} — Hlava domácnosti: {bytGroup.headFullName}
+                                </span>
+                                {bytGroup.wifeFullName && (
+                                  <span className="text-stone-700">
+                                    · Manželka: <strong>{bytGroup.wifeFullName}</strong>
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2 text-[11px]">
+                                {bytGroup.consensusSurname && (
+                                  <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded bg-white border border-amber-300 text-amber-950 font-semibold">
+                                    Priezvisko bytu (konsenzus): {bytGroup.consensusSurname}
+                                  </span>
+                                )}
+                                <span className="font-semibold text-stone-700 whitespace-nowrap">
+                                  {bytGroup.memberCount} osôb
+                                </span>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      <tr
+                        onClick={() => setSelectedMemberId(f.id)}
+                        className={`cursor-pointer transition ${
+                          isSelected
+                            ? "bg-amber-50/70"
+                            : isFuzzyQueryMatch
+                            ? "bg-emerald-50/80 ring-1 ring-inset ring-emerald-300"
+                            : "hover:bg-stone-50"
+                        }`}
+                      >
+                        <td className="py-2.5 px-2 align-middle font-bold text-stone-800 whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                            <span className="min-w-[1ch]">{f.person_row_number || "—"}</span>
+                            {bytGroup && (
+                              <span
+                                className="inline-flex items-center whitespace-nowrap shrink-0 rounded px-1.5 py-0.5 bg-stone-200 text-stone-800 text-xs font-semibold leading-none"
+                                title={`${bytGroup.bytLabel} — Hlava domácnosti: ${bytGroup.headFullName}`}
+                              >
+                                {bytGroup.bytLabel}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        <td className="py-2.5 px-2 align-middle font-semibold text-stone-900">
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span>{f.surname_raw || "—"}</span>
+                            {consensusInfo.wasUnified &&
+                              consensusInfo.fromRaw &&
+                              consensusInfo.toConsensus && (
+                                <span
+                                  title={`Priezvisko zjednotené podľa konsenzu bytu (${bytGroup?.bytLabel || "Byt"}): pôvodné OCR „${consensusInfo.fromRaw}“ → „${consensusInfo.toConsensus}“`}
+                                  className="inline-flex items-center whitespace-nowrap shrink-0 px-1.5 py-0.5 rounded bg-amber-100 border border-amber-300 text-amber-900 text-xs font-semibold leading-none"
+                                >
+                                  OCR: {consensusInfo.fromRaw} → {consensusInfo.toConsensus}
+                                </span>
+                              )}
+                          </div>
+                          {f.mother_maiden_surname &&
+                            f.sex !== "M" &&
+                            ![
+                              "syn",
+                              "dcéra",
+                              "vnuk",
+                              "vnučka",
+                              "chovanec",
+                              "chovanka",
+                              "adoptívny syn",
+                              "adoptívna dcéra",
+                              "nevlastný syn",
+                              "nevlastná dcéra",
+                            ].includes((f.relation_to_head || "").trim().toLowerCase()) && (
+                            <div className="text-xs font-medium text-amber-900">
+                              rod. {f.mother_maiden_surname}
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="py-2.5 px-2 align-middle font-semibold text-stone-900">
+                          {f.given_name_raw || "—"}
+                        </td>
+
+                        <td className="py-2.5 px-2 align-middle">
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              isHeadOfHouseholdRelation(f.relation_to_head)
+                                ? "bg-amber-200/80 text-amber-950 font-bold"
+                                : "bg-stone-200 text-stone-800"
+                            }`}
+                          >
+                            {f.relation_to_head || "—"}
+                          </span>
+                        </td>
+
+                        {!splitLayout && (
+                          <td className="py-2.5 px-2 align-middle text-center font-semibold text-stone-800">
+                            {f.sex || "—"}
+                          </td>
+                        )}
+
+                        <td className="py-2.5 px-2 align-middle">
+                          <div className="font-medium text-stone-900">
+                            {f.birth_or_event_date ||
+                              (f.birth_year_est ? String(f.birth_year_est) : "—")}
+                          </div>
+                          {f.marital_status && (
+                            <div className="text-xs text-stone-600">
+                              {f.marital_status}
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="py-2.5 px-2 align-middle">
+                          <div className="font-medium text-stone-900">
+                            {bp.primary}
+                          </div>
+                          {bp.secondary && (
+                            <div className="text-xs text-stone-600">
+                              {bp.secondary}
+                            </div>
+                          )}
+                        </td>
+
+                        {!splitLayout && (
+                          <>
+                            <td className="py-2.5 px-2 align-middle">
+                              <div className="text-stone-800">
+                                {homeJur ? `Dom.: ${homeJur}` : "—"}
+                              </div>
+                              {f.citizenship && (
+                                <div className="text-xs text-stone-600">
+                                  Štát.: {f.citizenship}
+                                </div>
+                              )}
+                            </td>
+
+                            <td className="py-2.5 px-2 align-middle">
+                              <div className="font-medium text-stone-800">
+                                {f.nationality || "—"}
+                              </div>
+                              {f.religion && (
+                                <div className="text-xs text-stone-600">
+                                  {f.religion}
+                                </div>
+                              )}
+                            </td>
+                          </>
+                        )}
+
+                        <td className="py-2.5 px-2 align-middle">
+                          {hasOccupation ? (
+                            <div className="space-y-1">
+                              <div className="leading-snug">
+                                <span className="font-medium text-stone-900">
+                                  {f.social_status_or_occupation || "—"}
+                                </span>
+                                {f.occupation_position && (
+                                  <span className="text-stone-600">
+                                    {" "}
+                                    ({f.occupation_position})
+                                  </span>
+                                )}
+                              </div>
+                              {f.employer_workplace && (
+                                <div className="text-stone-600 text-xs leading-snug">
+                                  {normalizePlaceSpelling(f.employer_workplace)}
+                                </div>
+                              )}
+                              {(Boolean(m.local_matches?.length) ||
+                                Boolean(m.fs_match?.fs_url)) && (
+                                <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                                  {m.local_matches?.map((lm) => (
+                                    <div
+                                      key={lm.match.id}
+                                      className="px-2 py-0.5 rounded bg-blue-100 text-blue-900 font-semibold text-xs inline-flex items-center gap-1"
+                                      title={lm.match.explanation_sk}
+                                    >
+                                      <CheckCircle2 className="w-3 h-3 shrink-0" />
+                                      <span>
+                                        Matrika ({lm.matrika_fact?.event_year}):{" "}
+                                        {lm.matrika_fact?.given_name_raw}{" "}
+                                        {lm.matrika_fact?.surname_raw}
+                                      </span>
+                                    </div>
+                                  ))}
+                                  {m.fs_match?.fs_url && (
+                                    <a
+                                      href={m.fs_match.fs_url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="px-2 py-1 min-h-[28px] rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-semibold text-xs inline-flex items-center gap-1"
+                                    >
+                                      <Sparkles className="w-3 h-3 shrink-0" />
+                                      <span>FamilySearch</span>
+                                      <ExternalLink className="w-3 h-3 shrink-0" />
+                                    </a>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {!m.local_matches?.length && !m.fs_match?.fs_url && (
+                                <span className="text-stone-600">—</span>
+                              )}
+                              {m.local_matches?.map((lm) => (
+                                <div
+                                  key={lm.match.id}
+                                  className="px-2 py-0.5 rounded bg-blue-100 text-blue-900 font-semibold text-xs inline-flex items-center gap-1"
+                                  title={lm.match.explanation_sk}
+                                >
+                                  <CheckCircle2 className="w-3 h-3 shrink-0" />
+                                  <span>
+                                    Matrika ({lm.matrika_fact?.event_year}):{" "}
+                                    {lm.matrika_fact?.given_name_raw}{" "}
+                                    {lm.matrika_fact?.surname_raw}
+                                  </span>
+                                </div>
+                              ))}
+                              {m.fs_match?.fs_url && (
+                                <a
+                                  href={m.fs_match.fs_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="px-2 py-1 min-h-[28px] rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-semibold text-xs inline-flex items-center gap-1"
+                                >
+                                  <Sparkles className="w-3 h-3 shrink-0" />
+                                  <span>FamilySearch</span>
+                                  <ExternalLink className="w-3 h-3 shrink-0" />
+                                </a>
+                              )}
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="py-2.5 px-2 align-middle text-right whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (isEditing) {
+                                  setEditingMemberId(null);
+                                } else {
+                                  startEditMember(m, bytGroup?.bytRoman);
+                                }
+                              }}
+                              className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap cursor-pointer ${
+                                isEditing
+                                  ? "bg-amber-600 text-white"
+                                  : "bg-stone-200 hover:bg-stone-300 text-stone-800"
+                              }`}
+                            >
+                              <Edit3 className="w-3.5 h-3.5 shrink-0" />
+                              <span>
+                                {isEditing
+                                  ? lang === "sk"
+                                    ? "Zavrieť"
+                                    : "Close"
+                                  : lang === "sk"
+                                  ? "Upraviť"
+                                  : "Edit"}
+                              </span>
+                            </button>
+
+                            {confirmDeleteMemberId === f.id ? (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex items-center gap-1.5 bg-red-50 border border-red-300 rounded-md px-2.5 py-1 min-h-[32px]"
+                              >
+                                <button
+                                  type="button"
+                                  disabled={deletingMemberId === f.id}
+                                  onClick={() => handleDeleteMember(f.id)}
+                                  className="text-xs font-bold text-red-700 hover:underline cursor-pointer"
+                                >
+                                  {deletingMemberId === f.id
+                                    ? "…"
+                                    : lang === "sk"
+                                    ? "Vymazať"
+                                    : "Delete"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteMemberId(null)}
+                                  className="text-xs text-stone-600 hover:text-stone-900 cursor-pointer ml-1 px-1"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setConfirmDeleteMemberId(f.id);
+                                }}
+                                title={
+                                  lang === "sk"
+                                    ? "Vymazať osobu z hárku"
+                                    : "Delete person from sheet"
+                                }
+                                className="p-2 min-h-[32px] min-w-[32px] inline-flex items-center justify-center rounded-md bg-stone-200 hover:bg-red-100 text-stone-700 hover:text-red-700 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+
+                      {/* Expandable Detail Edit Drawer */}
+                    { isEditing && (
+                      <tr>
+                        <td
+                          colSpan={11}
+                          className="bg-amber-50/70 border-b border-amber-200 p-4"
+                        >
+                          <div className="space-y-4">
+                            {/* Drawer Header */}
+                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200/80 pb-2.5">
+                              <div className="flex items-center gap-2">
+                                <UserCheck className="w-4 h-4 text-amber-800" />
+                                <span className="font-bold text-stone-900 text-sm">
+                                  {lang === "sk"
+                                    ? `Úprava osoby (riadok č. ${f.person_row_number || "—"}${
+                                        bytGroup ? ` · ${bytGroup.bytLabel}` : ""
+                                      }): `
+                                    : `Edit Person (row #${f.person_row_number || "—"}${
+                                        bytGroup ? ` · ${bytGroup.bytLabel}` : ""
+                                      }): `}
+                                  {f.given_name_raw || ""} {f.surname_raw || ""}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveMember(f.id)}
+                                  disabled={savingId === f.id}
+                                  className="px-3.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                                >
+                                  <Save className="w-3.5 h-3.5" />
+                                  <span>
+                                    {savingId === f.id
+                                      ? lang === "sk"
+                                        ? "Ukladám…"
+                                        : "Saving…"
+                                      : lang === "sk"
+                                      ? "Uložiť zmeny"
+                                      : "Save changes"}
+                                  </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingMemberId(null)}
+                                  className="px-3 py-1.5 rounded-lg bg-stone-200 hover:bg-stone-300 text-stone-800 font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                  <span>{lang === "sk" ? "Zrušiť" : "Cancel"}</span>
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Inline Row Crop with Pinned Column Header inside Drawer (only when not already visible in sticky left Split View) */}
+                            {!splitLayout &&
+                              (m.row?.stitched_crop_path || m.stitched_crop_url) && (
+                              <HoverZoomRowCrop
+                                cropUrl={m.row?.stitched_crop_path || m.stitched_crop_url}
+                                headerCropUrl={activeHeaderCropUrl}
+                                scanUrl={featureFlags.hover_row_zoom ? activeRowScanUrl : null}
+                                yStart={
+                                  featureFlags.hover_row_zoom
+                                    ? m.row?.y_start ?? rowsById.get(f.row_id)?.y_start ?? null
+                                    : null
+                                }
+                                yEnd={
+                                  featureFlags.hover_row_zoom
+                                    ? m.row?.y_end ?? rowsById.get(f.row_id)?.y_end ?? null
+                                    : null
+                                }
+                                scanHeight={activeRowScanHeight}
+                                scanWidth={activeRowScanWidth}
+                                rowLabel={`Výrez upravovaného riadku č. ${
+                                  f.person_row_number || "—"
+                                }: ${f.given_name_raw || ""} ${f.surname_raw || ""}`.trim()}
+                              />
+                            )}
+
+                              {/* 6 Grouped Form Sections */}
+                              <div
+                                className={`grid grid-cols-1 md:grid-cols-2 ${
+                                  splitLayout ? "" : "lg:grid-cols-3"
+                                } gap-4 text-xs sm:text-sm`}
+                              >
+                                {/* 1. Identita a vzťah */}
+                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                  <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
+                                    {lang === "sk" ? "1. Identita a vzťah" : "1. Identity & Relation"}
+                                  </h4>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Poradové č." : "Row #"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.person_row_number}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            person_row_number: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Byt č. (I, II, III…)" : "Unit # (I, II, III…)"}
+                                      </label>
+                                      <select
+                                        value={editForm.dwelling_unit || ""}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            dwelling_unit: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300 bg-white"
+                                      >
+                                        <option value="">
+                                          {lang === "sk" ? "Automaticky podľa hlavy" : "Auto by head"}
+                                        </option>
+                                        {ROMAN_NUMERALS.slice(0, 6).map((rom) => (
+                                          <option key={rom} value={rom}>
+                                            Byt č. {rom}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Priezvisko" : "Surname"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.surname_raw}
+                                        onChange={(e) =>
+                                          setEditForm({ ...editForm, surname_raw: e.target.value })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                      {bytGroup?.consensusSurname &&
+                                        editForm.surname_raw &&
+                                        stripFeminineSurnameSuffixClient(
+                                          editForm.surname_raw
+                                        ).toLowerCase() !==
+                                          stripFeminineSurnameSuffixClient(
+                                            bytGroup.consensusSurname
+                                          ).toLowerCase() && (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const target = formatConsensusSurnameForMemberClient(
+                                                bytGroup.consensusSurname!,
+                                                editForm.sex,
+                                                String(editForm.surname_raw || "")
+                                              );
+                                              setEditForm({
+                                                ...editForm,
+                                                surname_raw: target,
+                                              });
+                                            }}
+                                            className="mt-1 text-xs text-amber-800 hover:underline font-semibold cursor-pointer"
+                                          >
+                                            Použiť konsenzus bytu ({bytGroup.consensusSurname})
+                                          </button>
+                                        )}
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Rodné priezvisko" : "Maiden surname"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.mother_maiden_surname}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            mother_maiden_surname: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Krstné meno" : "Given name"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.given_name_raw}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            given_name_raw: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Pohlavie (M/F)" : "Sex (M/F)"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.sex}
+                                        onChange={(e) =>
+                                          setEditForm({ ...editForm, sex: e.target.value })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div className="col-span-2 space-y-1.5 pt-1 border-t border-stone-100">
+                                      <label className="block font-semibold text-stone-700">
+                                        {lang === "sk"
+                                          ? "Pomer k hlave domácnosti (stĺpec 4)"
+                                          : "Relation to head of household (col 4)"}
+                                      </label>
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                        <input
+                                          type="text"
+                                          list="relation-to-head-options"
+                                          placeholder="Napíšte alebo vyberte vzťah…"
+                                          value={editForm.relation_to_head}
+                                          onChange={(e) =>
+                                            setEditForm({
+                                              ...editForm,
+                                              relation_to_head: e.target.value,
+                                            })
+                                          }
+                                          className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                        />
+                                        <select
+                                          value={
+                                            ALL_RELATION_TO_HEAD_OPTIONS.some(
+                                              (o) => o.value === editForm.relation_to_head
+                                            )
+                                              ? editForm.relation_to_head
+                                              : ""
+                                          }
+                                          onChange={(e) => {
+                                            if (e.target.value) {
+                                              setEditForm({
+                                                ...editForm,
+                                                relation_to_head: e.target.value,
+                                              });
+                                            }
+                                          }}
+                                          className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300 bg-stone-50"
+                                        >
+                                          <option value="">— Rýchly výber zo zoznamu —</option>
+                                          {RELATION_TO_HEAD_GROUPS.map((grp) => (
+                                            <optgroup key={grp.groupLabel} label={grp.groupLabel}>
+                                              {grp.options.map((opt) => (
+                                                <option key={opt.value} value={opt.value}>
+                                                  {opt.label}
+                                                </option>
+                                              ))}
+                                            </optgroup>
+                                          ))}
+                                        </select>
+                                      </div>
+                                      <div className="flex flex-wrap gap-1.5 pt-1">
+                                        {QUICK_RELATION_PILLS.map((rel) => {
+                                          const active = editForm.relation_to_head === rel;
+                                          return (
+                                            <button
+                                              key={rel}
+                                              type="button"
+                                              onClick={() =>
+                                                setEditForm({
+                                                  ...editForm,
+                                                  relation_to_head: rel,
+                                                })
+                                              }
+                                              className={`px-2.5 py-1 min-h-[28px] rounded-md text-xs font-semibold transition cursor-pointer ${
+                                                active
+                                                  ? "bg-amber-600 text-white"
+                                                  : "bg-stone-100 hover:bg-stone-200 text-stone-800"
+                                              }`}
+                                            >
+                                              {rel}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* 2. Narodenie a rodinný stav */}
+                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                  <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
+                                    {lang === "sk"
+                                      ? "2. Narodenie a rodinný stav"
+                                      : "2. Birth & Marital Status"}
+                                  </h4>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Dátum narodenia" : "Birth date"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        placeholder="DD.MM.RRRR"
+                                        value={editForm.birth_or_event_date}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            birth_or_event_date: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Rodinný stav" : "Marital status"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.marital_status}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            marital_status: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Dátum sobáša" : "Marriage date"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.marriage_date}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            marriage_date: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Manžel / ka" : "Spouse"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.spouse_name}
+                                        onChange={(e) =>
+                                          setEditForm({ ...editForm, spouse_name: e.target.value })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Otec" : "Father"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.father_name}
+                                        onChange={(e) =>
+                                          setEditForm({ ...editForm, father_name: e.target.value })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Matka" : "Mother"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.mother_name}
+                                        onChange={(e) =>
+                                          setEditForm({ ...editForm, mother_name: e.target.value })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk"
+                                          ? "Počet živonarodených detí"
+                                          : "Children born alive"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.children_born_count}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            children_born_count: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Z nich zomrelých" : "Children deceased"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.children_deceased_count}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            children_deceased_count: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* 3. Rodisko (stĺpec 11) */}
+                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                  <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
+                                    {lang === "sk" ? "3. Rodisko (stĺpec 11)" : "3. Birthplace (col 11)"}
+                                  </h4>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "a) Obec" : "a) Municipality"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.birth_place_municipality}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            birth_place_municipality: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "b) Okres" : "b) District"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.birth_place_district}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            birth_place_district: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "c) Krajina" : "c) Country"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.birth_place_country}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            birth_place_country: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Celý zápis rodiska" : "Full birthplace raw"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.birth_place_raw}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            birth_place_raw: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* 4. Prisťahovanie a príslušnosť (stĺpce 12–14) */}
+                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                  <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
+                                    {lang === "sk"
+                                      ? "4. Prisťahovanie a príslušnosť (stĺpce 12–14)"
+                                      : "4. Residency & Citizenship (cols 12–14)"}
+                                  </h4>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Kedy sa prisťahoval" : "Moved in date"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.moved_in_date}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            moved_in_date: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Odkiaľ" : "Previous residence"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.previous_residence}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            previous_residence: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Domovská príslušnosť" : "Domicile"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.home_jurisdiction}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            home_jurisdiction: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Štátna príslušnosť" : "Citizenship"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.citizenship}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            citizenship: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* 5. Národnosť, Náboženstvo a Gramotnosť (stĺpce 15–17) */}
+                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                  <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
+                                    {lang === "sk"
+                                      ? "5. Národnosť, Náboženstvo a Gramotnosť (stĺpce 15–17)"
+                                      : "5. Nationality, Religion & Literacy (cols 15–17)"}
+                                  </h4>
+                                  <div className="grid grid-cols-1 gap-2">
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk"
+                                          ? "Národnosť (materský jazyk)"
+                                          : "Nationality (mother tongue)"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.nationality}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            nationality: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Náboženstvo (vyznanie)" : "Religion"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.religion}
+                                        onChange={(e) =>
+                                          setEditForm({ ...editForm, religion: e.target.value })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk"
+                                          ? "Gramotnosť (znalosť čítania a písania)"
+                                          : "Literacy (read & write)"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.literacy}
+                                        onChange={(e) =>
+                                          setEditForm({ ...editForm, literacy: e.target.value })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* 6. Povolanie a poznámky (stĺpce 18–24) */}
+                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                  <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
+                                    {lang === "sk"
+                                      ? "6. Povolanie a poznámky (stĺpce 18–24)"
+                                      : "6. Occupation & Remarks (cols 18–24)"}
+                                  </h4>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        Povolanie
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.social_status_or_occupation}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            social_status_or_occupation: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk"
+                                          ? "Postavenie v povolaní"
+                                          : "Occupation position"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.occupation_position}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            occupation_position: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk"
+                                          ? "Závod / zamestnávateľ"
+                                          : "Employer / workplace"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.employer_workplace}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            employer_workplace: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        {lang === "sk" ? "Prítomnosť" : "Presence status"}
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.presence_status}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            presence_status: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                    <div className="col-span-2">
+                                      <label className="block font-semibold text-stone-700 mb-0.5">
+                                        Poznámka (stĺpec 24)
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={editForm.observationes_raw}
+                                        onChange={(e) =>
+                                          setEditForm({
+                                            ...editForm,
+                                            observationes_raw: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Drawer Footer */}
+                              <div className="flex items-center justify-end gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingMemberId(null)}
+                                  className="px-3 py-1.5 rounded-lg bg-stone-200 hover:bg-stone-300 text-stone-800 font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                  <span>{lang === "sk" ? "Zrušiť" : "Cancel"}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveMember(f.id)}
+                                  disabled={savingId === f.id}
+                                  className="px-4 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                                >
+                                  <Save className="w-3.5 h-3.5" />
+                                  <span>
+                                    {savingId === f.id
+                                      ? lang === "sk"
+                                        ? "Ukladám…"
+                                        : "Saving…"
+                                      : lang === "sk"
+                                      ? "Uložiť zmeny"
+                                      : "Save changes"}
+                                  </span>
+                                </button>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      </div>
+      </div>
+    </div>
+  );
+}

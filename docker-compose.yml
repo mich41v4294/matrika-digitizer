@@ -1,0 +1,42 @@
+services:
+  matrika-app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: matrika-digitizer
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      - PANGOLIN_PUBLIC_URL=${PANGOLIN_PUBLIC_URL:-http://localhost:8080}
+      - APP_API_KEY=${APP_API_KEY:-}
+      - AI_PROVIDER=${AI_PROVIDER:-local}
+      - AI_BASE_URL=${AI_BASE_URL:-http://host.docker.internal:1234/v1}
+      - AI_MODELS_URL=${AI_MODELS_URL:-http://host.docker.internal:1234/api/v0/models}
+      - MODEL_OCR=${MODEL_OCR:-glm-ocr-g32-mixed_4_8-mlx}
+      - MODEL_DECISION=${MODEL_DECISION:-d1-3b-mlx}
+      - MODEL_EXTRACT=${MODEL_EXTRACT:-underdog-saluki-27b-1.0}
+      - MODEL_LAYOUT=${MODEL_LAYOUT:-glm-ocr-g32-mixed_4_8-mlx}
+      - FREELLM_BASE_URL=${FREELLM_BASE_URL:-https://api.openai.com/v1}
+      - FREELLM_API_KEY=${FREELLM_API_KEY:-}
+      - FREELLM_MODEL=${FREELLM_MODEL:-gpt-4o-mini}
+      - DATA_DIR=/app/data
+      - MATRIKA_DATA_DIR=${MATRIKA_DATA_DIR:-/app/data/uploads/matrika}
+      - CENSUS_DATA_DIR=${CENSUS_DATA_DIR:-/app/data/uploads/slovakiana}
+      - SAMPLE_DIR=/app/samples
+      - FRONTEND_DIST_DIR=/app/frontend/dist
+      - FS_ENV_FILE=/app/data/familysearch.env
+      - FS_ENVIRONMENT=${FS_ENVIRONMENT:-production}
+    volumes:
+      - ${HOST_DATA_DIR:-./data}:/app/data
+      - ${HOST_MATRIKA_DATA_DIR:-./data/uploads/matrika}:${MATRIKA_DATA_DIR:-/app/data/uploads/matrika}
+      - ${HOST_CENSUS_DATA_DIR:-./data/uploads/slovakiana}:${CENSUS_DATA_DIR:-/app/data/uploads/slovakiana}
+      # Optional: if you have local sample scans in ./samples, uncomment below to mount them read-only:
+      # - ./samples:/app/samples:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

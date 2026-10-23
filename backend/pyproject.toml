@@ -1,0 +1,37 @@
+[project]
+name = "matrika-backend"
+version = "0.1.0"
+description = "Matrika & Slovakiana Census Digitizer FastAPI backend"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlmodel>=0.0.22",
+    "sqlalchemy>=2.0.36",
+    "pydantic-settings>=2.6.0",
+    "httpx>=0.27.0",
+    "opencv-python-headless>=4.10.0",
+    "pillow>=11.0.0",
+    "numpy>=2.0.0",
+    "python-multipart>=0.0.12",
+    "websockets>=14.0",
+    "mcp>=2.0.0,<3.0.0",
+    "familysearch-mcp>=1.4.0",
+    "aiosqlite>=0.20.0",
+    "beautifulsoup4>=4.12.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

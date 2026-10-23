@@ -35,9 +35,11 @@ from backend.app.pipeline.lexicon import (
     fuzzy_name_matches,
     fuzzy_token_similarity,
     get_given_name_equivalents,
+    normalize_street_query,
     orthographic_fold,
     parse_house_number_int,
     strip_slovak_feminine_suffix,
+    text_matches_street,
     weighted_edit_similarity,
 )
 
@@ -356,6 +358,7 @@ def search_unified(
     census_sheet_id: int | None = None,
     municipality: str | None = None,
     district: str | None = None,
+    street: str | None = None,
     surname: str | None = None,
     year_from: int | None = None,
     year_to: int | None = None,
@@ -374,7 +377,7 @@ def search_unified(
     t_start = time.perf_counter()
     query_parts = [
         p.strip()
-        for p in (q, surname, municipality, house_number, occupation, religion)
+        for p in (q, surname, municipality, street, house_number, occupation, religion)
         if p and str(p).strip()
     ]
     query_label = " · ".join(query_parts)
@@ -402,6 +405,46 @@ def search_unified(
             | (PersonFact.village_sk.ilike(f"%{municipality.strip()}%"))  # type: ignore[union-attr]
             | (PersonFact.village_raw.ilike(f"%{municipality.strip()}%"))  # type: ignore[union-attr]
         )
+
+    st_matching_sheet_ids: set[int] = set()
+    st_matching_hh_ids: set[int] = set()
+    if street and street.strip():
+        from sqlalchemy import or_
+
+        for cs_row in session.exec(select(CensusSheet).where(CensusSheet.street_raw.is_not(None))).all():  # type: ignore[union-attr]
+            if cs_row.id and text_matches_street([cs_row.street_raw], street):
+                st_matching_sheet_ids.add(cs_row.id)
+        for hh_row in session.exec(select(CensusHousehold).where(CensusHousehold.street.is_not(None))).all():  # type: ignore[union-attr]
+            if text_matches_street([hh_row.street], street):
+                if hh_row.id:
+                    st_matching_hh_ids.add(hh_row.id)
+                if hh_row.census_sheet_id:
+                    st_matching_sheet_ids.add(hh_row.census_sheet_id)
+        for ovh_row in session.exec(
+            select(CensusOverviewHouse).where(CensusOverviewHouse.settlement_name.is_not(None))  # type: ignore[union-attr]
+        ).all():
+            if text_matches_street([ovh_row.settlement_name], street):
+                if ovh_row.census_sheet_id:
+                    st_matching_sheet_ids.add(ovh_row.census_sheet_id)
+                if ovh_row.matched_sheet_id:
+                    st_matching_sheet_ids.add(ovh_row.matched_sheet_id)
+
+        st_fold = fold_text_diacritics(street.strip())
+        st_clean, _ = normalize_street_query(street)
+        like_pat = f"%{st_clean or st_fold}%"
+        raw_like_pat = f"%{street.strip()}%"
+        street_clauses = [
+            PersonFact.village_folded.contains(st_clean or st_fold),  # type: ignore[union-attr]
+            PersonFact.village_raw.ilike(raw_like_pat),  # type: ignore[union-attr]
+            PersonFact.village_sk.ilike(raw_like_pat),  # type: ignore[union-attr]
+            PersonFact.observationes_raw.ilike(raw_like_pat),  # type: ignore[union-attr]
+            PersonFact.observationes_raw.ilike(like_pat),  # type: ignore[union-attr]
+        ]
+        if st_matching_sheet_ids:
+            street_clauses.append(PersonFact.census_sheet_id.in_(st_matching_sheet_ids))  # type: ignore[union-attr]
+        if st_matching_hh_ids:
+            street_clauses.append(PersonFact.census_household_id.in_(st_matching_hh_ids))  # type: ignore[union-attr]
+        stmt = stmt.where(or_(*street_clauses))
 
     if house_number and house_number.strip():
         h_int = parse_house_number_int(house_number)
@@ -700,6 +743,27 @@ def search_unified(
             }
         )
 
+    paged_sheet_ids = list({f.census_sheet_id for f in paged_facts if f.census_sheet_id})
+    paged_hh_ids = list({f.census_household_id for f in paged_facts if f.census_household_id})
+    paged_sheets_map = {
+        cs.id: cs
+        for cs in (
+            session.exec(select(CensusSheet).where(CensusSheet.id.in_(paged_sheet_ids))).all()  # type: ignore[union-attr]
+            if paged_sheet_ids
+            else []
+        )
+        if cs.id is not None
+    }
+    paged_hh_map = {
+        hh.id: hh
+        for hh in (
+            session.exec(select(CensusHousehold).where(CensusHousehold.id.in_(paged_hh_ids))).all()  # type: ignore[union-attr]
+            if paged_hh_ids
+            else []
+        )
+        if hh.id is not None
+    }
+
     records_out: list[dict[str, Any]] = []
     from backend.app.api.scans import resolve_scan_media_url
 
@@ -707,10 +771,17 @@ def search_unified(
         r = rows.get(f.row_id)
         s = scans.get(f.scan_id)
         fs = fs_map.get(f.id) if f.id is not None else None
+        cs_obj = paged_sheets_map.get(f.census_sheet_id) if f.census_sheet_id else None
+        hh_obj = paged_hh_map.get(f.census_household_id) if f.census_household_id else None
+        st_name = (
+            (cs_obj.street_raw if cs_obj and cs_obj.street_raw else None)
+            or (hh_obj.street if hh_obj and hh_obj.street else None)
+        )
         m_score = fact_scores.get(f.id or -1, 1.0)
         records_out.append(
             {
                 "fact": f,
+                "street_name": st_name,
                 "scan_filename": s.filename if s else None,
                 "scan_url": resolve_scan_media_url(s),
                 "header_crop_url": s.header_crop_path if s else None,
@@ -739,6 +810,18 @@ def search_unified(
                 (CensusSheet.district_folded.contains(d_fold))  # type: ignore[union-attr]
                 | (CensusSheet.district.ilike(f"%{district.strip()}%"))  # type: ignore[union-attr]
             )
+        if street and street.strip():
+            st_clean, _ = normalize_street_query(street)
+            st_like = f"%{st_clean or street.strip()}%"
+            if st_matching_sheet_ids:
+                sheet_stmt = sheet_stmt.where(
+                    (CensusSheet.id.in_(st_matching_sheet_ids))  # type: ignore[union-attr]
+                    | (CensusSheet.street_raw.ilike(st_like))  # type: ignore[union-attr]
+                )
+            else:
+                sheet_stmt = sheet_stmt.where(
+                    CensusSheet.street_raw.ilike(st_like)  # type: ignore[union-attr]
+                )
         if year_from is not None:
             sheet_stmt = sheet_stmt.where(CensusSheet.census_year >= year_from)
         if year_to is not None:

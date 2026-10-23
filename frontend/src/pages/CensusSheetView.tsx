@@ -1330,6 +1330,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     }
   };
 
+  // Build Byt (dwelling unit / household) groups across the sheet (memoized so editForm keystrokes do not recompute)
+  const { groups: bytGroups, memberBytMap } = useMemo(
+    () =>
+      detail
+        ? buildBytGroups(detail, featureFlags.census_multi_byt)
+        : { groups: [], memberBytMap: new Map<number, BytSummaryGroup>() },
+    [detail, featureFlags.census_multi_byt]
+  );
+
   if (loading) {
     return (
       <div className="p-8 text-center text-stone-600">
@@ -1365,12 +1374,6 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
   const isOverviewSheet =
     featureFlags.census_overview_sheets && sheet.sheet_type === "overview";
-
-  // Build Byt (dwelling unit / household) groups across the sheet (memoized so editForm keystrokes do not recompute)
-  const { groups: bytGroups, memberBytMap } = useMemo(
-    () => buildBytGroups(detail, featureFlags.census_multi_byt),
-    [detail, featureFlags.census_multi_byt]
-  );
   const hasMultipleByty = bytGroups.length >= 2;
 
   // Resolve scan URLs for front (_v), back (_r), and any extra pages

@@ -463,6 +463,21 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await manualZoomToggle.click();
     await overviewSheetsToggle.click();
 
+    // D. Filter by street in CensusHub (/scitacie-harky) and Unified Search (/hladanie)
+    await page.goto("/scitacie-harky?obec=Obec+Testov%C3%A1", { waitUntil: "networkidle" });
+    const censusStreetInput = page.getByLabel("Filtrovať podľa ulice alebo osady");
+    await expect(censusStreetInput).toBeVisible();
+    await censusStreetInput.fill("Hlavná");
+    await expect(page.locator("body")).toContainText("Dom č. 15");
+    await expect(page.locator("body")).toContainText("Hlavná");
+
+    await page.goto("/hladanie", { waitUntil: "networkidle" });
+    const unifiedStreetInput = page.getByLabel("Filtrovať podľa ulice");
+    await expect(unifiedStreetInput).toBeVisible();
+    await unifiedStreetInput.fill("Hlavná");
+    await expect(page.locator("body")).toContainText("Kováč");
+    await expect(page.locator("body")).toContainText("Hlavná");
+
     await assertCleanPageAndImages(page, diag, "interactive-census-and-flags");
   });
 });

@@ -23,7 +23,7 @@ from backend.app.pipeline.lexicon import (
     compute_person_fact_search_fields,
     normalize_house_number,
 )
-from backend.app.search.fts import ensure_fts_schema
+from backend.app.search.fts import ensure_fts_schema, search_unified
 
 
 class TestCensusVillageHouseMatching(unittest.TestCase):
@@ -223,6 +223,7 @@ class TestCensusVillageHouseMatching(unittest.TestCase):
                 municipality="Horný Čepeň",
                 municipality_folded="horny cepen",
                 municipality_key="10232",
+                street_raw="Škovránková",
                 house_number="7",
                 house_number_int=7,
                 sheet_number="0007",
@@ -230,9 +231,26 @@ class TestCensusVillageHouseMatching(unittest.TestCase):
                 sheet_type="household",
                 download_status="extracted",
             )
+            sheet_other_street = CensusSheet(
+                slovakiana_key="cair-test008",
+                census_year=1930,
+                district="Trnava",
+                municipality="Horný Čepeň",
+                municipality_folded="horny cepen",
+                municipality_key="10232",
+                street_raw="Hlavná",
+                house_number="8",
+                house_number_int=8,
+                sheet_number="0008",
+                household_owner="Peter Horváth",
+                sheet_type="household",
+                download_status="extracted",
+            )
             session.add(sheet)
+            session.add(sheet_other_street)
             session.commit()
             session.refresh(sheet)
+            session.refresh(sheet_other_street)
 
             head = PersonFact(
                 row_id=1,
@@ -375,6 +393,40 @@ class TestCensusVillageHouseMatching(unittest.TestCase):
                     for m in ov_filtered["houses_directory"][0]["extracted_members"]
                 )
             )
+
+            # Filter census sheets by street (diacritic-insensitive and with "ul." prefix)
+            res_street_skov = list_census_sheets(
+                background_tasks=BackgroundTasks(),
+                municipality="Horný Čepeň",
+                street="ul. Skovrankova",
+                session=session,
+            )
+            self.assertEqual(res_street_skov["total"], 1)
+            self.assertEqual(res_street_skov["sheets"][0]["sheet"]["slovakiana_id"], "cair-test007")
+            self.assertIn("Škovránková", res_street_skov["available_streets"])
+            self.assertIn("Hlavná", res_street_skov["available_streets"])
+
+            # Filter municipality overview by street
+            ov_street_hlavna = get_municipality_overview(
+                municipality="Horný Čepeň",
+                street="Hlavná",
+                session=session,
+            )
+            self.assertEqual(ov_street_hlavna["total_houses"], 1)
+            self.assertEqual(ov_street_hlavna["houses_directory"][0]["house_number"], "8")
+            self.assertEqual(ov_street_hlavna["houses_directory"][0]["street_name"], "Hlavná")
+
+            # Filter unified records search by street
+            unified_street = search_unified(
+                session,
+                street="Škovránková",
+            )
+            self.assertEqual(unified_street["total"], 3)
+            self.assertTrue(
+                all(item["street_name"] == "Škovránková" for item in unified_street["records"])
+            )
+            self.assertEqual(len(unified_street["catalog_sheets"]), 1)
+            self.assertEqual(unified_street["catalog_sheets"][0].slovakiana_key, "cair-test007")
 
 
 if __name__ == "__main__":

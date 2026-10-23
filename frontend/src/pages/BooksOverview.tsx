@@ -102,6 +102,7 @@ interface RecordItem {
     year?: number | null;
     raw_note: string;
   }>;
+  street_name?: string | null;
   stitched_crop_url: string | null;
   scan_filename: string | null;
   scan_url?: string | null;
@@ -192,6 +193,9 @@ export default function BooksOverview({
   const [villageFilter, setVillageFilter] = useState(
     () => searchParams.get("obec") || searchParams.get("village") || ""
   );
+  const [streetFilter, setStreetFilter] = useState(
+    () => searchParams.get("ulica") || searchParams.get("street") || ""
+  );
   const [houseNumberFilter, setHouseNumberFilter] = useState(
     () => searchParams.get("dom") || searchParams.get("house") || ""
   );
@@ -244,6 +248,7 @@ export default function BooksOverview({
     if (searchQuery.trim()) next.set("q", searchQuery.trim());
     if (recordTypeFilter) next.set("type", recordTypeFilter);
     if (villageFilter.trim()) next.set("obec", villageFilter.trim());
+    if (streetFilter.trim()) next.set("ulica", streetFilter.trim());
     if (houseNumberFilter.trim()) next.set("dom", houseNumberFilter.trim());
     if (next.toString() !== searchParams.toString()) {
       setSearchParams(next, { replace: true });
@@ -256,6 +261,7 @@ export default function BooksOverview({
     searchQuery,
     recordTypeFilter,
     villageFilter,
+    streetFilter,
     houseNumberFilter,
   ]);
 
@@ -329,6 +335,7 @@ export default function BooksOverview({
     if (searchQuery.trim()) recParams.set("q", searchQuery.trim());
     if (recordTypeFilter) recParams.set("record_type", recordTypeFilter);
     if (villageFilter.trim()) recParams.set("village", villageFilter.trim());
+    if (streetFilter.trim()) recParams.set("street", streetFilter.trim());
     if (houseNumberFilter.trim()) recParams.set("house_number", houseNumberFilter.trim());
     if (filterRecordsByScan && selectedScanId) {
       recParams.set("scan_id", String(selectedScanId));
@@ -450,7 +457,10 @@ export default function BooksOverview({
       elapsed_ms: 0,
     }));
     const hasTextQuery = Boolean(
-      searchQuery.trim() || villageFilter.trim() || houseNumberFilter.trim()
+      searchQuery.trim() ||
+        villageFilter.trim() ||
+        streetFilter.trim() ||
+        houseNumberFilter.trim()
     );
     const debounceTimer = window.setTimeout(
       () => {
@@ -470,6 +480,7 @@ export default function BooksOverview({
     searchQuery,
     recordTypeFilter,
     villageFilter,
+    streetFilter,
     houseNumberFilter,
     selectedScanId,
     filterRecordsByScan,
@@ -964,12 +975,14 @@ export default function BooksOverview({
     searchQuery.trim() ||
       recordTypeFilter ||
       villageFilter.trim() ||
+      streetFilter.trim() ||
       houseNumberFilter.trim() ||
       filterRecordsByScan
   );
   const activeQuerySummary = [
     searchQuery.trim(),
     villageFilter.trim(),
+    streetFilter.trim() ? `${lang === "sk" ? "ul." : "st."} ${streetFilter.trim()}` : "",
     houseNumberFilter.trim() ? `č. ${houseNumberFilter.trim()}` : "",
   ]
     .filter(Boolean)
@@ -1046,6 +1059,16 @@ export default function BooksOverview({
             value={villageFilter}
             onChange={(e) => setVillageFilter(e.target.value)}
             placeholder={lang === "sk" ? "Obec..." : "Village..."}
+            aria-label={lang === "sk" ? "Filtrovať podľa obce" : "Filter by village"}
+            className="w-32 px-3 py-2 rounded-lg border border-stone-300 text-sm"
+          />
+
+          <input
+            type="text"
+            value={streetFilter}
+            onChange={(e) => setStreetFilter(e.target.value)}
+            placeholder={lang === "sk" ? "Ulica..." : "Street..."}
+            aria-label={lang === "sk" ? "Filtrovať podľa ulice" : "Filter by street"}
             className="w-32 px-3 py-2 rounded-lg border border-stone-300 text-sm"
           />
 
@@ -1054,6 +1077,7 @@ export default function BooksOverview({
             value={houseNumberFilter}
             onChange={(e) => setHouseNumberFilter(e.target.value)}
             placeholder={lang === "sk" ? "Č. domu..." : "House #..."}
+            aria-label={lang === "sk" ? "Filtrovať podľa čísla domu" : "Filter by house number"}
             className="w-24 px-3 py-2 rounded-lg border border-stone-300 text-sm"
           />
 
@@ -1064,6 +1088,7 @@ export default function BooksOverview({
                 setSearchQuery("");
                 setRecordTypeFilter("");
                 setVillageFilter("");
+                setStreetFilter("");
                 setHouseNumberFilter("");
                 setFilterRecordsByScan(false);
               }}
@@ -1202,6 +1227,7 @@ export default function BooksOverview({
                 </span>
                 <span>
                   {cs.municipality_name}
+                  {cs.street_name ? `, ${cs.street_name}` : ""}
                   {cs.house_number_conscription || cs.house_number_raw
                     ? ` č. ${cs.house_number_conscription || cs.house_number_raw}`
                     : ""}
@@ -1349,9 +1375,14 @@ export default function BooksOverview({
                         {r.birth_or_event_date || r.baptism_or_burial_date}
                       </span>
                     )}
-                    {r.village_raw && (
+                    {(r.village_raw || item.street_name) && (
                       <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-950 font-medium text-xs">
                         {r.village_raw}
+                        {item.street_name &&
+                        (!r.village_raw ||
+                          r.village_raw.toLowerCase() !== item.street_name.toLowerCase())
+                          ? `${r.village_raw ? ", " : ""}${item.street_name}`
+                          : ""}
                         {r.house_number ? ` č. ${r.house_number}` : ""}
                         {r.fs_place_standardized ? ` → ${r.fs_place_standardized}` : ""}
                       </span>

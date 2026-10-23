@@ -2751,6 +2751,70 @@ _GENERIC_SETTLEMENT_KEYS: set[str] = {
 }
 
 
+_STREET_STOPWORDS = {
+    "ul",
+    "ulica",
+    "nam",
+    "namestie",
+    "osada",
+    "cesta",
+    "trieda",
+    "st",
+    "street",
+}
+
+
+def normalize_street_query(raw: str | None) -> tuple[str, list[str]]:
+    if not raw or not str(raw).strip():
+        return "", []
+    folded = fold_text_diacritics(str(raw).strip())
+    tokens = [
+        t
+        for t in re.split(r"[\s,;./()\-–—]+", folded)
+        if t and t not in _STREET_STOPWORDS
+    ]
+    cleaned = " ".join(tokens) if tokens else folded.strip()
+    return cleaned, tokens
+
+
+def text_matches_street(
+    candidates: list[str | None] | tuple[str | None, ...],
+    street_query: str | None,
+) -> bool:
+    if not street_query or not str(street_query).strip():
+        return True
+    q_clean, q_tokens = normalize_street_query(street_query)
+    if not q_clean:
+        return True
+    q_canon = canonical_municipality_key(q_clean)
+
+    valid_cands: list[str] = []
+    for raw_c in candidates:
+        if not raw_c or not str(raw_c).strip():
+            continue
+        c_str = str(raw_c).strip()
+        if c_str in ("-", "—", "?"):
+            continue
+        c_fold = fold_text_diacritics(c_str)
+        c_clean, _ = normalize_street_query(c_str)
+        if not c_clean and not c_fold:
+            continue
+        valid_cands.append(c_clean or c_fold)
+        if q_clean in c_clean or q_clean in c_fold:
+            return True
+        if q_tokens and all(t in c_fold for t in q_tokens):
+            return True
+        c_canon = canonical_municipality_key(c_clean or c_str)
+        if q_canon and c_canon and (q_canon == c_canon or q_canon in c_canon):
+            return True
+
+    if valid_cands and len(q_clean) >= 4:
+        if fuzzy_name_matches(q_clean, valid_cands, threshold=0.82):
+            return True
+
+    return False
+
+
 def is_compatible_settlement(
     overview_settlement: str | None,
     candidate_street: str | None,

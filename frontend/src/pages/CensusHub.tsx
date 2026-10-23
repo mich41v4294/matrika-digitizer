@@ -109,6 +109,7 @@ interface SerializedSheet {
   district_name: string | null;
   municipality_name: string;
   street_name: string | null;
+  matched_street?: boolean;
   house_number_raw: string | null;
   house_number_conscription: string | null;
   household_owner?: string | null;
@@ -156,6 +157,7 @@ interface HouseDirectoryEntry {
   house_number_int: number;
   ordinal_number: number | string | null;
   municipality?: string | null;
+  street_name?: string | null;
   settlement_name: string | null;
   is_inhabited: boolean | null;
   owner_name: string | null;
@@ -186,6 +188,7 @@ interface MunicipalityOverviewResponse {
   overview_sheets: SerializedSheet[];
   houses_directory: HouseDirectoryEntry[];
   total_houses: number;
+  available_streets?: string[];
 }
 
 interface Props {
@@ -294,6 +297,49 @@ function memberMatchesBirthPlace(
     .filter((t) => t && t !== "okr" && t !== "okres");
   if (tokens.length > 0 && tokens.every((t) => combined.includes(t))) {
     return true;
+  }
+  return false;
+}
+
+const STREET_STOPWORDS = new Set([
+  "ul",
+  "ulica",
+  "nam",
+  "namestie",
+  "osada",
+  "cesta",
+  "trieda",
+  "st",
+  "street",
+]);
+
+function normalizeStreetTokens(raw: string | null | undefined): string[] {
+  const folded = foldText(raw);
+  if (!folded) return [];
+  return folded
+    .split(/[\s,;./()\-–—]+/)
+    .filter((t) => t && !STREET_STOPWORDS.has(t));
+}
+
+function matchesStreetQuery(
+  candidates: Array<string | null | undefined>,
+  streetQuery: string
+): boolean {
+  const qRaw = streetQuery.trim();
+  if (!qRaw) return true;
+  const qTokens = normalizeStreetTokens(qRaw);
+  const qClean = qTokens.length > 0 ? qTokens.join(" ") : foldText(qRaw);
+  if (!qClean) return true;
+
+  for (const cand of candidates) {
+    if (!cand || !cand.trim()) continue;
+    const cTrim = cand.trim();
+    if (cTrim === "-" || cTrim === "—" || cTrim === "?") continue;
+    const cFold = foldText(cTrim);
+    const cTokens = normalizeStreetTokens(cTrim);
+    const cClean = cTokens.length > 0 ? cTokens.join(" ") : cFold;
+    if (cClean.includes(qClean) || cFold.includes(qClean)) return true;
+    if (qTokens.length > 0 && qTokens.every((t) => cFold.includes(t))) return true;
   }
   return false;
 }
@@ -423,7 +469,10 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     () => searchParams.get("obec_tag") || ""
   );
 
-  // Genealogical & Birthplace filters initialized from URL (`meno`, `rok_nar`, `rodisko`)
+  // Genealogical, Street & Birthplace filters initialized from URL (`ulica`, `meno`, `rok_nar`, `rodisko`)
+  const [streetFilter, setStreetFilter] = useState<string>(
+    () => searchParams.get("ulica") || searchParams.get("street") || ""
+  );
   const [personNameFilter, setPersonNameFilter] = useState<string>(
     () => searchParams.get("meno") || searchParams.get("person_name") || ""
   );
@@ -487,6 +536,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     } else if (selectedMunicipality && activeTab === "overview") {
       next.set("tab", "overview");
     }
+    if (streetFilter.trim()) next.set("ulica", streetFilter.trim());
     if (personNameFilter.trim()) next.set("meno", personNameFilter.trim());
     if (birthYearFilter.trim()) next.set("rok_nar", birthYearFilter.trim());
     if (birthPlaceFilter.trim()) next.set("rodisko", birthPlaceFilter.trim());
@@ -504,6 +554,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     selectedDistrictTag,
     selectedYearFilter,
     activeTab,
+    streetFilter,
     personNameFilter,
     birthYearFilter,
     birthPlaceFilter,
@@ -515,6 +566,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   // Data for Right Main Workspace
   const [muniOverview, setMuniOverview] = useState<MunicipalityOverviewResponse | null>(null);
   const [sheets, setSheets] = useState<CensusSheetRow[]>([]);
+  const [availableStreets, setAvailableStreets] = useState<string[]>([]);
   const [totalSheets, setTotalSheets] = useState<number>(0);
   const [scannedSheetsTotal, setScannedSheetsTotal] = useState<number>(0);
   const [isSearchingCensus, setIsSearchingCensus] = useState<boolean>(true);
@@ -659,6 +711,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       if (selectedDistrictName) sheetParams.set("district", selectedDistrictName);
       if (selectedMunicipality) sheetParams.set("municipality", selectedMunicipality);
       if (selectedYearFilter) sheetParams.set("census_year", selectedYearFilter);
+      if (streetFilter.trim()) sheetParams.set("street", streetFilter.trim());
       if (personNameFilter.trim()) sheetParams.set("person_name", personNameFilter.trim());
       if (birthYearFilter.trim()) sheetParams.set("birth_year", birthYearFilter.trim());
       if (birthPlaceFilter.trim()) sheetParams.set("birth_place", birthPlaceFilter.trim());
@@ -672,6 +725,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       if (selectedMunicipality) ovParams.set("municipality", selectedMunicipality);
       if (selectedDistrictName) ovParams.set("district", selectedDistrictName);
       if (selectedYearFilter) ovParams.set("census_year", selectedYearFilter);
+      if (streetFilter.trim()) ovParams.set("street", streetFilter.trim());
       if (personNameFilter.trim()) ovParams.set("person_name", personNameFilter.trim());
       if (birthYearFilter.trim()) ovParams.set("birth_year", birthYearFilter.trim());
       if (birthPlaceFilter.trim()) ovParams.set("birth_place", birthPlaceFilter.trim());
@@ -715,6 +769,9 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
         setSheets(loadedSheets);
         setTotalSheets(resolvedTotal);
         setScannedSheetsTotal(resolvedScanned);
+        if (Array.isArray(sd.available_streets)) {
+          setAvailableStreets(sd.available_streets);
+        }
         if (!isBackgroundPoll) {
           setCensusSearchProgress({
             running: false,
@@ -770,6 +827,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     }));
     const hasTextQuery = Boolean(
       workspaceSearch.trim() ||
+        streetFilter.trim() ||
         personNameFilter.trim() ||
         birthYearFilter.trim() ||
         birthPlaceFilter.trim()
@@ -793,6 +851,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     selectedDistrictName,
     selectedMunicipality,
     selectedYearFilter,
+    streetFilter,
     personNameFilter,
     birthYearFilter,
     birthPlaceFilter,
@@ -866,17 +925,29 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     selectedYearFilter,
   ]);
 
-  // Filter houses directory by workspaceSearch + personNameFilter + birthYearFilter + birthPlaceFilter
+  // Filter houses directory by workspaceSearch + streetFilter + personNameFilter + birthYearFilter + birthPlaceFilter
   const filteredHousesDirectory = useMemo(() => {
     const list = muniOverview?.houses_directory || [];
     const hasQ = Boolean(workspaceSearch.trim());
+    const hasSt = Boolean(streetFilter.trim());
     const hasPn = Boolean(personNameFilter.trim());
     const hasBy = Boolean(birthYearFilter.trim());
     const hasBp = Boolean(birthPlaceFilter.trim());
-    if (!hasQ && !hasPn && !hasBy && !hasBp) return list;
+    if (!hasQ && !hasSt && !hasPn && !hasBy && !hasBp) return list;
 
     const qFolded = foldText(workspaceSearch);
     return list.filter((h) => {
+      if (
+        hasSt &&
+        !h.sheet?.matched_street &&
+        !matchesStreetQuery(
+          [h.street_name, h.sheet?.street_name, h.settlement_name],
+          streetFilter
+        )
+      ) {
+        return false;
+      }
+
       const members =
         h.extracted_members || h.extracted_persons_preview || h.members_preview || [];
       if (members.some((m) => Boolean(m.matched_filter))) {
@@ -890,6 +961,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
             h.head_name,
             h.wife_name,
             h.slovakiana_key,
+            h.street_name,
             h.settlement_name,
             h.remarks,
           ]
@@ -928,13 +1000,15 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   }, [
     muniOverview,
     workspaceSearch,
+    streetFilter,
     personNameFilter,
     birthYearFilter,
     birthPlaceFilter,
   ]);
 
-  // Filter sheets in Tab 2 by cardSubFilter + personNameFilter + birthYearFilter + birthPlaceFilter
+  // Filter sheets in Tab 2 by cardSubFilter + streetFilter + personNameFilter + birthYearFilter + birthPlaceFilter
   const filteredSheets = useMemo(() => {
+    const hasSt = Boolean(streetFilter.trim());
     const hasPn = Boolean(personNameFilter.trim());
     const hasBy = Boolean(birthYearFilter.trim());
     const hasBp = Boolean(birthPlaceFilter.trim());
@@ -954,6 +1028,15 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       if (cardSubFilter === "household" && isOverview) return false;
       if (cardSubFilter === "ocr_done" && !isOcrDone) return false;
       if (cardSubFilter === "pending_ocr" && isOcrDone) return false;
+
+      if (
+        hasSt &&
+        !s.matched_street &&
+        !isOverview &&
+        !matchesStreetQuery([s.street_name], streetFilter)
+      ) {
+        return false;
+      }
 
       if (hasPn || hasBy || hasBp) {
         const members =
@@ -995,6 +1078,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   }, [
     sheets,
     cardSubFilter,
+    streetFilter,
     personNameFilter,
     birthYearFilter,
     birthPlaceFilter,
@@ -1327,10 +1411,33 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     }
   };
 
+  const streetSuggestions = useMemo(() => {
+    const map = new Map<string, string>();
+    const addCandidate = (val?: string | null) => {
+      if (!val || !val.trim()) return;
+      const t = val.trim();
+      if (t === "-" || t === "—" || t === "?") return;
+      const k = foldText(t);
+      if (k && !map.has(k)) {
+        map.set(k, t);
+      }
+    };
+    for (const st of availableStreets) addCandidate(st);
+    for (const st of muniOverview?.available_streets || []) addCandidate(st);
+    for (const row of sheets) addCandidate(row.sheet.street_name);
+    for (const h of muniOverview?.houses_directory || []) {
+      addCandidate(h.street_name);
+      addCandidate(h.sheet?.street_name);
+      addCandidate(h.settlement_name);
+    }
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b, "sk"));
+  }, [availableStreets, muniOverview, sheets]);
+
   const hasAnyActiveFilter = Boolean(
     selectedMunicipality ||
       selectedDistrictName ||
       selectedYearFilter ||
+      streetFilter.trim() ||
       personNameFilter.trim() ||
       birthYearFilter.trim() ||
       birthPlaceFilter.trim() ||
@@ -1345,6 +1452,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     setSelectedDistrictTag("");
     setSelectedYearFilter("");
     setLocationQuickFilter("");
+    setStreetFilter("");
     setPersonNameFilter("");
     setBirthYearFilter("");
     setBirthPlaceFilter("");
@@ -1367,6 +1475,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     selectedMunicipality,
     selectedDistrictName,
     selectedYearFilter,
+    streetFilter,
     personNameFilter,
     birthYearFilter,
     birthPlaceFilter,
@@ -2201,10 +2310,10 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
               </div>
             </div>
 
-            {/* Structured Filter Bar: Obec/Okres | Meno/Priezvisko | Rok narodenia | Rodisko */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2 bg-stone-50/90 p-2 rounded-lg border border-stone-200">
+            {/* Structured Filter Bar: Obec/Okres | Ulica/Osada | Meno/Priezvisko | Rok narodenia | Rodisko */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 bg-stone-50/90 p-2 rounded-lg border border-stone-200">
               {/* 1. Obec / Okres quick filter */}
-              <div className="lg:col-span-3 relative">
+              <div className="relative">
                 <MapPin className="w-3.5 h-3.5 text-amber-600 absolute left-2.5 top-2.5 pointer-events-none" />
                 <input
                   type="text"
@@ -2213,8 +2322,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   onChange={(e) => handleLocationQuickFilterChange(e.target.value)}
                   placeholder={
                     lang === "sk"
-                      ? "Obec alebo okres (napr. Trnava, Nitra)..."
-                      : "Municipality or district (e.g. Trnava, Nitra)..."
+                      ? "Obec / okres (napr. Trnava)..."
+                      : "Municipality / district..."
                   }
                   aria-label="Filtrovať podľa obce alebo okresu"
                   className="w-full pl-8 pr-8 py-1.5 min-h-[34px] rounded-md border border-stone-300 bg-white text-xs sm:text-sm"
@@ -2254,8 +2363,49 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 </datalist>
               </div>
 
-              {/* 2. Meno / Priezvisko filter */}
-              <div className="lg:col-span-3 relative">
+              {/* 2. Ulica / Osada filter */}
+              <div className="relative">
+                <Building2 className="w-3.5 h-3.5 text-purple-700 absolute left-2.5 top-2.5 pointer-events-none" />
+                <input
+                  type="text"
+                  list="census-street-datalist"
+                  value={streetFilter}
+                  onChange={(e) => setStreetFilter(e.target.value)}
+                  placeholder={
+                    lang === "sk"
+                      ? "Ulica / osada (napr. Hlavná)..."
+                      : "Street / settlement (e.g. Hlavná)..."
+                  }
+                  aria-label={
+                    lang === "sk"
+                      ? "Filtrovať podľa ulice alebo osady"
+                      : "Filter by street or settlement"
+                  }
+                  className="w-full pl-8 pr-8 py-1.5 min-h-[34px] rounded-md border border-stone-300 bg-white text-xs sm:text-sm"
+                />
+                {streetFilter && (
+                  <button
+                    type="button"
+                    onClick={() => setStreetFilter("")}
+                    className="absolute right-1 top-1 p-1.5 text-stone-500 hover:text-stone-800 cursor-pointer"
+                    title={
+                      lang === "sk"
+                        ? "Vyčistiť filter ulice / osady"
+                        : "Clear street / settlement filter"
+                    }
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                <datalist id="census-street-datalist">
+                  {streetSuggestions.slice(0, 80).map((stName) => (
+                    <option key={`street-${stName}`} value={stName} />
+                  ))}
+                </datalist>
+              </div>
+
+              {/* 3. Meno / Priezvisko filter */}
+              <div className="relative">
                 <Users className="w-3.5 h-3.5 text-emerald-700 absolute left-2.5 top-2.5 pointer-events-none" />
                 <input
                   type="text"
@@ -2263,8 +2413,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   onChange={(e) => setPersonNameFilter(e.target.value)}
                   placeholder={
                     lang === "sk"
-                      ? "Meno / priezvisko (napr. Kováč, Ján, Vargová)..."
-                      : "Name / surname (e.g. Kováč, Ján, Vargová)..."
+                      ? "Meno / priezvisko (napr. Kováč)..."
+                      : "Name / surname (e.g. Kováč)..."
                   }
                   aria-label="Filtrovať podľa mena alebo priezviska osoby"
                   className="w-full pl-8 pr-8 py-1.5 min-h-[34px] rounded-md border border-stone-300 bg-white text-xs sm:text-sm"
@@ -2281,8 +2431,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 )}
               </div>
 
-              {/* 3. Rok narodenia filter */}
-              <div className="lg:col-span-3 relative">
+              {/* 4. Rok narodenia filter */}
+              <div className="relative">
                 <span className="text-xs font-bold text-amber-800 absolute left-2.5 top-2 pointer-events-none">
                   {lang === "sk" ? "*Rok" : "*Yr"}
                 </span>
@@ -2292,8 +2442,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   onChange={(e) => setBirthYearFilter(e.target.value)}
                   placeholder={
                     lang === "sk"
-                      ? "Rok nar. (napr. 1900, 1900±2, 1890-1900)..."
-                      : "Birth year (e.g. 1900, 1900±2, 1890-1900)..."
+                      ? "Rok nar. (napr. 1900, 1900±2)..."
+                      : "Birth year (e.g. 1900, 1900±2)..."
                   }
                   aria-label="Filtrovať podľa roku narodenia"
                   className="w-full pl-10 pr-8 py-1.5 min-h-[34px] rounded-md border border-stone-300 bg-white text-xs sm:text-sm"
@@ -2310,8 +2460,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 )}
               </div>
 
-              {/* 4. Rodisko / Domov (obec/okres) filter */}
-              <div className="lg:col-span-3 relative">
+              {/* 5. Rodisko / Domov (obec/okres) filter */}
+              <div className="relative">
                 <Home className="w-3.5 h-3.5 text-indigo-700 absolute left-2.5 top-2.5 pointer-events-none" />
                 <input
                   type="text"
@@ -2319,8 +2469,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   onChange={(e) => setBirthPlaceFilter(e.target.value)}
                   placeholder={
                     lang === "sk"
-                      ? "Rodisko / domov (napr. Trnava, Nitra)..."
-                      : "Birthplace / domicile (e.g. Trnava, Nitra)..."
+                      ? "Rodisko / domov (napr. Trnava)..."
+                      : "Birthplace / domicile..."
                   }
                   aria-label="Filtrovať podľa rodiska alebo domovskej príslušnosti"
                   className="w-full pl-8 pr-8 py-1.5 min-h-[34px] rounded-md border border-stone-300 bg-white text-xs sm:text-sm"
@@ -2351,6 +2501,9 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
               const censusQuerySummary = [
                 selectedMunicipality || (selectedDistrictName ? `okr. ${selectedDistrictName}` : ""),
                 selectedYearFilter,
+                streetFilter.trim()
+                  ? `${lang === "sk" ? "ul." : "st."} ${streetFilter.trim()}`
+                  : "",
                 personNameFilter.trim(),
                 birthYearFilter.trim() ? `*${birthYearFilter.trim()}` : "",
                 birthPlaceFilter.trim(),
@@ -2663,9 +2816,15 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                                   </span>
                                 )}
                               </div>
-                              {entry.settlement_name && (
+                              {(entry.street_name || entry.settlement_name) && (
                                 <div className="text-xs text-stone-600 mt-0.5">
-                                  {lang === "sk" ? "Osada:" : "Settlement:"} {entry.settlement_name}
+                                  {entry.street_name &&
+                                  (!entry.settlement_name ||
+                                    foldText(entry.street_name) === foldText(entry.settlement_name))
+                                    ? `${lang === "sk" ? "Ulica:" : "Street:"} ${entry.street_name}`
+                                    : `${lang === "sk" ? "Osada:" : "Settlement:"} ${entry.settlement_name}${
+                                        entry.street_name ? ` · ${entry.street_name}` : ""
+                                      }`}
                                 </div>
                               )}
                             </td>

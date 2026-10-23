@@ -64,6 +64,7 @@ from backend.app.pipeline.lexicon import (
     normalize_village,
     owner_surname_folded_from_name,
     strip_slovak_feminine_suffix,
+    text_matches_street,
 )
 from backend.app.pipeline.schemas import validate_census_date, validate_person_name, validate_sex
 from backend.app.search.fts import (
@@ -846,6 +847,7 @@ def list_census_sheets(
     census_year: int | None = None,
     municipality: str | None = None,
     district: str | None = None,
+    street: str | None = None,
     person_name: str | None = None,
     person_query: str | None = None,
     owner_query: str | None = None,
@@ -895,17 +897,24 @@ def list_census_sheets(
             if _sheet_matches_district(s, district, municipality_specified=has_muni)
         ]
 
+    available_streets_set: set[str] = {
+        s.street_raw.strip()
+        for s in all_matching
+        if s.street_raw and s.street_raw.strip() and s.street_raw.strip() not in ("-", "—", "?")
+    }
+
+    has_st = bool(street and street.strip())
     has_pn = bool(person_name and person_name.strip())
     has_by = bool(birth_year and str(birth_year).strip())
     has_bp = bool(birth_place and birth_place.strip())
     has_q = bool(q and q.strip())
-    has_person_or_q_filter = has_pn or has_by or has_bp or has_q
+    has_person_or_q_filter = has_st or has_pn or has_by or has_bp or has_q
 
     t_search_start = time.perf_counter()
     scanned_total = len(all_matching)
     query_label = " · ".join(
         str(x).strip()
-        for x in (municipality, district, person_name, birth_year, birth_place, q)
+        for x in (municipality, district, street, person_name, birth_year, birth_place, q)
         if x and str(x).strip()
     )
     if has_person_or_q_filter:
@@ -929,6 +938,7 @@ def list_census_sheets(
     facts_by_sheet: dict[int, list[PersonFact]] = {}
     overview_counts_by_sheet: dict[int, int] = {}
     matched_ovh_owners_by_sheet: dict[int, list[str]] = {}
+    matched_ovh_settlements_by_sheet: dict[int, list[str]] = {}
     ovh_by_overview_sheet: dict[int, list[CensusOverviewHouse]] = {}
     row_ocr_by_id: dict[int, str] = {}
 
@@ -939,6 +949,8 @@ def list_census_sheets(
             .order_by(CensusHousehold.id.asc())
         ).all():
             all_households_by_sheet.setdefault(hh.census_sheet_id, []).append(hh)
+            if hh.street and hh.street.strip() and hh.street.strip() not in ("-", "—", "?"):
+                available_streets_set.add(hh.street.strip())
             if hh.census_sheet_id not in households_by_sheet or (hh.dwelling_unit or "I") == "I":
                 if hh.census_sheet_id not in households_by_sheet:
                     households_by_sheet[hh.census_sheet_id] = hh
@@ -971,7 +983,11 @@ def list_census_sheets(
                 overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
             )
             ovh_by_overview_sheet.setdefault(ovh.census_sheet_id, []).append(ovh)
+            if ovh.settlement_name and ovh.settlement_name.strip() and ovh.settlement_name.strip() not in ("-", "—", "?"):
+                available_streets_set.add(ovh.settlement_name.strip())
             if ovh.matched_sheet_id:
+                if ovh.settlement_name:
+                    matched_ovh_settlements_by_sheet.setdefault(ovh.matched_sheet_id, []).append(ovh.settlement_name)
                 for tx in (ovh.owner_name, ovh.raw_ocr_text, ovh.remarks):
                     if tx:
                         matched_ovh_owners_by_sheet.setdefault(ovh.matched_sheet_id, []).append(tx)
@@ -983,6 +999,16 @@ def list_census_sheets(
             s_facts = facts_by_sheet.get(sid, [])
             s_hhs = all_households_by_sheet.get(sid, [])
             s_ovhs = ovh_by_overview_sheet.get(sid, [])
+
+            if has_st and street:
+                street_candidates: list[str | None] = [
+                    s.street_raw,
+                    *(hh_item.street for hh_item in s_hhs),
+                    *matched_ovh_settlements_by_sheet.get(sid, []),
+                    *(ovh_item.settlement_name for ovh_item in s_ovhs),
+                ]
+                if not text_matches_street(street_candidates, street):
+                    continue
             name_parts: list[str | None] = [
                 s.household_owner,
                 s.commissioner_name,
@@ -1137,6 +1163,16 @@ def list_census_sheets(
             persons_preview.append(_serialize_person_preview(pf, matched_filter=is_pf_match))
 
         s_payload = _serialize_sheet(s, overview_houses_count=ov_cnt)
+        if not s_payload.get("street_name"):
+            fallback_st = (
+                (hh.street if hh and hh.street else None)
+                or next((h_it.street for h_it in sheet_hhs if h_it.street), None)
+                or next(iter(matched_ovh_settlements_by_sheet.get(sid, [])), None)
+            )
+            if fallback_st:
+                s_payload["street_name"] = fallback_st
+        if has_st:
+            s_payload["matched_street"] = True
         s_payload["linked_house_sheets"] = linked_sheets
         s_payload["extracted_persons_preview"] = persons_preview
         s_payload["members_preview"] = persons_preview
@@ -1189,6 +1225,7 @@ def list_census_sheets(
         "total": total,
         "scanned_total": scanned_total,
         "sheets": results,
+        "available_streets": sorted(available_streets_set),
         "search_progress": census_progress,
     }
 
@@ -2349,6 +2386,7 @@ def get_municipality_overview(
     municipality: str | None = None,
     census_year: int | None = None,
     district: str | None = None,
+    street: str | None = None,
     person_name: str | None = None,
     person_query: str | None = None,
     owner_query: str | None = None,
@@ -2486,10 +2524,21 @@ def get_municipality_overview(
                 if m_folded in fold_text_diacritics(ovh.municipality or "")
             ]
 
+    has_st = bool(street and street.strip())
     has_pn = bool(person_name and person_name.strip())
     has_by = bool(birth_year and str(birth_year).strip())
     has_bp = bool(birth_place and birth_place.strip())
     has_q = bool(q and q.strip())
+    available_streets_set: set[str] = set()
+    for s_it in sheets:
+        if s_it.street_raw and s_it.street_raw.strip() and s_it.street_raw.strip() not in ("-", "—", "?"):
+            available_streets_set.add(s_it.street_raw.strip())
+    for hh_it in households_by_sheet.values():
+        if hh_it.street and hh_it.street.strip() and hh_it.street.strip() not in ("-", "—", "?"):
+            available_streets_set.add(hh_it.street.strip())
+    for ovh_it in ov_houses:
+        if ovh_it.settlement_name and ovh_it.settlement_name.strip() and ovh_it.settlement_name.strip() not in ("-", "—", "?"):
+            available_streets_set.add(ovh_it.settlement_name.strip())
 
     def _build_preview_for_facts(s_facts: list[PersonFact]) -> list[dict[str, Any]]:
         previews: list[dict[str, Any]] = []
@@ -2515,7 +2564,20 @@ def get_municipality_overview(
         entry: dict[str, Any],
         s_facts: list[PersonFact],
         ovh_obj: CensusOverviewHouse | None = None,
+        sheet_obj: CensusSheet | None = None,
+        hh_obj: CensusHousehold | None = None,
     ) -> bool:
+        if has_st and street:
+            st_cands: list[str | None] = [
+                entry.get("street_name"),
+                sheet_obj.street_raw if sheet_obj else None,
+                hh_obj.street if hh_obj else None,
+                ovh_obj.settlement_name if ovh_obj else None,
+                entry.get("settlement_name") if not (sheet_obj and sheet_obj.street_raw) else None,
+            ]
+            if not text_matches_street(st_cands, street):
+                return False
+
         name_parts: list[str | None] = [
             entry.get("owner_name"),
             entry.get("head_name"),
@@ -2548,6 +2610,7 @@ def get_municipality_overview(
                         entry.get("head_name"),
                         entry.get("wife_name"),
                         entry.get("slovakiana_key"),
+                        entry.get("street_name"),
                         entry.get("settlement_name"),
                         entry.get("remarks"),
                         ovh_obj.raw_ocr_text if ovh_obj else None,
@@ -2650,11 +2713,16 @@ def get_municipality_overview(
             matched_sheet_payload["extracted_persons_preview"] = persons_preview
             matched_sheet_payload["members_preview"] = persons_preview
 
+        entry_street = (
+            (matched_sheet.street_raw if matched_sheet and matched_sheet.street_raw else None)
+            or (hh.street if hh and hh.street else None)
+        )
         entry_obj = {
             "house_number": hn_str or str(ovh.ordinal_number or ""),
             "house_number_int": ovh.house_number_int or (int(hn_key) if hn_key.isdigit() else 999999),
             "ordinal_number": ovh.ordinal_number,
             "municipality": ov_muni_display,
+            "street_name": entry_street,
             "settlement_name": canonical_municipality_display(ovh.settlement_name) or ovh.settlement_name or ov_muni_display,
             "is_inhabited": ovh.is_inhabited,
             "owner_name": ovh.owner_name,
@@ -2677,7 +2745,7 @@ def get_municipality_overview(
             "household": hh_ser,
             "linked_house_sheets": linked_sheets,
         }
-        if _house_matches_filters(entry_obj, s_facts, ovh_obj=ovh):
+        if _house_matches_filters(entry_obj, s_facts, ovh_obj=ovh, sheet_obj=matched_sheet, hh_obj=hh):
             houses_directory.append(entry_obj)
 
     # Also add any household CensusSheets that weren't in the overview table yet
@@ -2707,11 +2775,13 @@ def get_municipality_overview(
         s_payload["extracted_persons_preview"] = persons_preview
         s_payload["members_preview"] = persons_preview
         s_muni_display = canonical_municipality_display(s.municipality) or s.municipality
+        entry_street = s.street_raw or (hh.street if hh and hh.street else None)
         entry_obj = {
             "house_number": hn_str or "?",
             "house_number_int": hn_int,
             "ordinal_number": None,
             "municipality": s_muni_display,
+            "street_name": entry_street,
             "settlement_name": canonical_municipality_display(s.street_raw) or s.street_raw or s_muni_display,
             "is_inhabited": True,
             "owner_name": head_name,
@@ -2734,7 +2804,7 @@ def get_municipality_overview(
             "household": hh_ser,
             "linked_house_sheets": linked_sheets,
         }
-        if _house_matches_filters(entry_obj, s_facts):
+        if _house_matches_filters(entry_obj, s_facts, sheet_obj=s, hh_obj=hh):
             houses_directory.append(entry_obj)
 
     houses_directory.sort(key=lambda item: (item["house_number_int"], str(item["house_number"])))
@@ -2751,6 +2821,7 @@ def get_municipality_overview(
         "overview_sheets": overview_sheets,
         "houses_directory": houses_directory,
         "total_houses": len(houses_directory),
+        "available_streets": sorted(available_streets_set),
     }
 
 
@@ -2763,6 +2834,7 @@ def list_overview_houses(
     municipality: str | None = None,
     census_year: int | None = None,
     district: str | None = None,
+    street: str | None = None,
     person_name: str | None = None,
     person_query: str | None = None,
     owner_query: str | None = None,
@@ -2786,6 +2858,8 @@ def list_overview_houses(
     if district and district.strip():
         d_fold = fold_text_diacritics(district.strip())
         houses = [h for h in houses if d_fold in fold_text_diacritics(h.district or "")]
+    if street and street.strip():
+        houses = [h for h in houses if text_matches_street([h.settlement_name], street)]
 
     eff_query = person_name or person_query or owner_query or q
     if eff_query and eff_query.strip():

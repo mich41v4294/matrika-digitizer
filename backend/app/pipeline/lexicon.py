@@ -8,6 +8,7 @@ most common FamilySearch spelling for the same area and period (Yargo -> Varga).
 from __future__ import annotations
 
 import difflib
+from functools import lru_cache
 import json
 import math
 import re
@@ -642,6 +643,7 @@ def reset_fs_name_cache_for_tests(path: Path | None = None) -> None:
         _FS_NAME_CACHE = {"areas": {}} if path is None else None
         _MATCH_SURNAME_MEMO.clear()
         _MATCH_GIVEN_MEMO.clear()
+        _CANDIDATE_WEIGHTS_MEMO.clear()
 
 
 def _load_fs_name_cache() -> dict[str, Any]:
@@ -744,6 +746,7 @@ def record_observed_fs_names(
         _FS_NAME_CACHE = cache
         _MATCH_SURNAME_MEMO.clear()
         _MATCH_GIVEN_MEMO.clear()
+        _CANDIDATE_WEIGHTS_MEMO.clear()
         _save_fs_name_cache(cache)
 
 
@@ -758,6 +761,7 @@ def _clean_name_token(token: str | None) -> str | None:
     return cleaned or None
 
 
+@lru_cache(maxsize=65536)
 def _apply_digraphs(token: str) -> str:
     s = token.translate(_DIACRITIC_FOLD).lower()
     for src, dst in (
@@ -775,6 +779,7 @@ def _apply_digraphs(token: str) -> str:
     return s
 
 
+@lru_cache(maxsize=65536)
 def _phonetic_skeleton(token: str) -> str:
     """Consonant skeleton used to block obviously unrelated candidates."""
     s = _apply_digraphs(token)
@@ -789,6 +794,7 @@ def _sub_cost(a: str, b: str) -> float:
     return _CONFUSION_COST.get(frozenset({a, b}), 1.0)
 
 
+@lru_cache(maxsize=65536)
 def _paleographic_distance(left: str, right: str) -> float:
     """Weighted Levenshtein distance using Kurrent/cursive confusion costs."""
     a = _apply_digraphs(left)
@@ -813,6 +819,7 @@ def _paleographic_distance(left: str, right: str) -> float:
     return prev[-1]
 
 
+@lru_cache(maxsize=65536)
 def _paleographic_similarity(left: str, right: str) -> float:
     a = _apply_digraphs(left)
     b = _apply_digraphs(right)
@@ -822,12 +829,22 @@ def _paleographic_similarity(left: str, right: str) -> float:
     return max(0.0, 1.0 - dist / max(len(a), len(b), 1))
 
 
+_CANDIDATE_WEIGHTS_MEMO: dict[tuple[str, str, str], dict[str, float]] = {}
+_MATCH_SURNAME_MEMO: dict[tuple[str, str, str], tuple[str | None, float]] = {}
+_MATCH_GIVEN_MEMO: dict[tuple[str, str, str], tuple[str | None, float]] = {}
+
+
 def _merge_candidate_weights(
     regional: dict[str, dict[str, dict[str, float]]],
     area: str,
     period: str,
     cache_field: str,
 ) -> dict[str, float]:
+    cache_key = (cache_field, area, period)
+    cached_weights = _CANDIDATE_WEIGHTS_MEMO.get(cache_key)
+    if cached_weights is not None:
+        return cached_weights
+
     weights: dict[str, float] = {}
 
     def add(table: dict[str, float] | None, scale: float) -> None:
@@ -849,6 +866,13 @@ def _merge_candidate_weights(
     neighbor_period = "1700_1850" if period == "1850_1920" else "1850_1920"
     neighbor = (cache.get("areas") or {}).get(_cache_bucket_key(area, neighbor_period)) or {}
     add({k: float(v) + 4.0 for k, v in (neighbor.get(cache_field) or {}).items()}, 0.7)
+    if cache_field == "given_names":
+        for name in KNOWN_HISTORICAL_GIVEN_NAMES:
+            canonical = GIVEN_NAME_OCR_REPAIRS.get(name, name[0].upper() + name[1:] if name else name)
+            if canonical and canonical[0].islower():
+                canonical = canonical[0].upper() + canonical[1:]
+            weights.setdefault(canonical, 8.0)
+    _CANDIDATE_WEIGHTS_MEMO[cache_key] = weights
     return weights
 
 
@@ -890,10 +914,6 @@ def _score_against_lexicon(
     if best_name and _paleographic_similarity(raw_clean, best_name) >= AUTO_CORRECT_THRESHOLD:
         return best_name, max(best_score, _paleographic_similarity(raw_clean, best_name))
     return None, 0.0
-
-
-_MATCH_SURNAME_MEMO: dict[tuple[str, str, str], tuple[str | None, float]] = {}
-_MATCH_GIVEN_MEMO: dict[tuple[str, str, str], tuple[str | None, float]] = {}
 
 
 def match_surname_to_area_period(
@@ -949,12 +969,6 @@ def match_given_name_to_area_period(
     if memo_key in _MATCH_GIVEN_MEMO:
         return _MATCH_GIVEN_MEMO[memo_key]
     candidates = _merge_candidate_weights(REGIONAL_FS_GIVEN_NAMES, area_key, period, "given_names")
-    # Always include the historical given-name lexicon as candidates.
-    for name in KNOWN_HISTORICAL_GIVEN_NAMES:
-        canonical = GIVEN_NAME_OCR_REPAIRS.get(name, name[0].upper() + name[1:] if name else name)
-        if canonical[0].islower():
-            canonical = canonical[0].upper() + canonical[1:]
-        candidates.setdefault(canonical, 8.0)
     res = _score_against_lexicon(raw_clean, candidates)
     if len(_MATCH_GIVEN_MEMO) < 4096:
         _MATCH_GIVEN_MEMO[memo_key] = res
@@ -1218,13 +1232,18 @@ def normalize_village(raw_village: str | None) -> tuple[str | None, str | None, 
     return (place_part or None), (place_part or None), house_no
 
 
+_COMPILED_OCCUPATION_ITEMS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(rf"\b{re.escape(k)}\b"), v) for k, v in OCCUPATION_MAP.items()
+]
+
+
 def normalize_occupation(raw_text: str | None) -> str | None:
     if not raw_text:
         return None
     low = raw_text.lower()
     found: list[str] = []
-    for k, v in OCCUPATION_MAP.items():
-        if re.search(rf"\b{re.escape(k)}\b", low) and v not in found:
+    for pat, v in _COMPILED_OCCUPATION_ITEMS:
+        if pat.search(low) and v not in found:
             found.append(v)
     return ", ".join(found) if found else None
 
@@ -1359,6 +1378,7 @@ for _ocr_g, _rep_g in GIVEN_NAME_OCR_REPAIRS.items():
         _GIVEN_TO_CANONICAL_ID[_ocr_g.translate(_DIACRITIC_FOLD).lower()] = _mapped_cid
 
 
+@lru_cache(maxsize=65536)
 def fold_text_diacritics(text: str | None) -> str:
     """Folds Slovak, Hungarian, and German diacritics to lowercase ASCII."""
     if not text:
@@ -1912,6 +1932,7 @@ def owner_surname_folded_from_name(owner: str | None) -> str | None:
     return ascii_fold(last_tok)
 
 
+@lru_cache(maxsize=65536)
 def orthographic_fold(token: str | None) -> str:
     """
     Folds Slovak, Hungarian, German, and Latin surname/given-name orthography
@@ -1992,6 +2013,7 @@ _DIGRAPH_TO_DIGRAPH_COST: dict[frozenset[str], float] = {
 }
 
 
+@lru_cache(maxsize=65536)
 def _ocr_dp_distance(a: str, b: str) -> float:
     """Weighted edit distance supporting 1-char and 2-char OCR/cursive confusions."""
     if a == b:
@@ -2056,6 +2078,7 @@ def _ocr_dp_distance(a: str, b: str) -> float:
     return dp[n][m]
 
 
+@lru_cache(maxsize=65536)
 def weighted_edit_similarity(left: str | None, right: str | None) -> float:
     """
     Computes OCR confusion-weighted similarity in [0.0, 1.0] between two name tokens.
@@ -2085,6 +2108,7 @@ def weighted_edit_similarity(left: str | None, right: str | None) -> float:
     return round(max(sim_raw, sim_orth), 4)
 
 
+@lru_cache(maxsize=65536)
 def _surname_core_stem(token: str) -> str:
     """Extracts a gender-neutral surname stem for fuzzy comparison."""
     repaired = SURNAME_OCR_REPAIRS.get(token.lower()) or sanitize_corrupted_surname_suffix(token) or token
@@ -2097,6 +2121,7 @@ def _surname_core_stem(token: str) -> str:
     return f
 
 
+@lru_cache(maxsize=65536)
 def fuzzy_token_similarity(q_tok: str | None, cand_tok: str | None) -> float:
     """
     Computes OCR-aware fuzzy similarity in [0.0, 1.0] between a single query token
@@ -2223,9 +2248,10 @@ def fuzzy_name_match_score(
         return 1.0 if q_full_folded == full_haystack.strip() else 0.98
 
     token_scores: list[float] = []
+    unique_cand_tokens = list(dict.fromkeys(cand_tokens))
     for qt in q_tokens:
         best_for_qt = 0.0
-        for ct in cand_tokens:
+        for ct in unique_cand_tokens:
             sim = fuzzy_token_similarity(qt, ct)
             if sim > best_for_qt:
                 best_for_qt = sim
@@ -2546,6 +2572,13 @@ CENSUS_RELATION_MAP: dict[str, str] = {
 _SORTED_RELATION_ITEMS: list[tuple[str, str]] = sorted(
     CENSUS_RELATION_MAP.items(), key=lambda kv: len(kv[0]), reverse=True
 )
+_COMPILED_RELATION_ITEMS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(rf"(?:^|(?<!\w)){re.escape(k.rstrip('.'))}\.?(?:$|(?=\s|[.,;:/()\-'\"’]|$))"),
+        v,
+    )
+    for k, v in _SORTED_RELATION_ITEMS
+]
 
 
 def normalize_census_relation(raw_text: str | None) -> str | None:
@@ -2562,10 +2595,8 @@ def normalize_census_relation(raw_text: str | None) -> str | None:
         return CENSUS_RELATION_MAP[low]
     if (low + ".") in CENSUS_RELATION_MAP:
         return CENSUS_RELATION_MAP[low + "."]
-    for k, v in _SORTED_RELATION_ITEMS:
-        k_stripped = k.rstrip(".")
-        pat = rf"(?:^|(?<!\w)){re.escape(k_stripped)}\.?(?:$|(?=\s|[.,;:/()\-'\"’]|$))"
-        if re.search(pat, low_raw):
+    for pat, v in _COMPILED_RELATION_ITEMS:
+        if pat.search(low_raw):
             return v
     return cleaned
 
@@ -2634,6 +2665,7 @@ _CANONICAL_MUNICIPALITY_DISPLAY: dict[str, str] = {
 }
 
 
+@lru_cache(maxsize=16384)
 def canonical_municipality_key(municipality: str | None) -> str:
     """
     Deterministic canonical municipality key for strict village-level matching.

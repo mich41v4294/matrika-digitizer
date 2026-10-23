@@ -382,8 +382,9 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
   );
 
   useEffect(() => {
-    const intervalMs = isActiveMatching ? 1000 : 5000;
+    const intervalMs = isActiveMatching ? 1000 : 8000;
     const timer = setInterval(async () => {
+      if (document.visibilityState === "hidden") return;
       try {
         const r = await fetch("/api/familysearch/status");
         if (!r.ok) return;

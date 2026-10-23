@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -1508,7 +1509,9 @@ async def run_census_extraction_for_row(
         if human_notes:
             user_prompt += f"\nVerified human correction: {human_notes}"
 
-        extract_image_path, extract_image_rel = resolve_row_extraction_crop(row)
+        extract_image_path, extract_image_rel = await asyncio.to_thread(
+            resolve_row_extraction_crop, row
+        )
 
         res = await ai_client.chat_completion(
             stage="extract",
@@ -2178,27 +2181,6 @@ def _resolve_byt_surname_consensus(
     if not byt_facts:
         return None
 
-    # Query SQLite for high-confidence surnames attested outside this sheet
-    db_folded_counts: dict[str, int] = {}
-    if session is not None:
-        current_sheet_id = byt_facts[0].census_sheet_id
-        current_fact_ids = {f.id for f in byt_facts if f.id is not None}
-        try:
-            other_facts = session.exec(
-                select(PersonFact.surname_normalized, PersonFact.surname_raw, PersonFact.census_sheet_id, PersonFact.id)
-                .where(PersonFact.surname_raw.is_not(None))
-            ).all()
-            for s_norm, s_raw, s_sheet_id, s_id in other_facts:
-                if s_id in current_fact_ids or (current_sheet_id and s_sheet_id == current_sheet_id):
-                    continue
-                st = _surname_stem(s_norm or s_raw)
-                if st and not _is_ocr_surname_artifact(st):
-                    fd = ascii_fold(st)
-                    if fd:
-                        db_folded_counts[fd] = db_folded_counts.get(fd, 0) + 1
-        except Exception:
-            pass
-
     # Identify head of household in this Byt
     head_fact: PersonFact | None = None
     for f in byt_facts:
@@ -2218,6 +2200,42 @@ def _resolve_byt_surname_consensus(
         st = _surname_stem(raw_s)
         if st:
             fact_stems.append((idx, f, st))
+
+    # Query SQLite for high-confidence surnames attested outside this sheet (scoped to candidate stems)
+    db_folded_counts: dict[str, int] = {}
+    if session is not None and fact_stems:
+        current_sheet_id = byt_facts[0].census_sheet_id
+        current_fact_ids = {f.id for f in byt_facts if f.id is not None}
+        cand_stems_set = {st for _, _, st in fact_stems}
+        for st in list(cand_stems_set):
+            st_f = ascii_fold(st)
+            if st_f in _KNOWN_SURNAME_BY_FOLDED:
+                cand_stems_set.add(_KNOWN_SURNAME_BY_FOLDED[st_f][0])
+        cand_folded_set = {ascii_fold(st) for st in cand_stems_set if ascii_fold(st)}
+        try:
+            from backend.app.pipeline.lexicon import _apply_digraphs
+
+            cand_digraphs = {_apply_digraphs(st) for st in cand_stems_set if _apply_digraphs(st)}
+            stmt_other = select(
+                PersonFact.surname_normalized,
+                PersonFact.surname_raw,
+                PersonFact.census_sheet_id,
+                PersonFact.id,
+            ).where(
+                (PersonFact.surname_folded.in_(cand_digraphs | cand_folded_set))  # type: ignore[union-attr]
+                | (PersonFact.surname_normalized.in_(cand_stems_set))  # type: ignore[union-attr]
+                | (PersonFact.surname_raw.in_(cand_stems_set))  # type: ignore[union-attr]
+            )
+            for s_norm, s_raw, s_sheet_id, s_id in session.exec(stmt_other).all():
+                if s_id in current_fact_ids or (current_sheet_id and s_sheet_id == current_sheet_id):
+                    continue
+                st = _surname_stem(s_norm or s_raw)
+                if st and not _is_ocr_surname_artifact(st):
+                    fd = ascii_fold(st)
+                    if fd:
+                        db_folded_counts[fd] = db_folded_counts.get(fd, 0) + 1
+        except Exception:
+            pass
 
     # Build clusters of paleographically similar stems (similarity >= 0.85)
     clusters: list[list[tuple[int, PersonFact, str]]] = []
@@ -2793,11 +2811,15 @@ def reconcile_census_household_relationships(
             session.delete(stale_hh)
         matched_ovh: CensusOverviewHouse | None = None
         if sheet.sheet_type != "overview" and sheet.municipality and sheet.house_number:
-            ov_houses = session.exec(
-                select(CensusOverviewHouse).where(
-                    CensusOverviewHouse.census_year == sheet.census_year,
+            ov_stmt = select(CensusOverviewHouse).where(
+                CensusOverviewHouse.census_year == sheet.census_year,
+            )
+            if sheet.house_number_int is not None:
+                ov_stmt = ov_stmt.where(
+                    (CensusOverviewHouse.house_number_int == sheet.house_number_int)
+                    | (CensusOverviewHouse.house_number == str(sheet.house_number).strip())
                 )
-            ).all()
+            ov_houses = session.exec(ov_stmt).all()
             for ovh in ov_houses:
                 if can_match_overview_house_to_sheet(ovh, sheet):
                     matched_ovh = ovh
@@ -2824,12 +2846,16 @@ def reconcile_census_household_relationships(
         session.commit()
         return None
 
-    row_by_id: dict[int, RecordRow] = {}
-    for f in facts:
-        if f.row_id:
-            r_obj = session.get(RecordRow, f.row_id)
-            if r_obj:
-                row_by_id[f.row_id] = r_obj
+    row_ids = list({f.row_id for f in facts if f.row_id})
+    row_by_id: dict[int, RecordRow] = (
+        {
+            r_obj.id: r_obj
+            for r_obj in session.exec(select(RecordRow).where(RecordRow.id.in_(row_ids))).all()  # type: ignore[union-attr]
+            if r_obj.id is not None
+        }
+        if row_ids
+        else {}
+    )
 
     def _fact_sort_key(f: PersonFact) -> tuple[int, int]:
         r_obj = row_by_id.get(f.row_id) if f.row_id else None
@@ -3332,11 +3358,15 @@ def reconcile_census_household_relationships(
 
     # Link any CensusOverviewHouse in the same municipality & census_year with matching house_number
     if sheet.sheet_type != "overview" and sheet.municipality and sheet.house_number:
-        ov_houses = session.exec(
-            select(CensusOverviewHouse).where(
-                CensusOverviewHouse.census_year == sheet.census_year,
+        ov_stmt = select(CensusOverviewHouse).where(
+            CensusOverviewHouse.census_year == sheet.census_year,
+        )
+        if sheet.house_number_int is not None:
+            ov_stmt = ov_stmt.where(
+                (CensusOverviewHouse.house_number_int == sheet.house_number_int)
+                | (CensusOverviewHouse.house_number == str(sheet.house_number).strip())
             )
-        ).all()
+        ov_houses = session.exec(ov_stmt).all()
         for ovh in ov_houses:
             if can_match_overview_house_to_sheet(ovh, sheet) and ovh.matched_sheet_id != sheet.id:
                 ovh.matched_sheet_id = sheet.id
@@ -3693,7 +3723,8 @@ async def extract_census_overview_sheet(
     raw_ocr_items: list[tuple[int, int, int, ScanImage, Any, RecordRow, str]] = []
 
     for scan_order, (scan_obj, page_side) in enumerate(scans_to_process):
-        layout_res = slice_census_overview_sheet(
+        layout_res = await asyncio.to_thread(
+            slice_census_overview_sheet,
             Path(scan_obj.original_path),
             scan_obj.id or 0,
             Path(settings.crops_dir),

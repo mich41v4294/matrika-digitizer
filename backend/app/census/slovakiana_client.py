@@ -346,6 +346,19 @@ def _extract_facet_items(raw_obj: Any, *, sort_by_name: bool = True) -> list[dic
     return out
 
 
+def _decode_jp2_and_save_jpeg(content: bytes, dest_jpeg_path: Path) -> bool:
+    arr = np.frombuffer(content, dtype=np.uint8)
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if decoded is not None:
+        cv2.imwrite(
+            str(dest_jpeg_path),
+            decoded,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 92],
+        )
+        return True
+    return False
+
+
 class SlovakianaClient:
     """Async client for Slovakiana census endpoints with rate limiting and retries."""
 
@@ -357,16 +370,34 @@ class SlovakianaClient:
             "User-Agent": "MatrikaDigitizer/1.0 (Genealogical Research & Archival Indexer)",
         }
         self._district_cities_cache: dict[tuple[str, str, bool], list[dict[str, Any]]] = {}
+        self._http_client: httpx.AsyncClient | None = None
+        self._http_client_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        loop = asyncio.get_running_loop()
+        if (
+            self._http_client is None
+            or self._http_client.is_closed
+            or self._http_client_loop is not loop
+        ):
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(90.0, connect=10.0),
+                headers=self._headers,
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=16, max_connections=32),
+            )
+            self._http_client_loop = loop
+        return self._http_client
 
     async def _get_json(self, url: str, params: list[tuple[str, Any]] | dict[str, Any] | None = None) -> Any:
         last_err: Exception | None = None
         for attempt in range(3):
             async with self._semaphore:
                 try:
-                    async with httpx.AsyncClient(timeout=self._timeout, headers=self._headers, follow_redirects=True) as client:
-                        resp = await client.get(url, params=params)
-                        resp.raise_for_status()
-                        return resp.json()
+                    client = self._get_http_client()
+                    resp = await client.get(url, params=params, timeout=self._timeout)
+                    resp.raise_for_status()
+                    return resp.json()
                 except Exception as exc:
                     last_err = exc
             await asyncio.sleep(0.8 * (attempt + 1))
@@ -526,37 +557,33 @@ class SlovakianaClient:
         thumb_url = image_desc.get("thumbnail_url")
 
         async with self._semaphore:
-            async with httpx.AsyncClient(timeout=90.0, headers=self._headers, follow_redirects=True) as client:
-                if jpeg_url:
-                    try:
-                        resp = await client.get(jpeg_url)
-                        if resp.status_code == 200 and len(resp.content) > 10_000:
-                            dest_jpeg_path.write_bytes(resp.content)
-                            return dest_jpeg_path
-                    except Exception:
-                        pass
-
-                if jp2_url:
-                    try:
-                        resp = await client.get(jp2_url)
-                        if resp.status_code == 200 and len(resp.content) > 10_000:
-                            arr = np.frombuffer(resp.content, dtype=np.uint8)
-                            decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                            if decoded is not None:
-                                cv2.imwrite(
-                                    str(dest_jpeg_path),
-                                    decoded,
-                                    [int(cv2.IMWRITE_JPEG_QUALITY), 92],
-                                )
-                                return dest_jpeg_path
-                    except Exception:
-                        pass
-
-                if thumb_url:
-                    resp = await client.get(thumb_url)
-                    if resp.status_code == 200 and len(resp.content) > 1_000:
-                        dest_jpeg_path.write_bytes(resp.content)
+            client = self._get_http_client()
+            if jpeg_url:
+                try:
+                    resp = await client.get(jpeg_url, timeout=90.0)
+                    if resp.status_code == 200 and len(resp.content) > 10_000:
+                        await asyncio.to_thread(dest_jpeg_path.write_bytes, resp.content)
                         return dest_jpeg_path
+                except Exception:
+                    pass
+
+            if jp2_url:
+                try:
+                    resp = await client.get(jp2_url, timeout=90.0)
+                    if resp.status_code == 200 and len(resp.content) > 10_000:
+                        ok = await asyncio.to_thread(
+                            _decode_jp2_and_save_jpeg, resp.content, dest_jpeg_path
+                        )
+                        if ok:
+                            return dest_jpeg_path
+                except Exception:
+                    pass
+
+            if thumb_url:
+                resp = await client.get(thumb_url, timeout=30.0)
+                if resp.status_code == 200 and len(resp.content) > 1_000:
+                    await asyncio.to_thread(dest_jpeg_path.write_bytes, resp.content)
+                    return dest_jpeg_path
 
         raise RuntimeError(f"Could not download census scan image from {jpeg_url or jp2_url}")
 
@@ -591,15 +618,15 @@ class SlovakianaClient:
             return None
 
         async with self._semaphore:
-            async with httpx.AsyncClient(timeout=20.0, headers=self._headers, follow_redirects=True) as client:
-                for u in urls:
-                    try:
-                        resp = await client.get(u)
-                        if resp.status_code == 200 and len(resp.content) > 1_000:
-                            dest_path.write_bytes(resp.content)
-                            return dest_path
-                    except Exception:
-                        continue
+            client = self._get_http_client()
+            for u in urls:
+                try:
+                    resp = await client.get(u, timeout=20.0)
+                    if resp.status_code == 200 and len(resp.content) > 1_000:
+                        await asyncio.to_thread(dest_path.write_bytes, resp.content)
+                        return dest_path
+                except Exception:
+                    continue
         return None
 
     async def download_thumbnails_batch(self, items: list[dict[str, Any]]) -> None:

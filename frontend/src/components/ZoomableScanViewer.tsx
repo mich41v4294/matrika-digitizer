@@ -394,7 +394,12 @@ export function HoverZoomRowCrop({
   useEffect(() => {
     setHeaderImgFailed(false);
     setHeaderNaturalDim(null);
-    if (!resolvedHeaderCropUrl) return;
+  }, [resolvedHeaderCropUrl]);
+
+  useEffect(() => {
+    if (!resolvedHeaderCropUrl || !(isHovered || isPinned) || headerNaturalDim || headerImgFailed) {
+      return;
+    }
     let cancelled = false;
     const hImg = new Image();
     hImg.onload = () => {
@@ -414,7 +419,7 @@ export function HoverZoomRowCrop({
     return () => {
       cancelled = true;
     };
-  }, [resolvedHeaderCropUrl]);
+  }, [resolvedHeaderCropUrl, isHovered, isPinned, headerNaturalDim, headerImgFailed]);
 
   useEffect(() => {
     if (!scanUrl || !(isHovered || isPinned)) return;

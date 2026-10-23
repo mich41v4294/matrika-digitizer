@@ -22,8 +22,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /usr/local/bin/uv
 RUN chmod +x /usr/local/bin/uv && ln -sf /usr/local/bin/uv /usr/local/bin/uvx
 
 COPY vendor/familysearch-mcp /app/vendor/familysearch-mcp
+COPY backend/pyproject.toml /app/backend/pyproject.toml
+RUN mkdir -p /app/backend/app && touch /app/backend/app/__init__.py \
+    && uv pip install --system --no-cache /app/vendor/familysearch-mcp /app/backend
 COPY backend /app/backend
-RUN uv pip install --system --no-cache /app/vendor/familysearch-mcp /app/backend
+RUN uv pip install --system --no-cache --no-deps /app/backend
 
 COPY --from=frontend /frontend/dist /app/frontend/dist
 

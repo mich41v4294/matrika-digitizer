@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -65,7 +66,12 @@ from backend.app.pipeline.lexicon import (
     strip_slovak_feminine_suffix,
 )
 from backend.app.pipeline.schemas import validate_census_date, validate_person_name, validate_sex
-from backend.app.search.fts import index_census_sheet, index_person_fact
+from backend.app.search.fts import (
+    get_search_progress,
+    index_census_sheet,
+    index_person_fact,
+    update_search_progress,
+)
 
 router = APIRouter(prefix="/api/census", tags=["census"])
 
@@ -895,6 +901,28 @@ def list_census_sheets(
     has_q = bool(q and q.strip())
     has_person_or_q_filter = has_pn or has_by or has_bp or has_q
 
+    t_search_start = time.perf_counter()
+    scanned_total = len(all_matching)
+    query_label = " · ".join(
+        str(x).strip()
+        for x in (municipality, district, person_name, birth_year, birth_place, q)
+        if x and str(x).strip()
+    )
+    if has_person_or_q_filter:
+        update_search_progress(
+            running=True,
+            scope="census",
+            query=query_label,
+            processed=0,
+            total=max(1, scanned_total),
+            matched_records=0,
+            matched_sheets=0,
+            progress_pct=12,
+            stage_sk="Prehľadávam sčítacie hárky a prehľady obvodov…",
+            stage_en="Searching census sheets and district overviews…",
+            elapsed_ms=0,
+        )
+
     candidate_ids = [s.id for s in all_matching if s.id is not None]
     households_by_sheet: dict[int, CensusHousehold] = {}
     all_households_by_sheet: dict[int, list[CensusHousehold]] = {}
@@ -949,7 +977,8 @@ def list_census_sheets(
                         matched_ovh_owners_by_sheet.setdefault(ovh.matched_sheet_id, []).append(tx)
 
         filtered_sheets: list[CensusSheet] = []
-        for s in all_matching:
+        step_size = max(1, len(all_matching) // 8)
+        for idx_s, s in enumerate(all_matching, start=1):
             sid = s.id or 0
             s_facts = facts_by_sheet.get(sid, [])
             s_hhs = all_households_by_sheet.get(sid, [])
@@ -1030,6 +1059,21 @@ def list_census_sheets(
                     continue
 
             filtered_sheets.append(s)
+            if idx_s % step_size == 0 or idx_s == len(all_matching):
+                pct = min(90, max(15, int(round((idx_s / max(len(all_matching), 1)) * 85))))
+                update_search_progress(
+                    running=True,
+                    scope="census",
+                    query=query_label,
+                    processed=idx_s,
+                    total=max(1, len(all_matching)),
+                    matched_records=0,
+                    matched_sheets=len(filtered_sheets),
+                    progress_pct=pct,
+                    stage_sk="Prehľadávam sčítacie hárky a prehľady obvodov…",
+                    stage_en="Searching census sheets and district overviews…",
+                    elapsed_ms=int(round((time.perf_counter() - t_search_start) * 1000)),
+                )
         all_matching = filtered_sheets
 
     total = len(all_matching)
@@ -1061,6 +1105,7 @@ def list_census_sheets(
             )
 
     census_root = _census_storage_root()
+    linked_by_sheet_id = _batch_find_linked_house_sheets(session, page_items)
     results: list[dict[str, Any]] = []
     missing_thumbs: list[dict[str, Any]] = []
     for s in page_items:
@@ -1071,7 +1116,7 @@ def list_census_sheets(
         if not _census_thumbnail_url(s.slovakiana_key, census_root) and s.thumbnail_id:
             missing_thumbs.append({"slovakiana_key": s.slovakiana_key, "thumbnail_id": s.thumbnail_id})
         ov_cnt = overview_counts_by_sheet.get(sid, 0)
-        linked_sheets = _find_linked_house_sheets(session, s)
+        linked_sheets = linked_by_sheet_id.get(sid, [])
 
         persons_preview: list[dict[str, Any]] = []
         for pf in s_facts:
@@ -1112,7 +1157,40 @@ def list_census_sheets(
     if missing_thumbs and background_tasks is not None:
         background_tasks.add_task(slovakiana_client.download_thumbnails_batch, missing_thumbs)
 
-    return {"total": total, "sheets": results}
+    elapsed_ms = int(round((time.perf_counter() - t_search_start) * 1000))
+    if has_person_or_q_filter:
+        census_progress = update_search_progress(
+            running=False,
+            scope="census",
+            query=query_label,
+            processed=scanned_total,
+            total=max(1, scanned_total),
+            matched_records=0,
+            matched_sheets=total,
+            progress_pct=100,
+            stage_sk="Vyhľadávanie dokončené",
+            stage_en="Search complete",
+            elapsed_ms=elapsed_ms,
+            last_finished_at=time.time(),
+        )
+    else:
+        census_progress = {
+            **get_search_progress(),
+            "running": False,
+            "scope": "census",
+            "processed": scanned_total,
+            "total": max(1, scanned_total),
+            "matched_sheets": total,
+            "progress_pct": 100,
+            "elapsed_ms": elapsed_ms,
+        }
+
+    return {
+        "total": total,
+        "scanned_total": scanned_total,
+        "sheets": results,
+        "search_progress": census_progress,
+    }
 
 
 filter_census_sheets = list_census_sheets
@@ -1340,6 +1418,121 @@ def _find_linked_house_sheets(
         )
     )
     return [_build_linked_house_sheet_entry(session, o) for o in cross_year]
+
+
+def _batch_find_linked_house_sheets(
+    session: SessionDep,
+    sheets: list[CensusSheet],
+) -> dict[int, list[dict[str, Any]]]:
+    """
+    Batch-resolves cross-year linked household sheets for a list of CensusSheets using
+    at most 3 SQL queries instead of 3 * len(sheets) N+1 queries.
+    """
+    valid_targets: list[tuple[CensusSheet, str, str]] = []
+    hn_ints: set[int] = set()
+    hn_strs: set[str] = set()
+    for s in sheets:
+        if s.id is None or (s.sheet_type or "household") == "overview":
+            continue
+        t_muni = canonical_municipality_key(s.municipality)
+        t_hn = normalize_house_number(s.house_number)
+        if not t_muni or not t_hn:
+            continue
+        valid_targets.append((s, t_muni, t_hn))
+        if s.house_number_int is not None:
+            hn_ints.add(s.house_number_int)
+        if s.house_number:
+            hn_strs.add(str(s.house_number).strip())
+
+    if not valid_targets:
+        return {}
+
+    stmt = select(CensusSheet).where(CensusSheet.house_number.is_not(None))
+    if hn_ints or hn_strs:
+        clauses = []
+        if hn_ints:
+            clauses.append(CensusSheet.house_number_int.in_(hn_ints))  # type: ignore[union-attr]
+        if hn_strs:
+            clauses.append(CensusSheet.house_number.in_(hn_strs))  # type: ignore[union-attr]
+        if len(clauses) == 2:
+            stmt = stmt.where(clauses[0] | clauses[1])
+        elif len(clauses) == 1:
+            stmt = stmt.where(clauses[0])
+
+    candidates = list(session.exec(stmt).all())
+    by_muni_hn: dict[tuple[str, str], list[CensusSheet]] = {}
+    for c in candidates:
+        if (c.sheet_type or "household") == "overview":
+            continue
+        c_muni = canonical_municipality_key(c.municipality)
+        c_hn = normalize_house_number(c.house_number)
+        if c_muni and c_hn:
+            by_muni_hn.setdefault((c_muni, c_hn), []).append(c)
+
+    matched_by_target: dict[int, list[CensusSheet]] = {}
+    needed_other_ids: set[int] = set()
+    for s, t_muni, t_hn in valid_targets:
+        sid = s.id or 0
+        cands = by_muni_hn.get((t_muni, t_hn), [])
+        cross: list[CensusSheet] = []
+        for other in cands:
+            if other.id == s.id or other.census_year == s.census_year:
+                continue
+            if s.municipality_key and other.municipality_key and s.municipality_key != other.municipality_key:
+                continue
+            if not is_compatible_settlement(s.street_raw, other.street_raw, s.municipality):
+                continue
+            cross.append(other)
+            if other.id is not None:
+                needed_other_ids.add(other.id)
+        if cross:
+            cross.sort(
+                key=lambda o: (
+                    o.census_year or 0,
+                    o.sheet_number or "",
+                    o.id or 0,
+                )
+            )
+            matched_by_target[sid] = cross
+
+    if not needed_other_ids:
+        return {}
+
+    other_id_list = list(needed_other_ids)
+    hh_by_other_id: dict[int, CensusHousehold] = {}
+    for hh in session.exec(
+        select(CensusHousehold)
+        .where(CensusHousehold.census_sheet_id.in_(other_id_list))  # type: ignore[union-attr]
+        .order_by(CensusHousehold.id.asc())
+    ).all():
+        if hh.census_sheet_id not in hh_by_other_id:
+            hh_by_other_id[hh.census_sheet_id] = hh
+
+    facts_by_other_id: dict[int, list[PersonFact]] = {}
+    for pf in session.exec(
+        select(PersonFact)
+        .where(PersonFact.census_sheet_id.in_(other_id_list))  # type: ignore[union-attr]
+        .order_by(PersonFact.id.asc())
+    ).all():
+        if pf.census_sheet_id is not None:
+            facts_by_other_id.setdefault(pf.census_sheet_id, []).append(pf)
+
+    entry_cache: dict[int, dict[str, Any]] = {}
+    out: dict[int, list[dict[str, Any]]] = {}
+    for sid, cross_list in matched_by_target.items():
+        entries: list[dict[str, Any]] = []
+        for o in cross_list:
+            oid = o.id or 0
+            if oid not in entry_cache:
+                entry_cache[oid] = _build_linked_house_sheet_entry(
+                    session,
+                    o,
+                    hh=hh_by_other_id.get(oid),
+                    facts=facts_by_other_id.get(oid, []),
+                )
+            entries.append(entry_cache[oid])
+        out[sid] = entries
+    return out
 
 
 def _find_same_year_house_sheets(
@@ -1610,10 +1803,23 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             if m.fs_person_id and str(m.fs_person_id).strip():
                 fs_matches_by_fact[m.person_fact_id] = m
 
-        for lm in session.exec(
-            select(LocalRecordMatch).where(LocalRecordMatch.census_fact_id.in_(fact_ids))
-        ).all():
-            target_fact = session.get(PersonFact, lm.matrika_fact_id)
+        lms = list(
+            session.exec(
+                select(LocalRecordMatch).where(LocalRecordMatch.census_fact_id.in_(fact_ids))
+            ).all()
+        )
+        matrika_fids = list({lm.matrika_fact_id for lm in lms if lm.matrika_fact_id is not None})
+        matrika_facts_by_id = (
+            {
+                mf.id: mf
+                for mf in session.exec(select(PersonFact).where(PersonFact.id.in_(matrika_fids))).all()  # type: ignore[union-attr]
+                if mf.id is not None
+            }
+            if matrika_fids
+            else {}
+        )
+        for lm in lms:
+            target_fact = matrika_facts_by_id.get(lm.matrika_fact_id)
             agrees_list = json.loads(lm.what_agrees_json or "[]")
             explanation_sk = agrees_list[0] if agrees_list else ""
             local_matches_by_fact.setdefault(lm.census_fact_id, []).append(
@@ -2221,12 +2427,21 @@ def get_municipality_overview(
     # Keyed strictly by (canonical_municipality_key, census_year, normalize_house_number)
     household_sheets_by_muni_year_hn: dict[tuple[str, int, str], list[CensusSheet]] = {}
 
+    ov_sheet_ids = [s.id for s in sheets if s.id is not None and (s.sheet_type or "household") == "overview"]
+    ov_counts_map: dict[int, int] = {}
+    if ov_sheet_ids:
+        for ov_sid, cnt in session.exec(
+            select(CensusOverviewHouse.census_sheet_id, func.count(CensusOverviewHouse.id))
+            .where(CensusOverviewHouse.census_sheet_id.in_(ov_sheet_ids))  # type: ignore[union-attr]
+            .group_by(CensusOverviewHouse.census_sheet_id)
+        ).all():
+            if ov_sid is not None:
+                ov_counts_map[int(ov_sid)] = int(cnt)
+
     for s in sheets:
         eff_type = s.sheet_type or "household"
         if eff_type == "overview":
-            ov_cnt = session.exec(
-                select(func.count()).select_from(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == s.id)
-            ).one()
+            ov_cnt = ov_counts_map.get(s.id or 0, 0)
             overview_sheets.append(_serialize_sheet(s, overview_houses_count=ov_cnt))
         else:
             if s.id is not None:
@@ -2376,6 +2591,7 @@ def get_municipality_overview(
 
     houses_directory: list[dict[str, Any]] = []
     covered_sheet_ids: set[int] = set()
+    linked_by_sheet_id = _batch_find_linked_house_sheets(session, sheets)
 
     for ovh in ov_houses:
         hn_str = str(ovh.house_number or "").strip()
@@ -2423,7 +2639,11 @@ def get_municipality_overview(
             else None
         )
 
-        linked_sheets = _find_linked_house_sheets(session, matched_sheet) if matched_sheet else []
+        linked_sheets = (
+            linked_by_sheet_id.get(matched_sheet.id or 0)
+            if (matched_sheet and matched_sheet.id in linked_by_sheet_id)
+            else (_find_linked_house_sheets(session, matched_sheet) if matched_sheet else [])
+        )
         matched_sheet_payload = _serialize_sheet(matched_sheet) if matched_sheet else None
         if matched_sheet_payload is not None:
             matched_sheet_payload["linked_house_sheets"] = linked_sheets
@@ -2481,7 +2701,7 @@ def get_municipality_overview(
             if hh_ser and hh_ser.get("wife_given_name")
             else None
         )
-        linked_sheets = _find_linked_house_sheets(session, s)
+        linked_sheets = linked_by_sheet_id.get(s.id or 0, [])
         s_payload = _serialize_sheet(s)
         s_payload["linked_house_sheets"] = linked_sheets
         s_payload["extracted_persons_preview"] = persons_preview
@@ -2617,13 +2837,14 @@ def get_municipalities_summary(
     sheets = list(session.exec(stmt).all())
     if district and district.strip():
         sheets = [s for s in sheets if _sheet_matches_district(s, district, municipality_specified=False)]
-    ov_houses_all = list(session.exec(select(CensusOverviewHouse)).all())
     ov_count_by_muni_key: dict[str, int] = {}
-    for ovh in ov_houses_all:
-        if census_year and ovh.census_year != census_year:
-            continue
-        m_key = canonical_municipality_key(ovh.municipality) or "neznama obec"
-        ov_count_by_muni_key[m_key] = ov_count_by_muni_key.get(m_key, 0) + 1
+    ov_grp_stmt = select(CensusOverviewHouse.municipality, func.count(CensusOverviewHouse.id))
+    if census_year:
+        ov_grp_stmt = ov_grp_stmt.where(CensusOverviewHouse.census_year == census_year)
+    ov_grp_stmt = ov_grp_stmt.group_by(CensusOverviewHouse.municipality)
+    for raw_ov_muni, cnt in session.exec(ov_grp_stmt).all():
+        m_key = canonical_municipality_key(raw_ov_muni) or "neznama obec"
+        ov_count_by_muni_key[m_key] = ov_count_by_muni_key.get(m_key, 0) + int(cnt)
 
     person_counts_by_sheet: dict[int, int] = {}
     for row_sid, cnt in session.exec(

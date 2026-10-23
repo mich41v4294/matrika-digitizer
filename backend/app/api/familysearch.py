@@ -165,16 +165,33 @@ def list_fs_matches(session: SessionDep, scan_id: int | None = None) -> dict[str
         if sheet_ids
         else {}
     )
-    households_by_sheet = (
-        {
-            hh.census_sheet_id: hh
-            for hh in session.exec(
-                select(CensusHousehold).where(CensusHousehold.census_sheet_id.in_(sheet_ids))
-            ).all()
-        }
-        if sheet_ids
-        else {}
-    )
+    households_by_sheet: dict[int, CensusHousehold] = {}
+    households_by_id: dict[int, CensusHousehold] = {}
+    if sheet_ids:
+        for hh in session.exec(
+            select(CensusHousehold)
+            .where(CensusHousehold.census_sheet_id.in_(sheet_ids))
+            .order_by(CensusHousehold.id.asc())
+        ).all():
+            if hh.id is not None:
+                households_by_id[hh.id] = hh
+            if hh.census_sheet_id not in households_by_sheet or (hh.dwelling_unit or "I") == "I":
+                households_by_sheet[hh.census_sheet_id] = hh
+
+    peers_by_sheet: dict[int, list[PersonFact]] = {}
+    if sheet_ids:
+        for pf in session.exec(
+            select(PersonFact).where(PersonFact.census_sheet_id.in_(sheet_ids))
+        ).all():
+            if pf.census_sheet_id is not None:
+                peers_by_sheet.setdefault(pf.census_sheet_id, []).append(pf)
+
+    local_matches_by_census_fact: dict[int, list[LocalRecordMatch]] = {}
+    if fact_ids:
+        for lm in session.exec(
+            select(LocalRecordMatch).where(LocalRecordMatch.census_fact_id.in_(fact_ids))
+        ).all():
+            local_matches_by_census_fact.setdefault(lm.census_fact_id, []).append(lm)
 
     items: list[dict[str, Any]] = []
     for m in matches:
@@ -200,19 +217,16 @@ def list_fs_matches(session: SessionDep, scan_id: int | None = None) -> dict[str
             or stored_packet.get("birth_place_modern_sk")
         )
         raw_fs_url = m.fs_url or stored_packet.get("fs_search_url") or stored_packet.get("familysearch_search_url") or ""
-        fixed_fs_url = _ensure_split_spouse_in_fs_url(raw_fs_url, fact, session)
+        sheet_peers = peers_by_sheet.get(fact.census_sheet_id) if fact.census_sheet_id else None
+        fixed_fs_url = _ensure_split_spouse_in_fs_url(raw_fs_url, fact, session, peers=sheet_peers)
 
         if fact.record_type == "census":
-            household = households_by_sheet.get(fact.census_sheet_id) if fact.census_sheet_id else None
-            local_matches = (
-                list(
-                    session.exec(
-                        select(LocalRecordMatch).where(LocalRecordMatch.census_fact_id == fact.id)
-                    ).all()
-                )
-                if fact.id
-                else []
-            )
+            household = (
+                households_by_id.get(fact.census_household_id)
+                if fact.census_household_id
+                else None
+            ) or (households_by_sheet.get(fact.census_sheet_id) if fact.census_sheet_id else None)
+            local_matches = local_matches_by_census_fact.get(fact.id or 0, [])
             fresh_packet, fresh_new = build_census_action_packet(
                 fact=fact,
                 sheet=sheet,

@@ -30,7 +30,12 @@ from backend.app.pipeline.schemas import (
     validate_person_name,
     validate_sex,
 )
-from backend.app.search.fts import index_person_fact, rebuild_all_fts, search_unified
+from backend.app.search.fts import (
+    get_search_progress,
+    index_person_fact,
+    rebuild_all_fts,
+    search_unified,
+)
 
 router = APIRouter(prefix="/api/records", tags=["records"])
 
@@ -120,6 +125,11 @@ def list_records(
 
 
 search_records_endpoint = list_records
+
+
+@router.get("/search-progress")
+def get_records_search_progress() -> dict[str, Any]:
+    return get_search_progress()
 
 
 @router.post("/reindex")

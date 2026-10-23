@@ -352,16 +352,17 @@ def _row_has_handwriting(row_strip: np.ndarray) -> bool:
     rh, rw = row_strip.shape[:2]
     if rh < 12 or rw < 60:
         return False
-    clean_strip = suppress_auditor_crayon(row_strip) if row_strip.ndim == 3 else row_strip
-    gray = cv2.cvtColor(clean_strip, cv2.COLOR_BGR2GRAY) if clean_strip.ndim == 3 else clean_strip
     # Crop interior of Name columns (x = 0.045w .. 0.255w), avoiding top/bottom horizontal border rules
     y0 = max(2, int(rh * 0.18))
     y1 = max(y0 + 4, int(rh * 0.82))
     nx0 = int(rw * 0.045)
     nx1 = int(rw * 0.255)
-    name_roi = gray[y0:y1, nx0:nx1].astype(np.float32)
-    if name_roi.size == 0:
+    roi_slice = row_strip[y0:y1, nx0:nx1]
+    if roi_slice.size == 0:
         return False
+    clean_roi = suppress_auditor_crayon(roi_slice) if roi_slice.ndim == 3 else roi_slice
+    gray_roi = cv2.cvtColor(clean_roi, cv2.COLOR_BGR2GRAY) if clean_roi.ndim == 3 else clean_roi
+    name_roi = gray_roi.astype(np.float32)
 
     # Subtract column-wise median so pre-printed vertical grid rules do not trigger false positives
     col_bg = np.median(name_roi, axis=0, keepdims=True)
@@ -676,8 +677,10 @@ def slice_census_overview_sheet(
                 right_file = scan_crop_dir / f"row_{out_row_idx:02d}_right.jpg"
                 stitched_file = scan_crop_dir / f"row_{out_row_idx:02d}_stitched.jpg"
 
-                cv2.imwrite(str(left_file), suppress_auditor_crayon(left_strip), [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-                cv2.imwrite(str(right_file), suppress_auditor_crayon(right_strip), [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                left_ocr_img = suppress_auditor_crayon(left_strip)
+                right_ocr_img = left_ocr_img[:, max(0, int(page_w * 0.34)) : page_w]
+                cv2.imwrite(str(left_file), left_ocr_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                cv2.imwrite(str(right_file), right_ocr_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
                 cv2.imwrite(str(stitched_file), stitched_strip, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
 
                 xs_full = [int(round(v)) for v in np.linspace(page_x0 + 10, page_x1 - 10, 9)]
@@ -883,10 +886,10 @@ def slice_census_sheet(
         right_file = scan_crop_dir / f"row_{out_row_idx:02d}_right.jpg"
         stitched_file = scan_crop_dir / f"row_{out_row_idx:02d}_stitched.jpg"
 
-        # Apply auditor crayon suppression to OCR strips while keeping stitched_strip natural for UI display
-        left_ocr_img = suppress_auditor_crayon(left_strip)
-        right_ocr_img = suppress_auditor_crayon(right_strip)
+        # Apply auditor crayon suppression once to stitched_strip and slice left/right OCR strips
         stitched_ocr_img = suppress_auditor_crayon(stitched_strip)
+        left_ocr_img = stitched_ocr_img[:, :split_x]
+        right_ocr_img = stitched_ocr_img[:, split_x:]
 
         cv2.imwrite(str(left_file), left_ocr_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         cv2.imwrite(str(right_file), right_ocr_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])

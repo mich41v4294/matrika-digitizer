@@ -299,6 +299,22 @@ class LocalAIClient:
         self._probe_cache_ts: float = 0.0
         self._cached_local_probe: tuple[bool, list[dict[str, Any]], str | None] | None = None
         self._cached_freellm_probe: tuple[bool, list[dict[str, Any]], str | None] | None = None
+        self._http_client: httpx.AsyncClient | None = None
+        self._http_client_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        loop = asyncio.get_running_loop()
+        if (
+            self._http_client is None
+            or self._http_client.is_closed
+            or self._http_client_loop is not loop
+        ):
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(120.0, connect=5.0),
+                limits=httpx.Limits(max_keepalive_connections=16, max_connections=32),
+            )
+            self._http_client_loop = loop
+        return self._http_client
 
     def _resolve_endpoint(self) -> tuple[str, str, str, dict[str, str], str]:
         cfg = settings.get_ai_runtime_config()
@@ -318,16 +334,16 @@ class LocalAIClient:
         self._local_base_url = settings.ai_base_url.rstrip("/")
         self._local_models_url = settings.ai_models_url
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get(self._local_models_url)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if isinstance(data, dict):
-                        return True, data.get("data", []) or [], None
-                    if isinstance(data, list):
-                        return True, data, None
-                    return True, [], None
-                return False, [], f"HTTP {resp.status_code}"
+            client = self._get_http_client()
+            resp = await client.get(self._local_models_url, timeout=2.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict):
+                    return True, data.get("data", []) or [], None
+                if isinstance(data, list):
+                    return True, data, None
+                return True, [], None
+            return False, [], f"HTTP {resp.status_code}"
         except Exception as exc:
             return False, [], str(exc)
 
@@ -340,16 +356,16 @@ class LocalAIClient:
         api_key = settings.freellm_api_key or ""
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get(self._freellm_models_url, headers=headers)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if isinstance(data, dict):
-                        return True, data.get("data", []) or [], None
-                    if isinstance(data, list):
-                        return True, data, None
-                    return True, [], None
-                return False, [], f"HTTP {resp.status_code}"
+            client = self._get_http_client()
+            resp = await client.get(self._freellm_models_url, headers=headers, timeout=2.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict):
+                    return True, data.get("data", []) or [], None
+                if isinstance(data, list):
+                    return True, data, None
+                return True, [], None
+            return False, [], f"HTTP {resp.status_code}"
         except Exception as exc:
             return False, [], str(exc)
 
@@ -518,42 +534,45 @@ class LocalAIClient:
         validation_errors: list[str] = []
 
         try:
-            async with httpx.AsyncClient(timeout=timeout_sec) as client:
+            client = self._get_http_client()
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=timeout_sec,
+            )
+            if resp.status_code >= 400 and ("reasoning_effort" in payload or "response_format" in payload):
+                fallback_payload = {
+                    k: v for k, v in payload.items() if k not in ("reasoning_effort", "response_format")
+                }
                 resp = await client.post(
                     f"{base_url}/chat/completions",
-                    json=payload,
+                    json=fallback_payload,
                     headers=headers,
+                    timeout=timeout_sec,
                 )
-                if resp.status_code >= 400 and ("reasoning_effort" in payload or "response_format" in payload):
-                    fallback_payload = {
-                        k: v for k, v in payload.items() if k not in ("reasoning_effort", "response_format")
-                    }
-                    resp = await client.post(
-                        f"{base_url}/chat/completions",
-                        json=fallback_payload,
-                        headers=headers,
-                    )
-                if resp.status_code >= 400 and image_path and image_path.exists():
-                    # Graceful fallback to text-only prompt if a text-only LLM endpoint rejects image_url
-                    text_only_messages = [
-                        {"role": "user", "content": prompt}
-                        if m.get("role") == "user" and isinstance(m.get("content"), list)
-                        else m
-                        for m in messages
-                    ]
-                    text_only_payload = {
-                        k: v
-                        for k, v in payload.items()
-                        if k not in ("reasoning_effort", "response_format")
-                    }
-                    text_only_payload["messages"] = text_only_messages
-                    resp = await client.post(
-                        f"{base_url}/chat/completions",
-                        json=text_only_payload,
-                        headers=headers,
-                    )
-                resp.raise_for_status()
-                data = resp.json()
+            if resp.status_code >= 400 and image_path and image_path.exists():
+                # Graceful fallback to text-only prompt if a text-only LLM endpoint rejects image_url
+                text_only_messages = [
+                    {"role": "user", "content": prompt}
+                    if m.get("role") == "user" and isinstance(m.get("content"), list)
+                    else m
+                    for m in messages
+                ]
+                text_only_payload = {
+                    k: v
+                    for k, v in payload.items()
+                    if k not in ("reasoning_effort", "response_format")
+                }
+                text_only_payload["messages"] = text_only_messages
+                resp = await client.post(
+                    f"{base_url}/chat/completions",
+                    json=text_only_payload,
+                    headers=headers,
+                    timeout=timeout_sec,
+                )
+            resp.raise_for_status()
+            data = resp.json()
 
             choice = (data.get("choices") or [{}])[0]
             msg = choice.get("message") or {}
@@ -593,33 +612,33 @@ class LocalAIClient:
                     "messages": retry_messages,
                     "max_tokens": max(effective_max_tokens, 3500),
                 }
-                async with httpx.AsyncClient(timeout=timeout_sec) as retry_client:
-                    r_resp = await retry_client.post(
-                        f"{base_url}/chat/completions",
-                        json=retry_payload,
-                        headers=headers,
+                r_resp = await client.post(
+                    f"{base_url}/chat/completions",
+                    json=retry_payload,
+                    headers=headers,
+                    timeout=timeout_sec,
+                )
+                if r_resp.status_code == 200:
+                    r_data = r_resp.json()
+                    r_choice = (r_data.get("choices") or [{}])[0]
+                    r_msg = r_choice.get("message") or {}
+                    r_raw_content = r_msg.get("content") or ""
+                    r_api_reasoning = r_msg.get("reasoning_content") or r_msg.get("reasoning") or ""
+                    r_content, r_reasoning = split_thinking_and_content(
+                        r_raw_content,
+                        r_api_reasoning,
+                        expect_json=True,
                     )
-                    if r_resp.status_code == 200:
-                        r_data = r_resp.json()
-                        r_choice = (r_data.get("choices") or [{}])[0]
-                        r_msg = r_choice.get("message") or {}
-                        r_raw_content = r_msg.get("content") or ""
-                        r_api_reasoning = r_msg.get("reasoning_content") or r_msg.get("reasoning") or ""
-                        r_content, r_reasoning = split_thinking_and_content(
-                            r_raw_content,
-                            r_api_reasoning,
-                            expect_json=True,
-                        )
-                        r_parsed = extract_json_object(r_content, response_model=response_model)
-                        if r_parsed:
-                            content = r_content
-                            reasoning = "\n\n".join(p for p in (reasoning, r_reasoning) if p).strip()
-                            parsed = r_parsed
-                            r_usage = r_data.get("usage") or {}
-                            prompt_tokens += int(r_usage.get("prompt_tokens") or 0)
-                            completion_tokens += int(r_usage.get("completion_tokens") or 0)
-                            r_details = r_usage.get("completion_tokens_details") or {}
-                            reasoning_tokens += int(r_details.get("reasoning_tokens") or 0)
+                    r_parsed = extract_json_object(r_content, response_model=response_model)
+                    if r_parsed:
+                        content = r_content
+                        reasoning = "\n\n".join(p for p in (reasoning, r_reasoning) if p).strip()
+                        parsed = r_parsed
+                        r_usage = r_data.get("usage") or {}
+                        prompt_tokens += int(r_usage.get("prompt_tokens") or 0)
+                        completion_tokens += int(r_usage.get("completion_tokens") or 0)
+                        r_details = r_usage.get("completion_tokens_details") or {}
+                        reasoning_tokens += int(r_details.get("reasoning_tokens") or 0)
 
             if response_model is not None:
                 if parsed:

@@ -5,6 +5,7 @@ import { useFeatureFlags } from "../featureFlags";
 import { foldText, matchesPersonNameQuery } from "../utils/fuzzyName";
 import {
   Building2,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Download,
@@ -515,6 +516,24 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   const [muniOverview, setMuniOverview] = useState<MunicipalityOverviewResponse | null>(null);
   const [sheets, setSheets] = useState<CensusSheetRow[]>([]);
   const [totalSheets, setTotalSheets] = useState<number>(0);
+  const [scannedSheetsTotal, setScannedSheetsTotal] = useState<number>(0);
+  const [isSearchingCensus, setIsSearchingCensus] = useState<boolean>(true);
+  const [censusSearchProgress, setCensusSearchProgress] = useState<{
+    running: boolean;
+    processed: number;
+    total: number;
+    progress_pct: number;
+    elapsed_ms: number;
+  }>({
+    running: true,
+    processed: 0,
+    total: 0,
+    progress_pct: 15,
+    elapsed_ms: 0,
+  });
+  const censusSearchAbortRef = useRef<AbortController | null>(null);
+  const isSearchingCensusRef = useRef<boolean>(false);
+  const hasLoadedCensusOnceRef = useRef<boolean>(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [processingSheetId, setProcessingSheetId] = useState<string | null>(null);
 
@@ -541,7 +560,99 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     }
   };
 
-  const loadWorkspaceData = async () => {
+  // Listen for live search_progress broadcasts for census scope
+  useEffect(() => {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${proto}//${window.location.host}/ws/pipeline`;
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "search_progress" && msg.data && msg.data.scope === "census") {
+            const d = msg.data;
+            if (d.running && isSearchingCensusRef.current) {
+              setCensusSearchProgress((prev) => ({
+                ...prev,
+                running: true,
+                processed: Number(d.processed ?? prev.processed),
+                total: Number(d.total ?? prev.total),
+                progress_pct: Math.max(prev.progress_pct, Number(d.progress_pct ?? 20)),
+                elapsed_ms: Number(d.elapsed_ms ?? prev.elapsed_ms),
+              }));
+            }
+          }
+        } catch {
+          // ignore
+        }
+      };
+    } catch {
+      // ignore
+    }
+    return () => {
+      if (ws) ws.close();
+    };
+  }, []);
+
+  // Smooth client-side progress ticker while a census search request is in flight
+  useEffect(() => {
+    if (!isSearchingCensus) return;
+    const t0 = performance.now();
+    const timer = window.setInterval(() => {
+      setCensusSearchProgress((prev) => {
+        if (!prev.running) return prev;
+        const nextPct = Math.min(92, prev.progress_pct + Math.max(2, Math.round((94 - prev.progress_pct) * 0.22)));
+        const estTotal = Math.max(
+          prev.total,
+          scannedSheetsTotal,
+          stats?.total_cataloged_sheets ?? 0,
+          totalSheets,
+          1
+        );
+        const estProcessed = Math.min(estTotal, Math.max(prev.processed, Math.round((nextPct / 100) * estTotal)));
+        return {
+          ...prev,
+          total: estTotal,
+          processed: estProcessed,
+          progress_pct: nextPct,
+          elapsed_ms: Math.round(performance.now() - t0),
+        };
+      });
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, [isSearchingCensus, scannedSheetsTotal, stats?.total_cataloged_sheets, totalSheets]);
+
+  const loadWorkspaceData = async (isBackgroundPoll = false) => {
+    if (isBackgroundPoll && isSearchingCensusRef.current) {
+      return;
+    }
+
+    let controller: AbortController | null = null;
+    const tStart = performance.now();
+    if (!isBackgroundPoll) {
+      if (censusSearchAbortRef.current) {
+        censusSearchAbortRef.current.abort();
+      }
+      controller = new AbortController();
+      censusSearchAbortRef.current = controller;
+      isSearchingCensusRef.current = true;
+      setIsSearchingCensus(true);
+      setCensusSearchProgress((prev) => ({
+        running: true,
+        processed: 0,
+        total: Math.max(
+          scannedSheetsTotal,
+          stats?.total_cataloged_sheets ?? 0,
+          totalSheets,
+          prev.total,
+          1
+        ),
+        progress_pct: 15,
+        elapsed_ms: 0,
+      }));
+    }
+
     try {
       const sheetParams = new URLSearchParams();
       if (workspaceSearch.trim()) sheetParams.set("q", workspaceSearch.trim());
@@ -566,23 +677,53 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       if (birthPlaceFilter.trim()) ovParams.set("birth_place", birthPlaceFilter.trim());
       if (workspaceSearch.trim()) ovParams.set("q", workspaceSearch.trim());
 
+      const sig = controller ? { signal: controller.signal } : undefined;
       const [statsRes, jobsRes, sheetsRes, muniSumRes, ovRes] = await Promise.all([
-        fetch("/api/census/stats"),
-        fetch("/api/census/jobs"),
-        fetch(`/api/census/sheets?${sheetParams.toString()}`),
-        fetch(`/api/census/municipalities-summary?${muniSummaryParams.toString()}`),
-        fetch(`/api/census/municipality-overview?${ovParams.toString()}`),
+        fetch("/api/census/stats", sig),
+        fetch("/api/census/jobs", sig),
+        fetch(`/api/census/sheets?${sheetParams.toString()}`, sig),
+        fetch(`/api/census/municipalities-summary?${muniSummaryParams.toString()}`, sig),
+        fetch(`/api/census/municipality-overview?${ovParams.toString()}`, sig),
       ]);
+      if (controller?.signal.aborted) return;
 
-      if (statsRes.ok) setStats(await statsRes.json());
+      hasLoadedCensusOnceRef.current = true;
+      let resolvedTotalCataloged = stats?.total_cataloged_sheets ?? 0;
+      if (statsRes.ok) {
+        const stJson = await statsRes.json();
+        setStats(stJson);
+        if (typeof stJson.total_cataloged_sheets === "number") {
+          resolvedTotalCataloged = stJson.total_cataloged_sheets;
+        }
+      }
       if (jobsRes.ok) {
         const jd = await jobsRes.json();
         setJobs(jd.jobs || []);
       }
       if (sheetsRes.ok) {
         const sd = await sheetsRes.json();
-        setSheets(sd.sheets || []);
-        setTotalSheets(sd.total || 0);
+        const loadedSheets = sd.sheets || [];
+        const resolvedTotal = sd.total || 0;
+        const resolvedScanned =
+          typeof sd.scanned_total === "number"
+            ? sd.scanned_total
+            : Math.max(resolvedTotalCataloged, resolvedTotal);
+        const elapsedMs =
+          typeof sd.search_progress?.elapsed_ms === "number" && sd.search_progress.elapsed_ms > 0
+            ? sd.search_progress.elapsed_ms
+            : Math.max(1, Math.round(performance.now() - tStart));
+        setSheets(loadedSheets);
+        setTotalSheets(resolvedTotal);
+        setScannedSheetsTotal(resolvedScanned);
+        if (!isBackgroundPoll) {
+          setCensusSearchProgress({
+            running: false,
+            processed: resolvedScanned,
+            total: Math.max(resolvedScanned, 1),
+            progress_pct: 100,
+            elapsed_ms: elapsedMs,
+          });
+        }
       }
       if (muniSumRes.ok) {
         const md = await muniSumRes.json();
@@ -592,10 +733,17 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
         const od = (await ovRes.json()) as MunicipalityOverviewResponse;
         setMuniOverview(od);
       }
-    } catch {
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        return;
+      }
       // ignore poll error
     } finally {
-      setLoading(false);
+      if (!isBackgroundPoll && (!controller || !controller.signal.aborted)) {
+        isSearchingCensusRef.current = false;
+        setIsSearchingCensus(false);
+        setLoading(false);
+      }
     }
   };
 
@@ -604,9 +752,42 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   }, [selectedDistrictTag, selectedYearTag]);
 
   useEffect(() => {
-    loadWorkspaceData();
-    const timer = setInterval(loadWorkspaceData, 4000);
-    return () => clearInterval(timer);
+    isSearchingCensusRef.current = true;
+    setIsSearchingCensus(true);
+    setCensusSearchProgress((prev) => ({
+      ...prev,
+      running: true,
+      processed: 0,
+      total: Math.max(
+        scannedSheetsTotal,
+        stats?.total_cataloged_sheets ?? 0,
+        totalSheets,
+        prev.total,
+        1
+      ),
+      progress_pct: 15,
+      elapsed_ms: 0,
+    }));
+    const hasTextQuery = Boolean(
+      workspaceSearch.trim() ||
+        personNameFilter.trim() ||
+        birthYearFilter.trim() ||
+        birthPlaceFilter.trim()
+    );
+    const debounceTimer = window.setTimeout(
+      () => {
+        loadWorkspaceData(false);
+      },
+      hasLoadedCensusOnceRef.current && hasTextQuery ? 120 : 0
+    );
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadWorkspaceData(true);
+    }, 8000);
+    return () => {
+      window.clearTimeout(debounceTimer);
+      window.clearInterval(timer);
+    };
   }, [
     workspaceSearch,
     selectedDistrictName,
@@ -2156,6 +2337,121 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 )}
               </div>
             </div>
+
+            {/* Census Search Progress Bar */}
+            {(() => {
+              const effTotalSheets = Math.max(
+                scannedSheetsTotal,
+                stats?.total_cataloged_sheets ?? 0,
+                totalSheets
+              );
+              const censusPct = isSearchingCensus
+                ? Math.max(10, Math.min(98, censusSearchProgress.progress_pct || 20))
+                : 100;
+              const censusQuerySummary = [
+                selectedMunicipality || (selectedDistrictName ? `okr. ${selectedDistrictName}` : ""),
+                selectedYearFilter,
+                personNameFilter.trim(),
+                birthYearFilter.trim() ? `*${birthYearFilter.trim()}` : "",
+                birthPlaceFilter.trim(),
+                workspaceSearch.trim(),
+              ]
+                .filter(Boolean)
+                .join(" · ");
+
+              return (
+                <div
+                  data-testid="census-search-progress-card"
+                  className={`rounded-lg px-3 py-2 border space-y-1.5 transition-colors ${
+                    isSearchingCensus
+                      ? "bg-amber-50 border-amber-300"
+                      : "bg-stone-100/70 border-stone-200"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-2 font-bold text-stone-900 min-w-0">
+                      {isSearchingCensus ? (
+                        <RefreshCw className="w-3.5 h-3.5 text-amber-700 animate-spin shrink-0" />
+                      ) : (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                      )}
+                      <span className="truncate">
+                        {isSearchingCensus
+                          ? lang === "sk"
+                            ? `Prehľadávam sčítacie hárky a prehľady obvodov${
+                                censusQuerySummary ? ` („${censusQuerySummary}“)` : ""
+                              }…`
+                            : `Searching census sheets and district overviews${
+                                censusQuerySummary ? ` ("${censusQuerySummary}")` : ""
+                              }…`
+                          : hasAnyActiveFilter
+                          ? lang === "sk"
+                            ? `Vyhľadávanie dokončené — Nájdených ${filteredSheets.length} hárkov${
+                                selectedMunicipality
+                                  ? ` · ${filteredHousesDirectory.length} domov v adresári`
+                                  : ""
+                              }`
+                            : `Search complete — Found ${filteredSheets.length} sheets${
+                                selectedMunicipality
+                                  ? ` · ${filteredHousesDirectory.length} houses in directory`
+                                  : ""
+                              }`
+                          : lang === "sk"
+                          ? `Katalóg sčítacích hárkov pripravený — Prehľadaných ${effTotalSheets} hárkov v databáze`
+                          : `Census catalog ready — Scanned ${effTotalSheets} sheets in database`}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-stone-600 font-medium">
+                        {lang === "sk"
+                          ? `Prehľadané: ${
+                              isSearchingCensus ? censusSearchProgress.processed : effTotalSheets
+                            } / ${effTotalSheets}`
+                          : `Scanned: ${
+                              isSearchingCensus ? censusSearchProgress.processed : effTotalSheets
+                            } / ${effTotalSheets}`}
+                        {!isSearchingCensus && censusSearchProgress.elapsed_ms > 0
+                          ? ` (${censusSearchProgress.elapsed_ms} ms)`
+                          : ""}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full font-bold text-xs ${
+                          isSearchingCensus
+                            ? "bg-amber-600 text-white"
+                            : "bg-emerald-100 text-emerald-900"
+                        }`}
+                      >
+                        {censusPct}%
+                      </span>
+                    </div>
+                  </div>
+
+                  <div
+                    role="progressbar"
+                    aria-label={
+                      lang === "sk"
+                        ? "Priebeh vyhľadávania v sčítacích hárkoch"
+                        : "Census sheets search progress"
+                    }
+                    aria-valuenow={censusPct}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    data-testid="census-search-progress-bar"
+                    className={`w-full rounded-full h-2 overflow-hidden ${
+                      isSearchingCensus ? "bg-amber-200/80" : "bg-stone-200"
+                    }`}
+                  >
+                    <div
+                      className={`h-full transition-all duration-200 ${
+                        isSearchingCensus ? "bg-amber-600 animate-pulse" : "bg-emerald-600"
+                      }`}
+                      style={{ width: `${censusPct}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
 

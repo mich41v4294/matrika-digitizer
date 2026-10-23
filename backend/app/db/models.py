@@ -397,7 +397,7 @@ class FamilySearchMatch(SQLModel, table=True):
     row_id: int = Field(foreign_key="recordrow.id", index=True)
     match_status: str = Field(default="unmatched", index=True)
     # new_person, existing_needs_facts, confirmed_match, place_only
-    fs_person_id: Optional[str] = Field(default=None)
+    fs_person_id: Optional[str] = Field(default=None, index=True)
     fs_record_ark: Optional[str] = Field(default=None)
     fs_url: Optional[str] = Field(default=None)
     confidence_score: float = Field(default=0.0)

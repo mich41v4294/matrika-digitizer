@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -269,21 +270,20 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
             if sheet.sheet_type == "overview":
                 is_overview_sheet = True
 
-    if left_path and left_path.exists():
-        res_l = await ai_client.chat_completion(
-            stage="ocr_left",
-            model=settings.model_ocr,
-            prompt="Table Recognition:",
-            image_path=left_path,
-            image_rel_url=row.left_crop_path,
-            scan_id=scan.id,
-            row_id=row.id,
-            max_tokens=700,
-        )
-        left_text = html_table_to_pipe_text(res_l["content"])
-
     right_cell_sections: dict[str, str] = {}
     if is_blackened_census:
+        if left_path and left_path.exists():
+            res_l = await ai_client.chat_completion(
+                stage="ocr_left",
+                model=settings.model_ocr,
+                prompt="Table Recognition:",
+                image_path=left_path,
+                image_rel_url=row.left_crop_path,
+                scan_id=scan.id,
+                row_id=row.id,
+                max_tokens=700,
+            )
+            left_text = html_table_to_pipe_text(res_l["content"])
         right_text = "[ZAČIERNENÉ / REDACTED 1940]"
     elif is_census and not is_overview_sheet:
         # Read semantic cell crops for the right half (Cols 11-14, 15-17, 18-24) at optimal aspect ratio
@@ -306,12 +306,31 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
             "nationality_religion_literacy",
             "occupation_presence_notes",
         )
-        cell_parts: list[str] = []
+        valid_right_crops: list[tuple[str, Path, str]] = []
         for skey in semantic_right_keys:
             c_rel = crop_url_by_key.get(skey)
             c_path = media_rel_to_path(c_rel) if c_rel else None
-            if c_path and c_path.exists():
-                res_c = await ai_client.chat_completion(
+            if c_path and c_path.exists() and c_rel:
+                valid_right_crops.append((skey, c_path, c_rel))
+
+        tasks: list[Any] = []
+        has_left_task = bool(left_path and left_path.exists())
+        if has_left_task and left_path:
+            tasks.append(
+                ai_client.chat_completion(
+                    stage="ocr_left",
+                    model=settings.model_ocr,
+                    prompt="Table Recognition:",
+                    image_path=left_path,
+                    image_rel_url=row.left_crop_path,
+                    scan_id=scan.id,
+                    row_id=row.id,
+                    max_tokens=700,
+                )
+            )
+        for skey, c_path, c_rel in valid_right_crops:
+            tasks.append(
+                ai_client.chat_completion(
                     stage="ocr_right",
                     model=settings.model_ocr,
                     prompt="Table Recognition:",
@@ -321,10 +340,21 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
                     row_id=row.id,
                     max_tokens=450,
                 )
-                c_txt = html_table_to_pipe_text(res_c["content"]).strip()
-                if c_txt:
-                    right_cell_sections[skey] = c_txt
-                    cell_parts.append(re.sub(r"\s*\n+\s*", " | ", c_txt))
+            )
+
+        results = await asyncio.gather(*tasks) if tasks else []
+        res_offset = 0
+        if has_left_task and results:
+            left_text = html_table_to_pipe_text(results[0]["content"])
+            res_offset = 1
+
+        cell_parts: list[str] = []
+        for idx_c, (skey, _, _) in enumerate(valid_right_crops):
+            res_c = results[res_offset + idx_c]
+            c_txt = html_table_to_pipe_text(res_c["content"]).strip()
+            if c_txt:
+                right_cell_sections[skey] = c_txt
+                cell_parts.append(re.sub(r"\s*\n+\s*", " | ", c_txt))
 
         if cell_parts:
             right_text = " | ".join(cell_parts)
@@ -340,18 +370,58 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
                 max_tokens=700,
             )
             right_text = html_table_to_pipe_text(res_r["content"])
-    elif right_path and right_path.exists():
-        res_r = await ai_client.chat_completion(
-            stage="ocr_right",
-            model=settings.model_ocr,
-            prompt="Table Recognition:",
-            image_path=right_path,
-            image_rel_url=row.right_crop_path,
-            scan_id=scan.id,
-            row_id=row.id,
-            max_tokens=700,
-        )
-        right_text = html_table_to_pipe_text(res_r["content"])
+    else:
+        has_l = bool(left_path and left_path.exists())
+        has_r = bool(right_path and right_path.exists())
+        if has_l and has_r and left_path and right_path:
+            res_l, res_r = await asyncio.gather(
+                ai_client.chat_completion(
+                    stage="ocr_left",
+                    model=settings.model_ocr,
+                    prompt="Table Recognition:",
+                    image_path=left_path,
+                    image_rel_url=row.left_crop_path,
+                    scan_id=scan.id,
+                    row_id=row.id,
+                    max_tokens=700,
+                ),
+                ai_client.chat_completion(
+                    stage="ocr_right",
+                    model=settings.model_ocr,
+                    prompt="Table Recognition:",
+                    image_path=right_path,
+                    image_rel_url=row.right_crop_path,
+                    scan_id=scan.id,
+                    row_id=row.id,
+                    max_tokens=700,
+                ),
+            )
+            left_text = html_table_to_pipe_text(res_l["content"])
+            right_text = html_table_to_pipe_text(res_r["content"])
+        elif has_l and left_path:
+            res_l = await ai_client.chat_completion(
+                stage="ocr_left",
+                model=settings.model_ocr,
+                prompt="Table Recognition:",
+                image_path=left_path,
+                image_rel_url=row.left_crop_path,
+                scan_id=scan.id,
+                row_id=row.id,
+                max_tokens=700,
+            )
+            left_text = html_table_to_pipe_text(res_l["content"])
+        elif has_r and right_path:
+            res_r = await ai_client.chat_completion(
+                stage="ocr_right",
+                model=settings.model_ocr,
+                prompt="Table Recognition:",
+                image_path=right_path,
+                image_rel_url=row.right_crop_path,
+                scan_id=scan.id,
+                row_id=row.id,
+                max_tokens=700,
+            )
+            right_text = html_table_to_pipe_text(res_r["content"])
 
     row.raw_ocr_left = left_text
     row.raw_ocr_right = right_text

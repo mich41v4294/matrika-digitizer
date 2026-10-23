@@ -466,7 +466,10 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
 
   useEffect(() => {
     loadDebug();
-    const interval = setInterval(loadDebug, 4000);
+    const interval = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadDebug();
+    }, 6000);
     return () => clearInterval(interval);
   }, [stageFilter]);
 

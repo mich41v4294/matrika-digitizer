@@ -96,6 +96,12 @@ def _ensure_sqlite_columns() -> None:
         # Ensure default sheet_type on existing rows
         conn.execute(text("UPDATE censussheet SET sheet_type = 'household' WHERE sheet_type IS NULL OR sheet_type = ''"))
         conn.execute(text("UPDATE censushousehold SET dwelling_unit = 'I' WHERE dwelling_unit IS NULL OR dwelling_unit = ''"))
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_familysearchmatch_fs_person_id "
+                "ON familysearchmatch (fs_person_id)"
+            )
+        )
         # Remove any stale unmatched FamilySearchMatch rows (fs_person_id IS NULL or empty)
         try:
             conn.execute(

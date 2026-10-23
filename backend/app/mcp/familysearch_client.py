@@ -82,6 +82,7 @@ def write_fs_env(updates: dict[str, str]) -> dict[str, str]:
     settings.fs_env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if "fs_mcp_manager" in globals():
         fs_mcp_manager._cached_auth_ts = 0.0
+        fs_mcp_manager._mcp_env_sig = None
     return current
 
 
@@ -118,7 +119,11 @@ def _is_nameless_fact(fact: PersonFact | None) -> bool:
     return not _is_valid_name_token(given_clean) and not _is_valid_name_token(surname_clean)
 
 
-def _split_spouse_name(fact: PersonFact, session: Session | None = None) -> tuple[str, str]:
+def _split_spouse_name(
+    fact: PersonFact,
+    session: Session | None = None,
+    peers: list[PersonFact] | None = None,
+) -> tuple[str, str]:
     """
     Split `fact.spouse_name` into `(spouse_given, spouse_surname)`.
     In Slovak census records, `fact.spouse_name` is formatted as `"GivenName Surname"`
@@ -137,12 +142,16 @@ def _split_spouse_name(fact: PersonFact, session: Session | None = None) -> tupl
     if len(tokens) == 1:
         spouse_given = tokens[0]
         spouse_surname = ""
-        if session is not None and fact.census_sheet_id:
+        if fact.census_sheet_id:
             try:
-                peers = session.exec(
-                    select(PersonFact).where(PersonFact.census_sheet_id == fact.census_sheet_id)
-                ).all()
-                for peer in peers:
+                peer_list = peers
+                if peer_list is None and session is not None:
+                    peer_list = list(
+                        session.exec(
+                            select(PersonFact).where(PersonFact.census_sheet_id == fact.census_sheet_id)
+                        ).all()
+                    )
+                for peer in peer_list or []:
                     if peer.id == fact.id:
                         continue
                     peer_given = (peer.given_name_sk or peer.given_name_raw or "").strip()
@@ -161,11 +170,12 @@ def _ensure_split_spouse_in_fs_url(
     fs_url: str,
     fact: PersonFact,
     session: Session | None = None,
+    peers: list[PersonFact] | None = None,
 ) -> str:
     """Ensure `fs_url` uses split `q.spouseGivenName` and `q.spouseSurname` when `fact.spouse_name` is set."""
     if not fs_url or not fact.spouse_name:
         return fs_url
-    spouse_given, spouse_surname = _split_spouse_name(fact, session)
+    spouse_given, spouse_surname = _split_spouse_name(fact, session, peers=peers)
     if not spouse_given and not spouse_surname:
         return fs_url
     if "?" not in fs_url:
@@ -508,6 +518,10 @@ class FamilySearchMcpManager:
         self.mcp_bin: Path = venv_bin if venv_bin.exists() else Path(which_bin or venv_bin)
         self._cached_auth_status: dict[str, Any] | None = None
         self._cached_auth_ts: float = 0.0
+        self._mcp_stack: AsyncExitStack | None = None
+        self._mcp_session: ClientSession | None = None
+        self._mcp_loop: asyncio.AbstractEventLoop | None = None
+        self._mcp_env_sig: tuple[tuple[str, str], ...] | None = None
         self.progress_state: dict[str, Any] = {
             "running": False,
             "mode": "idle",
@@ -702,6 +716,58 @@ class FamilySearchMcpManager:
             env=env,
         )
 
+    async def _reset_mcp_session_unlocked(self) -> None:
+        stack = self._mcp_stack
+        self._mcp_stack = None
+        self._mcp_session = None
+        self._mcp_env_sig = None
+        if stack is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                if self._mcp_loop is loop:
+                    await stack.aclose()
+            except Exception:
+                pass
+        self._mcp_loop = None
+
+    async def _get_or_create_mcp_session_unlocked(self) -> ClientSession:
+        loop = asyncio.get_running_loop()
+        env_sig = tuple(sorted(read_fs_env().items()))
+        if (
+            self._mcp_session is not None
+            and self._mcp_stack is not None
+            and self._mcp_loop is loop
+            and self._mcp_env_sig == env_sig
+        ):
+            return self._mcp_session
+
+        await self._reset_mcp_session_unlocked()
+        server_params = self._build_server_params()
+        stack = AsyncExitStack()
+        try:
+            stdio_transport = await stack.enter_async_context(stdio_client(server_params))
+            read_stream, write_stream = stdio_transport
+            mcp_session = await stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
+            await mcp_session.initialize()
+        except Exception:
+            try:
+                await stack.aclose()
+            except Exception:
+                pass
+            raise
+
+        self._mcp_stack = stack
+        self._mcp_session = mcp_session
+        self._mcp_loop = loop
+        self._mcp_env_sig = env_sig
+        return mcp_session
+
+    async def close(self) -> None:
+        async with self._lock:
+            await self._reset_mcp_session_unlocked()
+
     async def call_tool(
         self,
         tool_name: str,
@@ -718,15 +784,9 @@ class FamilySearchMcpManager:
         status = "ok"
 
         async with self._lock:
-            try:
-                server_params = self._build_server_params()
-                async with AsyncExitStack() as stack:
-                    stdio_transport = await stack.enter_async_context(stdio_client(server_params))
-                    read_stream, write_stream = stdio_transport
-                    mcp_session = await stack.enter_async_context(
-                        ClientSession(read_stream, write_stream)
-                    )
-                    await mcp_session.initialize()
+            for attempt in range(2):
+                try:
+                    mcp_session = await self._get_or_create_mcp_session_unlocked()
                     result = await mcp_session.call_tool(tool_name, arguments=arguments)
                     texts = [
                         c.text for c in result.content if hasattr(c, "text") and c.text
@@ -738,9 +798,12 @@ class FamilySearchMcpManager:
                         response_data = {"raw_text": joined}
                     if getattr(result, "isError", False):
                         status = "error"
-            except Exception as exc:
-                status = "error"
-                response_data = {"error": str(exc)}
+                    break
+                except Exception as exc:
+                    await self._reset_mcp_session_unlocked()
+                    if attempt == 1:
+                        status = "error"
+                        response_data = {"error": str(exc)}
 
         finished = datetime.now(timezone.utc)
         duration_ms = int((finished - started).total_seconds() * 1000)

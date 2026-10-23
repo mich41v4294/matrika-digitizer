@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -257,7 +258,7 @@ async def run_custom_debug_prompt(
         if row:
             scan_id = row.scan_id
             if req.use_row_image:
-                img_path, img_rel = resolve_row_extraction_crop(row)
+                img_path, img_rel = await asyncio.to_thread(resolve_row_extraction_crop, row)
 
     requested_model = req.model
     if req.provider and ":" not in requested_model:

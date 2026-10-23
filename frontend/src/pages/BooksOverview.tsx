@@ -1,12 +1,14 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   BookOpen,
+  CheckCircle2,
   Edit3,
   Eye,
   FileSpreadsheet,
   Play,
+  RefreshCw,
   Save,
   Search,
   Trash2,
@@ -153,8 +155,34 @@ export default function BooksOverview({
   const [showCensusScans, setShowCensusScans] = useState<boolean>(false);
   const [records, setRecords] = useState<RecordItem[]>([]);
   const [totalRecords, setTotalRecords] = useState<number>(0);
+  const [scannedTotal, setScannedTotal] = useState<number>(0);
   const [catalogSheets, setCatalogSheets] = useState<CatalogSheetHit[]>([]);
   const [loadingInitial, setLoadingInitial] = useState<boolean>(true);
+  const [isSearching, setIsSearching] = useState<boolean>(true);
+  const [searchProgress, setSearchProgress] = useState<{
+    running: boolean;
+    processed: number;
+    total: number;
+    matched_records: number;
+    matched_sheets: number;
+    progress_pct: number;
+    stage_sk: string;
+    stage_en: string;
+    elapsed_ms: number;
+  }>({
+    running: true,
+    processed: 0,
+    total: 0,
+    matched_records: 0,
+    matched_sheets: 0,
+    progress_pct: 15,
+    stage_sk: "Prehľadávam matriky a sčítacie hárky…",
+    stage_en: "Searching registers and census sheets…",
+    elapsed_ms: 0,
+  });
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const isSearchingRef = useRef<boolean>(false);
+  const hasLoadedScansOnceRef = useRef<boolean>(false);
   const [recordsPage, setRecordsPage] = useState<number>(1);
   const RECORDS_PER_PAGE = 25;
   const [searchQuery, setSearchQuery] = useState(() => searchParams.get("q") || "");
@@ -231,7 +259,72 @@ export default function BooksOverview({
     houseNumberFilter,
   ]);
 
+  // Listen for live search_progress broadcasts over /ws/pipeline
+  useEffect(() => {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${proto}//${window.location.host}/ws/pipeline`;
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "search_progress" && msg.data && msg.data.scope === "unified") {
+            const d = msg.data;
+            if (d.running && isSearchingRef.current) {
+              setSearchProgress((prev) => ({
+                ...prev,
+                running: true,
+                processed: Number(d.processed ?? prev.processed),
+                total: Number(d.total ?? prev.total),
+                matched_records: Number(d.matched_records ?? prev.matched_records),
+                matched_sheets: Number(d.matched_sheets ?? prev.matched_sheets),
+                progress_pct: Math.max(prev.progress_pct, Number(d.progress_pct ?? 20)),
+                stage_sk: d.stage_sk || prev.stage_sk,
+                stage_en: d.stage_en || prev.stage_en,
+                elapsed_ms: Number(d.elapsed_ms ?? prev.elapsed_ms),
+              }));
+            }
+          }
+        } catch {
+          // ignore ws parse error
+        }
+      };
+    } catch {
+      // ignore ws connection error
+    }
+    return () => {
+      if (ws) ws.close();
+    };
+  }, []);
+
+  // Smooth client-side progress ticker while a search request is in flight
+  useEffect(() => {
+    if (!isSearching) return;
+    const t0 = performance.now();
+    const timer = window.setInterval(() => {
+      setSearchProgress((prev) => {
+        if (!prev.running) return prev;
+        const nextPct = Math.min(92, prev.progress_pct + Math.max(2, Math.round((94 - prev.progress_pct) * 0.22)));
+        const estTotal = Math.max(prev.total, scannedTotal, totalRecords, 1);
+        const estProcessed = Math.min(estTotal, Math.max(prev.processed, Math.round((nextPct / 100) * estTotal)));
+        return {
+          ...prev,
+          total: estTotal,
+          processed: estProcessed,
+          progress_pct: nextPct,
+          elapsed_ms: Math.round(performance.now() - t0),
+        };
+      });
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, [isSearching, scannedTotal, totalRecords]);
+
   const loadData = async (isBackgroundPoll = false) => {
+    if (isBackgroundPoll && isSearchingRef.current) {
+      return;
+    }
+
     const recParams = new URLSearchParams();
     if (searchQuery.trim()) recParams.set("q", searchQuery.trim());
     if (recordTypeFilter) recParams.set("record_type", recordTypeFilter);
@@ -241,12 +334,44 @@ export default function BooksOverview({
       recParams.set("scan_id", String(selectedScanId));
     }
 
+    let controller: AbortController | null = null;
+    const tStart = performance.now();
+    if (!isBackgroundPoll) {
+      if (searchAbortRef.current) {
+        searchAbortRef.current.abort();
+      }
+      controller = new AbortController();
+      searchAbortRef.current = controller;
+      isSearchingRef.current = true;
+      setIsSearching(true);
+      setSearchProgress((prev) => ({
+        running: true,
+        processed: 0,
+        total: Math.max(scannedTotal, totalRecords, prev.total, 1),
+        matched_records: records.length,
+        matched_sheets: catalogSheets.length,
+        progress_pct: 15,
+        stage_sk: "Prehľadávam matriky a sčítacie hárky…",
+        stage_en: "Searching registers and census sheets…",
+        elapsed_ms: 0,
+      }));
+    }
+
     try {
+      const shouldFetchScans = isBackgroundPoll || !hasLoadedScansOnceRef.current;
       const [scansRes, recRes] = await Promise.all([
-        fetch("/api/scans"),
-        fetch(`/api/records?${recParams.toString()}`),
+        shouldFetchScans
+          ? fetch("/api/scans", controller ? { signal: controller.signal } : undefined)
+          : Promise.resolve(null),
+        fetch(
+          `/api/records?${recParams.toString()}`,
+          controller ? { signal: controller.signal } : undefined
+        ),
       ]);
-      if (scansRes.ok) {
+      if (controller?.signal.aborted) return;
+
+      if (scansRes && scansRes.ok) {
+        hasLoadedScansOnceRef.current = true;
         const sData = await scansRes.json();
         const loadedScans: ScanSummary[] = sData.scans || [];
         setScans(loadedScans);
@@ -263,15 +388,48 @@ export default function BooksOverview({
       }
       if (recRes.ok) {
         const rData = await recRes.json();
+        if (controller?.signal.aborted) return;
         const loadedRecs = rData.records || [];
+        const resolvedTotal =
+          typeof rData.total === "number" ? rData.total : loadedRecs.length;
+        const resolvedScanned =
+          typeof rData.scanned_total === "number"
+            ? rData.scanned_total
+            : typeof rData.search_progress?.total === "number"
+            ? rData.search_progress.total
+            : Math.max(resolvedTotal, scannedTotal);
+        const loadedCatalogSheets = rData.catalog_sheets || [];
+        const elapsedMs =
+          typeof rData.search_progress?.elapsed_ms === "number" && rData.search_progress.elapsed_ms > 0
+            ? rData.search_progress.elapsed_ms
+            : Math.max(1, Math.round(performance.now() - tStart));
+
         setRecords(loadedRecs);
-        setTotalRecords(
-          typeof rData.total === "number" ? rData.total : loadedRecs.length
-        );
-        setCatalogSheets(rData.catalog_sheets || []);
+        setTotalRecords(resolvedTotal);
+        setScannedTotal(resolvedScanned);
+        setCatalogSheets(loadedCatalogSheets);
+        if (!isBackgroundPoll) {
+          setSearchProgress({
+            running: false,
+            processed: resolvedScanned,
+            total: Math.max(resolvedScanned, 1),
+            matched_records: resolvedTotal,
+            matched_sheets: loadedCatalogSheets.length,
+            progress_pct: 100,
+            stage_sk: "Vyhľadávanie dokončené",
+            stage_en: "Search complete",
+            elapsed_ms: elapsedMs,
+          });
+        }
+      }
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        return;
       }
     } finally {
-      if (!isBackgroundPoll) {
+      if (!isBackgroundPoll && (!controller || !controller.signal.aborted)) {
+        isSearchingRef.current = false;
+        setIsSearching(false);
         setLoadingInitial(false);
       }
     }
@@ -279,9 +437,35 @@ export default function BooksOverview({
 
   useEffect(() => {
     setRecordsPage(1);
-    loadData(false);
-    const t = setInterval(() => loadData(true), 5000);
-    return () => clearInterval(t);
+    isSearchingRef.current = true;
+    setIsSearching(true);
+    setSearchProgress((prev) => ({
+      ...prev,
+      running: true,
+      processed: 0,
+      total: Math.max(scannedTotal, totalRecords, prev.total, 1),
+      progress_pct: 15,
+      stage_sk: "Prehľadávam matriky a sčítacie hárky…",
+      stage_en: "Searching registers and census sheets…",
+      elapsed_ms: 0,
+    }));
+    const hasTextQuery = Boolean(
+      searchQuery.trim() || villageFilter.trim() || houseNumberFilter.trim()
+    );
+    const debounceTimer = window.setTimeout(
+      () => {
+        loadData(false);
+      },
+      hasLoadedScansOnceRef.current && hasTextQuery ? 120 : 0
+    );
+    const pollInterval = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadData(true);
+    }, 8000);
+    return () => {
+      window.clearTimeout(debounceTimer);
+      window.clearInterval(pollInterval);
+    };
   }, [
     searchQuery,
     recordTypeFilter,
@@ -776,6 +960,29 @@ export default function BooksOverview({
     </>
   );
 
+  const hasActiveSearchFilters = Boolean(
+    searchQuery.trim() ||
+      recordTypeFilter ||
+      villageFilter.trim() ||
+      houseNumberFilter.trim() ||
+      filterRecordsByScan
+  );
+  const activeQuerySummary = [
+    searchQuery.trim(),
+    villageFilter.trim(),
+    houseNumberFilter.trim() ? `č. ${houseNumberFilter.trim()}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const effectiveScannedTotal = Math.max(
+    scannedTotal,
+    searchProgress.total,
+    displayTotalCount
+  );
+  const displaySearchPct = isSearching
+    ? Math.max(10, Math.min(98, searchProgress.progress_pct || 20))
+    : 100;
+
   const unifiedSearchSection = (
     <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -786,7 +993,11 @@ export default function BooksOverview({
         </h3>
         <div className="flex flex-wrap items-center gap-2 flex-1 justify-end">
           <div className="relative min-w-[220px] flex-1 max-w-sm">
-            <Search className="w-4 h-4 text-stone-500 absolute left-3 top-2.5" />
+            {isSearching ? (
+              <RefreshCw className="w-4 h-4 text-amber-600 animate-spin absolute left-3 top-2.5" />
+            ) : (
+              <Search className="w-4 h-4 text-stone-500 absolute left-3 top-2.5" />
+            )}
             <input
               type="text"
               value={searchQuery}
@@ -796,8 +1007,18 @@ export default function BooksOverview({
                   ? "Priezvisko, krstné meno (napr. Ján = Joannes = János), obec…"
                   : "Surname, given name (e.g. Ján = Joannes), village…"
               }
-              className="w-full pl-9 pr-3 py-2 rounded-lg border border-stone-300 text-sm"
+              className="w-full pl-9 pr-8 py-2 rounded-lg border border-stone-300 text-sm"
             />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                title={lang === "sk" ? "Vyčistiť hľadanie" : "Clear search"}
+                className="absolute right-2 top-2 p-1 text-stone-500 hover:text-stone-800 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
 
           <select
@@ -834,6 +1055,113 @@ export default function BooksOverview({
             onChange={(e) => setHouseNumberFilter(e.target.value)}
             placeholder={lang === "sk" ? "Č. domu..." : "House #..."}
             className="w-24 px-3 py-2 rounded-lg border border-stone-300 text-sm"
+          />
+
+          {hasActiveSearchFilters && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchQuery("");
+                setRecordTypeFilter("");
+                setVillageFilter("");
+                setHouseNumberFilter("");
+                setFilterRecordsByScan(false);
+              }}
+              className="px-3 py-2 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 text-xs font-bold inline-flex items-center gap-1 cursor-pointer shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>{lang === "sk" ? "Zrušiť filtre" : "Clear filters"}</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Search Progress Bar */}
+      <div
+        data-testid="search-progress-card"
+        className={`rounded-xl p-3 border space-y-2 transition-colors ${
+          isSearching
+            ? "bg-amber-50 border-amber-300"
+            : "bg-stone-100/70 border-stone-200"
+        }`}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 font-bold text-stone-900 min-w-0">
+            {isSearching ? (
+              <RefreshCw className="w-4 h-4 text-amber-700 animate-spin shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+            )}
+            <span className="truncate">
+              {isSearching
+                ? lang === "sk"
+                  ? `${searchProgress.stage_sk || "Prehľadávam matriky a sčítacie hárky…"}${
+                      activeQuerySummary ? ` („${activeQuerySummary}“)` : ""
+                    }`
+                  : `${searchProgress.stage_en || "Searching registers and census sheets…"}${
+                      activeQuerySummary ? ` ("${activeQuerySummary}")` : ""
+                    }`
+                : hasActiveSearchFilters
+                ? lang === "sk"
+                  ? `Vyhľadávanie dokončené — Nájdených ${displayTotalCount} osôb${
+                      catalogSheets.length > 0
+                        ? ` a ${catalogSheets.length} sčítacích hárkov`
+                        : ""
+                    }`
+                  : `Search complete — Found ${displayTotalCount} people${
+                      catalogSheets.length > 0
+                        ? ` and ${catalogSheets.length} census sheets`
+                        : ""
+                    }`
+                : lang === "sk"
+                ? `Index vyhľadávania pripravený — Prehľadaných ${effectiveScannedTotal} záznamov (${displayTotalCount} osôb)`
+                : `Search index ready — Scanned ${effectiveScannedTotal} records (${displayTotalCount} people)`}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-stone-600 font-medium">
+              {lang === "sk"
+                ? `Prehľadané: ${
+                    isSearching ? searchProgress.processed : effectiveScannedTotal
+                  } / ${effectiveScannedTotal}`
+                : `Scanned: ${
+                    isSearching ? searchProgress.processed : effectiveScannedTotal
+                  } / ${effectiveScannedTotal}`}
+              {!isSearching && searchProgress.elapsed_ms > 0
+                ? ` (${searchProgress.elapsed_ms} ms)`
+                : ""}
+            </span>
+            <span
+              className={`px-2 py-0.5 rounded-full font-bold text-xs ${
+                isSearching
+                  ? "bg-amber-600 text-white"
+                  : "bg-emerald-100 text-emerald-900"
+              }`}
+            >
+              {displaySearchPct}%
+            </span>
+          </div>
+        </div>
+
+        <div
+          role="progressbar"
+          aria-label={
+            lang === "sk" ? "Priebeh vyhľadávania" : "Search progress"
+          }
+          aria-valuenow={displaySearchPct}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          data-testid="search-progress-bar"
+          className={`w-full rounded-full h-2.5 overflow-hidden ${
+            isSearching ? "bg-amber-200/80" : "bg-stone-200"
+          }`}
+        >
+          <div
+            className={`h-full transition-all duration-200 ${
+              isSearching ? "bg-amber-600 animate-pulse" : "bg-emerald-600"
+            }`}
+            style={{ width: `${displaySearchPct}%` }}
           />
         </div>
       </div>

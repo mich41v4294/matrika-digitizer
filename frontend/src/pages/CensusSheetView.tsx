@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -1366,10 +1366,10 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const isOverviewSheet =
     featureFlags.census_overview_sheets && sheet.sheet_type === "overview";
 
-  // Build Byt (dwelling unit / household) groups across the sheet
-  const { groups: bytGroups, memberBytMap } = buildBytGroups(
-    detail,
-    featureFlags.census_multi_byt
+  // Build Byt (dwelling unit / household) groups across the sheet (memoized so editForm keystrokes do not recompute)
+  const { groups: bytGroups, memberBytMap } = useMemo(
+    () => buildBytGroups(detail, featureFlags.census_multi_byt),
+    [detail, featureFlags.census_multi_byt]
   );
   const hasMultipleByty = bytGroups.length >= 2;
 

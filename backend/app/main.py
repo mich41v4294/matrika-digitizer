@@ -5,9 +5,10 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlmodel import Session, select
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
@@ -22,7 +23,7 @@ from backend.app.db.models import (
     ScanImage,
 )
 from backend.app.db.session import engine, init_db
-from backend.app.mcp.familysearch_client import read_fs_env
+from backend.app.mcp.familysearch_client import fs_mcp_manager, read_fs_env
 from backend.app.pipeline.ai_client import ai_client
 
 
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
     settings.ensure_dirs()
     init_db()
     yield
+    await fs_mcp_manager.close()
 
 
 app = FastAPI(
@@ -40,6 +42,7 @@ app = FastAPI(
 )
 
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 allowed_origins = [
     "http://localhost:5173",
@@ -128,19 +131,22 @@ async def system_status() -> dict[str, Any]:
             func.trim(FamilySearchMatch.fs_person_id) != "",
             FamilySearchMatch.confidence_score > 0,
         )
-        new_fs_count = session.exec(
-            select(func.count())
-            .select_from(FamilySearchMatch)
-            .where(*matched_fs_filter)
+        fs_row = session.exec(
+            select(
+                func.count(FamilySearchMatch.id),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (FamilySearchMatch.reviewed_by_user == False, 1),  # noqa: E712
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+            ).where(*matched_fs_filter)
         ).one()
-        unreviewed_fs_count = session.exec(
-            select(func.count())
-            .select_from(FamilySearchMatch)
-            .where(
-                *matched_fs_filter,
-                FamilySearchMatch.reviewed_by_user == False,  # noqa: E712
-            )
-        ).one()
+        new_fs_count = int(fs_row[0] or 0)
+        unreviewed_fs_count = int(fs_row[1] or 0)
         census_sheets_count = session.exec(select(func.count()).select_from(CensusSheet)).one()
 
     return {

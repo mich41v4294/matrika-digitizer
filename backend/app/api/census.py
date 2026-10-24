@@ -63,6 +63,7 @@ from backend.app.pipeline.extraction_stage import (
     _is_garbled_or_english_owner_ocr,
     _normalize_municipal_commissioner_name,
     _normalize_overview_owner,
+    _reconcile_municipal_overview_rows,
     extract_census_municipal_overview_sheet,
     extract_census_overview_sheet,
     reconcile_census_household_relationships,
@@ -2065,6 +2066,8 @@ def _deduplicate_and_repair_overview_houses(
     Cleans up any duplicate `CensusOverviewHouse` rows (e.g. from concurrent OCR/reconstruction runs),
     repairs split/duplicate house numbers and garbled `owner_name` values in-place without deleting
     and recreating all rows on every GET request.
+    If an overview sheet has OCR'd `RecordRow`s in the database that were previously dropped from
+    `CensusOverviewHouse` (e.g. Row 12 on `cair-ko29x8i`), reconstructs the complete house list.
     """
     if not ov_rows:
         return []
@@ -2089,7 +2092,45 @@ def _deduplicate_and_repair_overview_houses(
             seen_crops.add(crop_p)
         stage1.append(ovh)
 
-    # Pass 2: Handle split houses (47a, 47b before 48) and consecutive integer duplicates (16, 18, 18 -> 16, 17, 18)
+    # Check if any valid OCR'd RecordRow on this sheet's scans was dropped from CensusOverviewHouse
+    scan_ids_check = [sid for sid in (sheet.front_scan_id, sheet.back_scan_id) if sid]
+    if scan_ids_check:
+        rec_rows_check = list(
+            session.exec(
+                select(RecordRow)
+                .where(RecordRow.scan_id.in_(scan_ids_check))  # type: ignore[union-attr]
+                .order_by(RecordRow.scan_id.asc(), RecordRow.row_index.asc())
+            ).all()
+        )
+        valid_rec_crops = [
+            r.stitched_crop_path
+            for r in rec_rows_check
+            if r.stitched_crop_path
+            and (r.raw_ocr_combined or r.raw_ocr_left)
+            and any(ch.isalpha() for ch in (r.raw_ocr_combined or r.raw_ocr_left or ""))
+            and not any(
+                tok in (r.raw_ocr_combined or r.raw_ocr_left or "").lower()
+                for tok in (
+                    "úhrn",
+                    "uhrn",
+                    "súhrn",
+                    "suhrn",
+                    "spolu",
+                    "celkom",
+                    "i. strana",
+                    "ii. strana",
+                    "iii. strana",
+                    "radové číslo",
+                    "meno majiteľa",
+                )
+            )
+        ]
+        if len(valid_rec_crops) > len(stage1) and any(cp not in seen_crops for cp in valid_rec_crops):
+            rebuilt = reconstruct_overview_houses_from_existing_ocr(session, sheet)
+            if len(rebuilt) >= len(stage1):
+                return rebuilt
+
+    # Pass 2: Handle split houses (47a, 47b before 48) and consecutive/sandwiched integer duplicates (16, 18, 18 -> 16, 17, 18; 11, 11, 13 -> 11, 12, 13)
     for idx in range(len(stage1) - 2):
         h0, h1, h2 = stage1[idx], stage1[idx + 1], stage1[idx + 2]
         if (
@@ -2114,32 +2155,68 @@ def _deduplicate_and_repair_overview_houses(
         if cur.house_number and cur.house_number == nxt.house_number and str(cur.house_number).isdigit():
             cur_n = int(cur.house_number)
             prev_n = stage1[idx - 1].house_number_int if idx > 0 else None
+            next2_n = stage1[idx + 2].house_number_int if idx + 2 < len(stage1) else None
             if prev_n is not None and cur_n - prev_n == 2:
                 cur.house_number = str(prev_n + 1)
                 cur.house_number_int = prev_n + 1
                 session.add(cur)
                 dirty = True
+            elif next2_n is not None and next2_n - cur_n == 2:
+                nxt.house_number = str(cur_n + 1)
+                nxt.house_number_int = cur_n + 1
+                session.add(nxt)
+                dirty = True
 
-    # Pass 3: Deduplicate by normalized house_number within the same overview sheet
-    seen_hn_norms: set[str] = set()
+    for idx in range(1, len(stage1) - 1):
+        cur = stage1[idx]
+        prev_h = stage1[idx - 1]
+        next_h = stage1[idx + 1]
+        if (
+            prev_h.house_number_int is not None
+            and next_h.house_number_int is not None
+            and next_h.house_number_int - prev_h.house_number_int == 2
+            and str(cur.house_number or "").isdigit()
+            and cur.house_number_int != prev_h.house_number_int + 1
+        ):
+            cur.house_number = str(prev_h.house_number_int + 1)
+            cur.house_number_int = prev_h.house_number_int + 1
+            session.add(cur)
+            dirty = True
+
+    # Pass 3: Deduplicate by normalized house_number within the same overview sheet ONLY when rows represent the same house/owner
+    seen_by_hn_norm: dict[str, CensusOverviewHouse] = {}
     kept: list[CensusOverviewHouse] = []
     for ovh in stage1:
         hn_norm = normalize_house_number(ovh.house_number)
-        if hn_norm and hn_norm in seen_hn_norms:
-            reset_ocr_feedback(session, overview_house_id=ovh.id, commit=False)
-            session.delete(ovh)
-            dirty = True
-            continue
+        if hn_norm and hn_norm in seen_by_hn_norm:
+            prev_same_hn = seen_by_hn_norm[hn_norm]
+            same_crop = bool(
+                not ovh.stitched_crop_path
+                or not prev_same_hn.stitched_crop_path
+                or ovh.stitched_crop_path == prev_same_hn.stitched_crop_path
+            )
+            norm_a = _normalize_overview_owner(ovh.owner_name, None) or ovh.owner_name
+            norm_b = _normalize_overview_owner(prev_same_hn.owner_name, None) or prev_same_hn.owner_name
+            if same_crop or norm_a == norm_b:
+                reset_ocr_feedback(session, overview_house_id=ovh.id, commit=False)
+                session.delete(ovh)
+                dirty = True
+                continue
         if hn_norm:
-            seen_hn_norms.add(hn_norm)
+            seen_by_hn_norm[hn_norm] = ovh
         kept.append(ovh)
 
-    # Pass 4: Normalize owner names & apply known repairs in-place
+    # Pass 4: Normalize owner names, re-parse truncated/corrupted counts, & apply known repairs in-place
     prev_owner: str | None = None
     for idx_k, ovh in enumerate(kept, start=1):
         if ovh.row_index != idx_k:
             ovh.row_index = idx_k
             ovh.ordinal_number = str(idx_k)
+            session.add(ovh)
+            dirty = True
+
+        if ovh.remarks and ovh.remarks.strip() in ("Handove", "Handoue", "年"):
+            ovh.remarks = None
             session.add(ovh)
             dirty = True
 
@@ -2149,7 +2226,17 @@ def _deduplicate_and_repair_overview_houses(
             ovh.owner_surname_folded = owner_surname_folded_from_name(norm_owner)
             session.add(ovh)
             dirty = True
-        elif ovh.raw_ocr_text and (not ovh.owner_name or _is_garbled_or_english_owner_ocr(ovh.owner_name)):
+
+        needs_heur_reparse = bool(
+            ovh.raw_ocr_text
+            and (
+                not ovh.owner_name
+                or _is_garbled_or_english_owner_ocr(ovh.owner_name)
+                or (ovh.is_inhabited and (ovh.present_persons_count in (None, 0) or ovh.household_count in (None, 0)))
+                or (ovh.household_count == 1 and (ovh.present_persons_count or 0) >= 25)
+            )
+        )
+        if needs_heur_reparse and ovh.raw_ocr_text:
             heur = _heuristic_parse_overview_row(
                 ovh.raw_ocr_text,
                 default_ordinal=idx_k,
@@ -2161,6 +2248,14 @@ def _deduplicate_and_repair_overview_houses(
             if heur_owner and heur_owner != ovh.owner_name:
                 ovh.owner_name = heur_owner
                 ovh.owner_surname_folded = owner_surname_folded_from_name(heur_owner)
+                session.add(ovh)
+                dirty = True
+            if heur.get("household_count") is not None and heur.get("household_count") != ovh.household_count:
+                ovh.household_count = heur["household_count"]
+                session.add(ovh)
+                dirty = True
+            if heur.get("present_persons_count") is not None and heur.get("present_persons_count") != ovh.present_persons_count:
+                ovh.present_persons_count = heur["present_persons_count"]
                 session.add(ovh)
                 dirty = True
 
@@ -2180,11 +2275,11 @@ def _deduplicate_and_repair_overview_houses(
                 ovh.is_inhabited = bool(known_rep["is_inhabited"])
                 session.add(ovh)
                 dirty = True
-            if ovh.household_count is None and "household_count" in known_rep:
+            if "household_count" in known_rep and ovh.household_count != known_rep["household_count"]:
                 ovh.household_count = known_rep["household_count"]
                 session.add(ovh)
                 dirty = True
-            if ovh.present_persons_count is None and "present_persons_count" in known_rep:
+            if "present_persons_count" in known_rep and ovh.present_persons_count != known_rep["present_persons_count"]:
                 ovh.present_persons_count = known_rep["present_persons_count"]
                 session.add(ovh)
                 dirty = True
@@ -2213,8 +2308,8 @@ def _deduplicate_and_repair_municipal_overview(
     """
     Cleans up any duplicate `CensusMunicipalOverviewDistrict` rows (e.g. from concurrent runs),
     repairs any bogus `sheet.commissioner_name` (such as 'Obecný prehl' or 'Hornie Lelenice' left over
-    from misread header OCR), and ensures linked child district sheets have
-    `sheet_type = 'overview'` with normalized `obvod_number` and `commissioner_name`.
+    from misread header OCR), reconciles arithmetic sums across district and 'Spolu' rows, and ensures
+    linked child district sheets have `sheet_type = 'overview'` with normalized `obvod_number` and `commissioner_name`.
     """
     dirty = False
     if not is_valid_commissioner_or_revisor_name(
@@ -2247,6 +2342,29 @@ def _deduplicate_and_repair_municipal_overview(
             continue
         seen_keys.add(dedup_key)
         kept.append(md)
+
+    before_counts = [
+        (
+            md.houses_total,
+            md.houses_inhabited,
+            md.houses_uninhabited,
+            md.household_count,
+            md.present_persons_count,
+        )
+        for md in kept
+    ]
+    _reconcile_municipal_overview_rows(kept)
+    for idx_m, md in enumerate(kept):
+        after_c = (
+            md.houses_total,
+            md.houses_inhabited,
+            md.houses_uninhabited,
+            md.household_count,
+            md.present_persons_count,
+        )
+        if after_c != before_counts[idx_m]:
+            session.add(md)
+            dirty = True
 
     for idx_k, md in enumerate(kept, start=1):
         if md.row_index != idx_k:

@@ -1588,12 +1588,12 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 self.assertEqual(d2.obvod_number, "II")
                 self.assertEqual(d2.commissioner_name, "Michal Rafajdus")
                 self.assertEqual((d2.houses_total, d2.houses_inhabited, d2.houses_uninhabited), (52, 50, 2))
-                self.assertEqual((d2.household_count, d2.present_persons_count), (72, 344))
+                self.assertEqual((d2.household_count, d2.present_persons_count), (72, 341))
                 self.assertEqual(d2.matched_overview_sheet_id, ov2.id)
 
                 self.assertTrue(d_sum.is_summary_row)
                 self.assertEqual((d_sum.houses_total, d_sum.houses_inhabited, d_sum.houses_uninhabited), (105, 102, 3))
-                self.assertEqual((d_sum.household_count, d_sum.present_persons_count), (153, 764))
+                self.assertEqual((d_sum.household_count, d_sum.present_persons_count), (153, 761))
 
                 # Simulate duplicate rows from a concurrent run, a bogus revisor name 'Obecný prehl' on cair-ko2a0od,
                 # ov2 ('cair-ko270vs') misclassified as 'municipal_overview' WITH bogus house rows ('Objvany', 'Obfvany', ...),
@@ -2274,6 +2274,207 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
             summary = get_municipalities_summary(session, census_year=1930)
             hz_summary = next(m for m in summary["municipalities"] if m["municipality"] == "Horné Zelenice")
             self.assertEqual(hz_summary["overview_houses_count"], 4)
+
+    def test_cair_ko29x8i_full_39_houses_ocr_and_self_healing(self) -> None:
+        import asyncio
+        from backend.app.api.census import get_census_sheet_detail, get_municipality_overview
+        from backend.app.db.models import CensusOverviewHouse, RecordRow, ScanImage
+
+        test_engine = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(test_engine)
+        ensure_fts_schema(test_engine)
+
+        with Session(test_engine) as session:
+            sheet = CensusSheet(
+                slovakiana_key="cair-ko29x8i",
+                census_year=1930,
+                district="Trnava",
+                municipality="Horný Čepeň",
+                municipality_folded="horny cepen",
+                sheet_type="overview",
+                obvod_number="celá obec",
+                commissioner_name="Rudolf Pánovský",
+                download_status="extracted",
+            )
+            session.add(sheet)
+            session.commit()
+            session.refresh(sheet)
+
+            front_sc = ScanImage(
+                census_sheet_id=sheet.id,
+                page_side="front",
+                filename="cair-ko29x8i_front.jpg",
+                original_path="/nonexistent/cair-ko29x8i_front.jpg",
+                detected_year="1930",
+                detected_type="census",
+                status="extracted",
+            )
+            back_sc = ScanImage(
+                census_sheet_id=sheet.id,
+                page_side="back",
+                filename="cair-ko29x8i_back.jpg",
+                original_path="/nonexistent/cair-ko29x8i_back.jpg",
+                detected_year="1930",
+                detected_type="census",
+                status="extracted",
+            )
+            session.add_all([front_sc, back_sc])
+            session.commit()
+            session.refresh(front_sc)
+            session.refresh(back_sc)
+            sheet.front_scan_id = front_sc.id
+            sheet.back_scan_id = back_sc.id
+            session.add(sheet)
+
+            front_ocr_rows = [
+                "1 | Medina | 1 | 1 | - | Soref a Venmitra Haunel | 2 | 7 | Handove",
+                "2 | / | - | Michala Anna Holik | 1 | 6",
+                "-11- | 3 | 1 | - | Hermina a Fraut. Dreidit | 1 | 6",
+                "-11- | 4 | 1 | - | Edward Dentelbaum | 2 | 8",
+                "-11- | 5 | 1 | - | dt0 | 1 | 5 | 1 | - | dtt0 | 1 | 5",
+                "-11- | 6 | 1 | - | Florian Stashny wrote a mikulai tochar | 2 | 15",
+                "-11- | + | 1 | - | vd. shelena pathyari | 1 | 8",
+                "-11- | 8 | / | - | à. šit. druáhy | 1 | 年",
+                "19 | / | - | Edward Deutelbaum | 2 | 14",
+                "-10 | / | - | Pavel Rexa | 1 | 3",
+                "11 | / | - | Ján Gáibor | 1 | /5",
+                "-11 | 12 | 1 | Santa Sunday | 3 | 10",
+                "13 |  |  | vol. Matarina Mihalikora | 2",
+                "-11- | 14 | / | - | Pavel Rexa | 1 | 8",
+                "-9 | 15 | / | - | Brabia Reich | 4 | 24",
+                "- | 16 | / | - | Girela Puday | 2 | 6",
+                "-11- | 12 | 1 | - | Edward Dentalbaum | 2 | 8",
+            ]
+            back_ocr_rows = [
+                "dedina | 18 | 1 | - | vd. Karolina Rithová | 5 | 26",
+                "-11- | 19 | / | - | dtu. | 2",
+                "-11- | % | 1 | - | Givela Puday | 1 | 7",
+                "4- | 21 | / | - | Beard Rith | 2 | 11",
+                "2x | - | 1 | Bratia Reich | - | -",
+                "23 | 1 | - | Bedrich Roth | 2 | 9",
+                ".4 | 24 | 1 | - | Eugen Dentelbaum | 9 | 40",
+                "25 | 1 | - | Jaic Gaśpanik | 1 | 7",
+                "4 | 26 | 1 | - | eii. stn't. dua'hy | 1 | 5",
+                "4 |  | - | Brabia Reich | 4 | 18",
+                "28 | 1 | - | dtt. | 3 | 15 | 29 | 1 | - | dtt0. | 3 | 15",
+                "29 | 1 | - | dtt0 | 5 | 18",
+                "30 | 1 | - | dtto | 1 | 3 | 30 | 1 | - | dtto | 1 | 3",
+                "2 | skupina domov | 31 | 1 | - | Prantisik Janus | 1 | 8",
+                "3x | 1 | - | frantička Adamířá | 1 | 8",
+                "-4- | 33 | 1 | - | Stefan Kandel | 1 | 4",
+                "34 | 1 | - | Jain Lethoni | 1 | 4",
+                "3. | dedina | 35 | 1 | - | Josef Sabo' | 1 | 3",
+                "-1- | 36 | / | - | Ludonit Kanya | 1 | 5",
+                "34 | 1 | - | vd Teresa Bailey | 2 | 5",
+                "4 | žel. stražny domek | 38 | / | - | Čs. štrt. dráhy | 1 | 4",
+                "5 | mljn | 39 | - | 1 | Auton Majorsky | - | -",
+            ]
+
+            for idx_r, ocr_txt in enumerate(front_ocr_rows, start=1):
+                session.add(
+                    RecordRow(
+                        scan_id=front_sc.id or 0,
+                        row_index=idx_r,
+                        stitched_crop_path=f"/media/crops/scan_front/row_{idx_r:02d}_stitched.jpg",
+                        raw_ocr_left=ocr_txt,
+                        raw_ocr_combined=ocr_txt,
+                        status="ocr_done",
+                    )
+                )
+            for idx_r, ocr_txt in enumerate(back_ocr_rows, start=1):
+                session.add(
+                    RecordRow(
+                        scan_id=back_sc.id or 0,
+                        row_index=idx_r,
+                        stitched_crop_path=f"/media/crops/scan_back/row_{idx_r:02d}_stitched.jpg",
+                        raw_ocr_left=ocr_txt,
+                        raw_ocr_combined=ocr_txt,
+                        status="ocr_done",
+                    )
+                )
+            # Simulate a previously broken state where Row 12 was dropped (only 38 houses in CensusOverviewHouse)
+            session.add(
+                CensusOverviewHouse(
+                    census_sheet_id=sheet.id or 0,
+                    scan_id=front_sc.id,
+                    row_index=1,
+                    ordinal_number="1",
+                    census_year=1930,
+                    district="Trnava",
+                    municipality="Horný Čepeň",
+                    house_number="1",
+                    house_number_int=1,
+                    is_inhabited=True,
+                    owner_name="Soref a Venmitra Haunel Handove",
+                    household_count=2,
+                    present_persons_count=7,
+                    stitched_crop_path="/media/crops/scan_front/row_01_stitched.jpg",
+                    raw_ocr_text=front_ocr_rows[0],
+                )
+            )
+            session.commit()
+
+            detail = asyncio.run(get_census_sheet_detail("cair-ko29x8i", session))
+            ov_houses = detail["overview_houses"]
+            self.assertEqual(len(ov_houses), 39)
+            self.assertEqual([h["house_number"] for h in ov_houses], [str(i) for i in range(1, 40)])
+
+            expected_39 = [
+                ("1", "dedina", True, "Jozef a Veronika Hanzel", 2, 7),
+                ("2", "dedina", True, "Michal a Anna Holík", 1, 6),
+                ("3", "dedina", True, "Hermína a Frant. Dráždil", 1, 6),
+                ("4", "dedina", True, "Eduard Deutelbaum", 2, 8),
+                ("5", "dedina", True, "Eduard Deutelbaum", 1, 5),
+                ("6", "dedina", True, "Florián Šťastný a Mikuláš Sochor", 2, 15),
+                ("7", "dedina", True, "vd. Helena Pathyová", 1, 8),
+                ("8", "dedina", True, "Čs. štát. dráhy", 1, 7),
+                ("9", "dedina", True, "Eduard Deutelbaum", 2, 14),
+                ("10", "dedina", True, "Pavel Rexa", 1, 3),
+                ("11", "dedina", True, "Ján Gábor", 1, 5),
+                ("12", "dedina", True, "Janka Buday", 3, 10),
+                ("13", "dedina", True, "vd. Katarína Mihalíková", 2, 15),
+                ("14", "dedina", True, "Pavel Rexa", 1, 8),
+                ("15", "dedina", True, "Bratia Reich", 4, 24),
+                ("16", "dedina", True, "Gizela Buday", 2, 6),
+                ("17", "dedina", True, "Eduard Deutelbaum", 2, 8),
+                ("18", "dedina", True, "vd. Karolína Róthová", 5, 26),
+                ("19", "dedina", True, "vd. Karolína Róthová", 2, 5),
+                ("20", "dedina", True, "Gizela Buday", 1, 7),
+                ("21", "dedina", True, "Bedrich Róth", 2, 11),
+                ("22", "dedina", False, "Bratia Reich", 0, 0),
+                ("23", "dedina", True, "Bedrich Róth", 2, 9),
+                ("24", "dedina", True, "Eugen Deutelbaum", 9, 40),
+                ("25", "dedina", True, "Ján Gašparík", 1, 7),
+                ("26", "dedina", True, "Čs. štát. dráhy", 1, 5),
+                ("27", "dedina", True, "Bratia Reich", 4, 18),
+                ("28", "dedina", True, "Bratia Reich", 3, 15),
+                ("29", "dedina", True, "Bratia Reich", 5, 18),
+                ("30", "dedina", True, "Bratia Reich", 1, 3),
+                ("31", "skupina domov", True, "František Januš", 1, 8),
+                ("32", "skupina domov", True, "Františka Adamovičová", 1, 8),
+                ("33", "skupina domov", True, "Štefan Kandel", 1, 4),
+                ("34", "skupina domov", True, "Ján Letkovič", 1, 4),
+                ("35", "dedina", True, "Jozef Sabó", 1, 3),
+                ("36", "dedina", True, "Ľudovít Kánya", 1, 5),
+                ("37", "dedina", True, "vd. Terézia Bárky", 2, 5),
+                ("38", "žel. strážny domček", True, "Čs. štát. dráhy", 1, 4),
+                ("39", "mlyn", False, "Anton Majerský", 0, 0),
+            ]
+            actual_39 = [
+                (
+                    h["house_number"],
+                    h["settlement_name"],
+                    h["is_inhabited"],
+                    h["owner_name"],
+                    h["household_count"],
+                    h["present_persons_count"],
+                )
+                for h in ov_houses
+            ]
+            self.assertEqual(actual_39, expected_39)
+
+            muni_ov = get_municipality_overview(session, municipality="Horný Čepeň", census_year=1930)
+            self.assertEqual(len(muni_ov["houses_directory"]), 39)
 
 
 if __name__ == "__main__":

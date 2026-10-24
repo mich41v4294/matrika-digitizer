@@ -1595,6 +1595,191 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 self.assertEqual((d_sum.houses_total, d_sum.houses_inhabited, d_sum.houses_uninhabited), (105, 102, 3))
                 self.assertEqual((d_sum.household_count, d_sum.present_persons_count), (153, 764))
 
+                # Simulate duplicate rows from a concurrent run, a bogus revisor name 'Obecný prehl' on cair-ko2a0od,
+                # ov2 ('cair-ko270vs') misclassified as 'municipal_overview' WITH bogus house rows ('Objvany', 'Obfvany', ...),
+                # and ov1 ('cair-ko270vr') having raw OCR typo 'Eduard Lotticky', and verify get_municipality_overview &
+                # get_census_sheet_detail self-heal all of them and reconstruct CensusOverviewHouse rows 55..58 on the fly.
+                from backend.app.api.census import get_census_sheet_detail, get_municipality_overview
+                from backend.app.pipeline.census_layout import (
+                    classify_overview_rows_structure,
+                    is_occupancy_status_token,
+                    is_valid_commissioner_or_revisor_name,
+                )
+
+                for occ_tok in (
+                    "Objvany",
+                    "Obfvany",
+                    "Objvány",
+                    "Objrany",
+                    "Objvarij",
+                    "Objvary",
+                    "Obijrany",
+                    "Obfryany",
+                    "Objrani",
+                    "Objvranž",
+                    "obývaný",
+                ):
+                    self.assertEqual(is_occupancy_status_token(occ_tok), (True, True), occ_tok)
+                    self.assertFalse(is_valid_commissioner_or_revisor_name(occ_tok), occ_tok)
+                self.assertEqual(is_occupancy_status_token("neobývaný"), (True, False))
+                self.assertEqual(is_occupancy_status_token("Martin Vido"), (False, False))
+
+                house_raw_rows = [
+                    "55 | objvany | + | Martin Vido | 3 | 3",
+                    "56 | obfvany | + | Ján Kováč | 16 | 16",
+                    "57 | objvány | + | Jozef Varga | 8 | 8",
+                    "58 | objrany | + | Štefan Horváth | 7 | 7",
+                ]
+                self.assertEqual(classify_overview_rows_structure(house_raw_rows), "overview")
+
+                sheet.commissioner_name = "Obecný prehl"
+                ov1.commissioner_name = "Eduard Lotticky"
+                ov2.sheet_type = "municipal_overview"
+                session.add_all([sheet, ov1, ov2])
+                for dup_src in (d1, d2, d_sum):
+                    dup_copy = CensusMunicipalOverviewDistrict(
+                        census_sheet_id=dup_src.census_sheet_id,
+                        scan_id=dup_src.scan_id,
+                        row_index=dup_src.row_index,
+                        census_year=dup_src.census_year,
+                        district=dup_src.district,
+                        municipality=dup_src.municipality,
+                        ordinal_number=dup_src.ordinal_number,
+                        settlement_name=dup_src.settlement_name,
+                        obvod_number=dup_src.obvod_number,
+                        commissioner_name=dup_src.commissioner_name,
+                        houses_total=dup_src.houses_total,
+                        houses_inhabited=dup_src.houses_inhabited,
+                        houses_uninhabited=dup_src.houses_uninhabited,
+                        household_count=dup_src.household_count,
+                        present_persons_count=dup_src.present_persons_count,
+                        is_summary_row=dup_src.is_summary_row,
+                        matched_overview_sheet_id=dup_src.matched_overview_sheet_id,
+                    )
+                    session.add(dup_copy)
+
+                # Seed bogus CensusMunicipalOverviewDistrict rows on ov2 ('cair-ko270vs') matching the user's screenshot
+                bogus_ov2_rows = [
+                    (1, "I", "Objvany", 55, 3, 3, "Martin Vido", house_raw_rows[0]),
+                    (2, "II", "Obfvany", 56, 16, 16, "Ján Kováč", house_raw_rows[1]),
+                    (3, "III", "Objvány", 57, 8, 8, "Jozef Varga", house_raw_rows[2]),
+                    (4, "IV", "Objrany", 58, 7, 7, "Štefan Horváth", house_raw_rows[3]),
+                ]
+                for r_i, obv_n, bad_comm, h_tot, h_inh, h_uninh, rem_owner, raw_t in bogus_ov2_rows:
+                    session.add(
+                        CensusMunicipalOverviewDistrict(
+                            census_sheet_id=ov2.id or 0,
+                            row_index=r_i,
+                            census_year=1930,
+                            district="Hlohovec",
+                            municipality="Horné Zelenice",
+                            ordinal_number="1",
+                            settlement_name="Horné Zelenice",
+                            obvod_number=obv_n,
+                            commissioner_name=bad_comm,
+                            houses_total=h_tot,
+                            houses_inhabited=h_inh,
+                            houses_uninhabited=h_uninh,
+                            remarks=rem_owner,
+                            raw_ocr_text=raw_t,
+                        )
+                    )
+                session.commit()
+
+                muni_ov_res = get_municipality_overview(session, municipality="Horné Zelenice", census_year=1930)
+                self.assertEqual(
+                    [ms["slovakiana_id"] for ms in muni_ov_res["municipal_overview_sheets"]],
+                    ["cair-ko2a0od"],
+                )
+                self.assertEqual(
+                    muni_ov_res["municipal_overview_sheets"][0]["commissioner_name"],
+                    "František Mallý",
+                )
+                self.assertEqual(
+                    [(os["slovakiana_id"], os["obvod_number"], os["commissioner_name"], os["overview_houses_count"]) for os in muni_ov_res["overview_sheets"]],
+                    [
+                        ("cair-ko270vr", "I", "Eduard Zoltický", 0),
+                        ("cair-ko270vs", "II", "Michal Rafajdus", 4),
+                    ],
+                )
+                self.assertEqual(
+                    [(h["house_number"], h["owner_name"], h["overview_present_persons_count"]) for h in muni_ov_res["houses_directory"]],
+                    [
+                        ("55", "Martin Vido", 3),
+                        ("56", "Ján Kováč", 16),
+                        ("57", "Jozef Varga", 8),
+                        ("58", "Štefan Horváth", 7),
+                    ],
+                )
+
+                detail_ov2 = asyncio.run(get_census_sheet_detail("cair-ko270vs", session))
+                self.assertEqual(detail_ov2["sheet"]["sheet_type"], "overview")
+                self.assertEqual(detail_ov2["municipal_overview_districts"], [])
+                self.assertEqual(len(detail_ov2["overview_houses"]), 4)
+                self.assertEqual(
+                    [h["house_number"] for h in detail_ov2["overview_houses"]],
+                    ["55", "56", "57", "58"],
+                )
+
+                detail_res = asyncio.run(get_census_sheet_detail("cair-ko2a0od", session))
+                self.assertEqual(detail_res["sheet"]["commissioner_name"], "František Mallý")
+                self.assertEqual(detail_res["sheet"]["municipal_districts_count"], 2)
+                self.assertEqual(len(detail_res["municipal_overview_districts"]), 3)
+                self.assertEqual(
+                    [r["obvod_number"] for r in detail_res["municipal_overview_districts"]],
+                    ["I", "II", None],
+                )
+                self.assertEqual(len(detail_res["joined_overview_houses"]), 4)
+
+                # Also verify that if extract_census_municipal_overview_sheet is called directly on a Prehľad domov sheet
+                # whose rows have house occupancy tokens ('objvany', 'obfvany', ...), it structurally switches to 'overview'
+                ov2.sheet_type = "municipal_overview"
+                ov2_scan = ScanImage(
+                    census_sheet_id=ov2.id,
+                    page_side="front",
+                    filename="cair-ko270vs_front.jpg",
+                    original_path=str(front_path),
+                    detected_year="1930",
+                    detected_type="census",
+                    status="uploaded",
+                )
+                session.add_all([ov2, ov2_scan])
+                session.commit()
+                session.refresh(ov2_scan)
+                ov2.front_scan_id = ov2_scan.id
+                session.add(ov2)
+                session.commit()
+
+                async def fake_ov2_chat_completion(**kwargs: object) -> dict[str, object]:
+                    stage = str(kwargs.get("stage") or "")
+                    if stage == "ocr_header":
+                        return {"content": "Sčítanie ľudu 1930 | Obec Horné Zelenice"}
+                    img_rel = str(kwargs.get("image_rel_url") or "")
+                    m_r = _re.search(r"row_0*(\d+)_", img_rel)
+                    r_idx = int(m_r.group(1)) if m_r else 1
+                    return {"content": house_raw_rows[r_idx - 1] if 1 <= r_idx <= len(house_raw_rows) else ""}
+
+                from backend.app.pipeline.extraction_stage import extract_census_municipal_overview_sheet
+
+                with patch.object(ai_client, "chat_completion", side_effect=fake_ov2_chat_completion):
+                    muni_rows = asyncio.run(extract_census_municipal_overview_sheet(session, ov2, ov2_scan, None))
+
+                self.assertEqual(muni_rows, [])
+                session.refresh(ov2)
+                self.assertEqual(ov2.sheet_type, "overview")
+                detail_ov2_after = asyncio.run(get_census_sheet_detail("cair-ko270vs", session))
+                self.assertEqual(detail_ov2_after["sheet"]["sheet_type"], "overview")
+                self.assertEqual(detail_ov2_after["municipal_overview_districts"], [])
+                self.assertEqual(
+                    [(h["house_number"], h["owner_name"]) for h in detail_ov2_after["overview_houses"]],
+                    [
+                        ("55", "Martin Vido"),
+                        ("56", "Ján Kováč"),
+                        ("57", "Jozef Varga"),
+                        ("58", "Štefan Horváth"),
+                    ],
+                )
+
 
 
 if __name__ == "__main__":

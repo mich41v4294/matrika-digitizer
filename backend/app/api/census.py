@@ -44,11 +44,21 @@ from backend.app.mcp.familysearch_client import (
     schedule_auto_fs_match,
     trigger_auto_fs_match_for_fact,
 )
+from backend.app.pipeline.census_layout import (
+    classify_overview_rows_structure,
+    detect_is_overview_sheet,
+    extract_municipal_overview_header_metadata,
+    extract_overview_header_metadata,
+    is_occupancy_status_token,
+    is_valid_commissioner_or_revisor_name,
+)
 from backend.app.pipeline.extraction_stage import (
     _format_birth_place_raw,
+    _normalize_municipal_commissioner_name,
     extract_census_municipal_overview_sheet,
     extract_census_overview_sheet,
     reconcile_census_household_relationships,
+    reconstruct_overview_houses_from_existing_ocr,
 )
 from backend.app.pipeline.lexicon import (
     apply_person_fact_search_fields,
@@ -1817,6 +1827,210 @@ def _serialize_overview_house(
     }
 
 
+def _md_rows_are_bogus_house_rows(md_rows: list[CensusMunicipalOverviewDistrict]) -> bool:
+    """
+    Returns True if `md_rows` stored in `CensusMunicipalOverviewDistrict` are actually
+    per-house rows from a misclassified `Prehľad sčítacieho obvodu` ('Prehľad domov') sheet
+    (e.g. `commissioner_name` is an OCR variant of 'obývaný'/'neobývaný' like 'Objvany', 'Obfvany',
+    or there are >10 rows, or `houses_total` values are sequential house numbers 55, 56, 57...).
+    """
+    if not md_rows:
+        return False
+    non_summary = [md for md in md_rows if not md.is_summary_row]
+    if not non_summary:
+        return False
+    if len(non_summary) > 10:
+        return True
+    for md in non_summary:
+        if md.commissioner_name and is_occupancy_status_token(md.commissioner_name)[0]:
+            return True
+    raw_texts = [md.raw_ocr_text for md in md_rows if md.raw_ocr_text]
+    if raw_texts and classify_overview_rows_structure(raw_texts) == "overview":
+        return True
+    seq_house_steps = 0
+    prev_tot: int | None = None
+    for md in non_summary:
+        if md.houses_total is not None:
+            inh = md.houses_inhabited or 0
+            uninh = md.houses_uninhabited or 0
+            if prev_tot is not None and 1 <= (md.houses_total - prev_tot) <= 2 and md.houses_total != (inh + uninh):
+                seq_house_steps += 1
+            prev_tot = md.houses_total
+    if seq_house_steps >= 2:
+        return True
+    return False
+
+
+def _repair_misclassified_district_overview_sheet(
+    session: SessionDep,
+    sheet: CensusSheet,
+    md_rows: list[CensusMunicipalOverviewDistrict] | None = None,
+    front_scan: ScanImage | None = None,
+) -> list[CensusOverviewHouse]:
+    """
+    Converts a misclassified `municipal_overview` sheet back to `overview` ('Prehľad domov'),
+    deletes all bogus `CensusMunicipalOverviewDistrict` rows on it, restores its `obvod_number`
+    and `commissioner_name` from its parent `Obecný prehľad` or header OCR, and reconstructs
+    `CensusOverviewHouse` rows on the fly from its existing `RecordRow` / `md_rows` OCR data.
+    """
+    if sheet.id is None:
+        return []
+    if md_rows is None:
+        md_rows = list(
+            session.exec(
+                select(CensusMunicipalOverviewDistrict)
+                .where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+                .order_by(CensusMunicipalOverviewDistrict.row_index.asc())
+            ).all()
+        )
+    if front_scan is None and sheet.front_scan_id:
+        front_scan = session.get(ScanImage, sheet.front_scan_id)
+
+    parent_links = list(
+        session.exec(
+            select(CensusMunicipalOverviewDistrict).where(
+                CensusMunicipalOverviewDistrict.matched_overview_sheet_id == sheet.id,
+                CensusMunicipalOverviewDistrict.census_sheet_id != sheet.id,
+            )
+        ).all()
+    )
+    valid_parent = next(
+        (
+            pl
+            for pl in parent_links
+            if not (pl.commissioner_name and is_occupancy_status_token(pl.commissioner_name)[0])
+        ),
+        None,
+    )
+    if valid_parent is not None:
+        if valid_parent.obvod_number:
+            sheet.obvod_number = valid_parent.obvod_number
+        if valid_parent.commissioner_name and is_valid_commissioner_or_revisor_name(
+            valid_parent.commissioner_name,
+            municipality=sheet.municipality,
+            district=sheet.district,
+        ):
+            sheet.commissioner_name = valid_parent.commissioner_name
+    elif front_scan and front_scan.header_raw_ocr:
+        meta = extract_overview_header_metadata(front_scan.header_raw_ocr)
+        if meta.get("obvod_number") and not sheet.obvod_number:
+            sheet.obvod_number = meta["obvod_number"]
+        if meta.get("commissioner_name") and not is_valid_commissioner_or_revisor_name(
+            sheet.commissioner_name,
+            municipality=sheet.municipality,
+            district=sheet.district,
+        ):
+            sheet.commissioner_name = (
+                _normalize_municipal_commissioner_name(
+                    meta["commissioner_name"],
+                    municipality=sheet.municipality,
+                    district=sheet.district,
+                )
+                or meta["commissioner_name"]
+            )
+
+    if sheet.commissioner_name and not is_valid_commissioner_or_revisor_name(
+        sheet.commissioner_name,
+        municipality=sheet.municipality,
+        district=sheet.district,
+    ):
+        sheet.commissioner_name = None
+
+    sheet.sheet_type = "overview"
+    session.add(sheet)
+
+    existing_ov_houses = list(
+        session.exec(
+            select(CensusOverviewHouse)
+            .where(CensusOverviewHouse.census_sheet_id == sheet.id)
+            .order_by(CensusOverviewHouse.row_index.asc())
+        ).all()
+    )
+    if not existing_ov_houses:
+        existing_ov_houses = reconstruct_overview_houses_from_existing_ocr(
+            session, sheet, md_rows=md_rows
+        )
+
+    for old_md in session.exec(
+        select(CensusMunicipalOverviewDistrict).where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+    ).all():
+        session.delete(old_md)
+
+    session.commit()
+    session.refresh(sheet)
+    return existing_ov_houses
+
+
+def _deduplicate_and_repair_municipal_overview(
+    session: SessionDep,
+    sheet: CensusSheet,
+    md_rows: list[CensusMunicipalOverviewDistrict],
+    front_scan: ScanImage | None = None,
+) -> list[CensusMunicipalOverviewDistrict]:
+    """
+    Cleans up any duplicate `CensusMunicipalOverviewDistrict` rows (e.g. from concurrent runs),
+    repairs any bogus `sheet.commissioner_name` (such as 'Obecný prehl' left over from when the
+    sheet was misclassified as 'overview'), and ensures linked child district sheets have
+    `sheet_type = 'overview'` with normalized `obvod_number` and `commissioner_name`.
+    """
+    dirty = False
+    if not is_valid_commissioner_or_revisor_name(
+        sheet.commissioner_name,
+        municipality=sheet.municipality,
+        district=sheet.district,
+    ):
+        if front_scan is None and sheet.front_scan_id:
+            front_scan = session.get(ScanImage, sheet.front_scan_id)
+        repaired_rev: str | None = None
+        if front_scan and front_scan.header_raw_ocr:
+            repaired_rev = extract_municipal_overview_header_metadata(front_scan.header_raw_ocr).get("revisor_name")
+        if sheet.commissioner_name != repaired_rev:
+            sheet.commissioner_name = repaired_rev
+            session.add(sheet)
+            dirty = True
+
+    seen_keys: set[tuple[bool, str]] = set()
+    kept: list[CensusMunicipalOverviewDistrict] = []
+    for md in md_rows:
+        obv_key = "SPOLU" if md.is_summary_row else str(md.obvod_number or md.commissioner_name or md.row_index).strip().upper()
+        dedup_key = (bool(md.is_summary_row), obv_key)
+        if dedup_key in seen_keys:
+            session.delete(md)
+            dirty = True
+            continue
+        seen_keys.add(dedup_key)
+        kept.append(md)
+
+    for idx_k, md in enumerate(kept, start=1):
+        if md.row_index != idx_k:
+            md.row_index = idx_k
+            session.add(md)
+            dirty = True
+        if not md.is_summary_row and md.matched_overview_sheet_id and md.matched_overview_sheet_id != sheet.id:
+            child_ov = session.get(CensusSheet, md.matched_overview_sheet_id)
+            if child_ov is not None:
+                child_dirty = False
+                if child_ov.sheet_type != "overview":
+                    child_ov.sheet_type = "overview"
+                    child_dirty = True
+                if md.obvod_number and child_ov.obvod_number != md.obvod_number:
+                    child_ov.obvod_number = md.obvod_number
+                    child_dirty = True
+                if md.commissioner_name and child_ov.commissioner_name != md.commissioner_name:
+                    child_ov.commissioner_name = md.commissioner_name
+                    child_dirty = True
+                if child_dirty:
+                    session.add(child_ov)
+                    dirty = True
+
+    if dirty:
+        session.commit()
+        session.refresh(sheet)
+        for md in kept:
+            session.refresh(md)
+    return kept
+
+
 def _serialize_municipal_overview_district(
     session: SessionDep,
     md: CensusMunicipalOverviewDistrict,
@@ -2046,6 +2260,69 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
         sh for sh in (_serialize_household(h) for h in all_households) if sh is not None
     ]
 
+    eff_sheet_type = sheet.sheet_type or "household"
+    muni_canon = canonical_municipality_key(sheet.municipality)
+
+    # Pre-check and self-heal if a Prehľad sčítacieho obvodu ('overview') was marked 'municipal_overview'
+    # or has bogus CensusMunicipalOverviewDistrict rows (e.g. 'Objvany', 'Obfvany', >10 rows, or sequential house numbers)
+    if sheet.id is not None and eff_sheet_type in ("municipal_overview", "overview"):
+        existing_mds_for_sheet = list(
+            session.exec(
+                select(CensusMunicipalOverviewDistrict)
+                .where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+                .order_by(CensusMunicipalOverviewDistrict.row_index.asc())
+            ).all()
+        )
+        parent_links = list(
+            session.exec(
+                select(CensusMunicipalOverviewDistrict).where(
+                    CensusMunicipalOverviewDistrict.matched_overview_sheet_id == sheet.id,
+                    CensusMunicipalOverviewDistrict.census_sheet_id != sheet.id,
+                )
+            ).all()
+        )
+        valid_parent_link = next(
+            (
+                pl
+                for pl in parent_links
+                if not (pl.commissioner_name and is_occupancy_status_token(pl.commissioner_name)[0])
+            ),
+            None,
+        )
+        is_really_district_ov = bool(
+            valid_parent_link is not None
+            or _md_rows_are_bogus_house_rows(existing_mds_for_sheet)
+            or (
+                front_scan
+                and front_scan.header_raw_ocr
+                and detect_is_overview_sheet(front_scan.header_raw_ocr, sheet.slovakiana_key)
+            )
+            or (
+                eff_sheet_type == "overview"
+                and bool(existing_mds_for_sheet)
+            )
+        )
+        if is_really_district_ov:
+            _repair_misclassified_district_overview_sheet(
+                session,
+                sheet,
+                md_rows=existing_mds_for_sheet,
+                front_scan=front_scan,
+            )
+            eff_sheet_type = "overview"
+
+    if eff_sheet_type == "overview" and sheet.commissioner_name:
+        norm_comm = _normalize_municipal_commissioner_name(
+            sheet.commissioner_name,
+            municipality=sheet.municipality,
+            district=sheet.district,
+        )
+        if norm_comm and norm_comm != sheet.commissioner_name:
+            sheet.commissioner_name = norm_comm
+            session.add(sheet)
+            session.commit()
+            session.refresh(sheet)
+
     overview_houses_rows = list(
         session.exec(
             select(CensusOverviewHouse)
@@ -2053,6 +2330,9 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             .order_by(CensusOverviewHouse.row_index.asc())
         ).all()
     )
+    if eff_sheet_type == "overview" and not overview_houses_rows and rows_by_id:
+        overview_houses_rows = reconstruct_overview_houses_from_existing_ocr(session, sheet)
+
     ov_candidate_sheets: list[CensusSheet] | None = None
     if overview_houses_rows:
         ov_hn_ints = {ovh.house_number_int for ovh in overview_houses_rows if ovh.house_number_int is not None}
@@ -2093,9 +2373,6 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             )
         )
 
-    eff_sheet_type = sheet.sheet_type or "household"
-    muni_canon = canonical_municipality_key(sheet.municipality)
-
     # Municipal Overview ('Obecný prehľad') districts + joined Prehľad domov ('overview') sheets & houses
     municipal_overview_districts: list[dict[str, Any]] = []
     linked_overview_sheets: list[dict[str, Any]] = []
@@ -2110,8 +2387,12 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
                 .order_by(
                     CensusMunicipalOverviewDistrict.is_summary_row.asc(),
                     CensusMunicipalOverviewDistrict.row_index.asc(),
+                    CensusMunicipalOverviewDistrict.id.asc(),
                 )
             ).all()
+        )
+        md_rows = _deduplicate_and_repair_municipal_overview(
+            session, sheet, md_rows, front_scan=front_scan
         )
         same_muni_ov_sheets = [
             cs
@@ -2119,11 +2400,33 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
                 select(CensusSheet).where(
                     CensusSheet.census_year == sheet.census_year,
                     CensusSheet.id != sheet.id,
-                    CensusSheet.sheet_type == "overview",
+                    CensusSheet.sheet_type.in_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
                 )
             ).all()
             if muni_canon and canonical_municipality_key(cs.municipality) == muni_canon
         ]
+        repaired_same_muni_ov: list[CensusSheet] = []
+        for cs in same_muni_ov_sheets:
+            if cs.id is None:
+                continue
+            cs_mds = list(
+                session.exec(
+                    select(CensusMunicipalOverviewDistrict)
+                    .where(CensusMunicipalOverviewDistrict.census_sheet_id == cs.id)
+                    .order_by(CensusMunicipalOverviewDistrict.row_index.asc())
+                ).all()
+            )
+            if cs.sheet_type == "municipal_overview":
+                if _md_rows_are_bogus_house_rows(cs_mds) or any(
+                    md.matched_overview_sheet_id == cs.id for md in md_rows
+                ):
+                    _repair_misclassified_district_overview_sheet(session, cs, md_rows=cs_mds)
+                    repaired_same_muni_ov.append(cs)
+            else:
+                if cs_mds:
+                    _repair_misclassified_district_overview_sheet(session, cs, md_rows=cs_mds)
+                repaired_same_muni_ov.append(cs)
+        same_muni_ov_sheets = repaired_same_muni_ov
         same_muni_ov_sheets.sort(key=lambda cs: (cs.sheet_number or "9999", cs.id or 0))
         ov_sheets_by_id: dict[int, CensusSheet] = {
             cs.id: cs for cs in same_muni_ov_sheets if cs.id is not None
@@ -2226,8 +2529,12 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
                     .order_by(
                         CensusMunicipalOverviewDistrict.is_summary_row.asc(),
                         CensusMunicipalOverviewDistrict.row_index.asc(),
+                        CensusMunicipalOverviewDistrict.id.asc(),
                     )
                 ).all()
+            )
+            md_rows_parent = _deduplicate_and_repair_municipal_overview(
+                session, parent_ms, md_rows_parent
             )
             sibling_ov_sheets = [
                 cs
@@ -2891,7 +3198,11 @@ def get_municipality_overview(
     # Keyed strictly by (canonical_municipality_key, census_year, normalize_house_number)
     household_sheets_by_muni_year_hn: dict[tuple[str, int, str], list[CensusSheet]] = {}
 
-    ov_sheet_ids = [s.id for s in sheets if s.id is not None and (s.sheet_type or "household") == "overview"]
+    ov_sheet_ids = [
+        s.id
+        for s in sheets
+        if s.id is not None and (s.sheet_type or "household") in ("overview", "municipal_overview")
+    ]
     muni_ov_sheet_ids = [
         s.id for s in sheets if s.id is not None and (s.sheet_type or "household") == "municipal_overview"
     ]
@@ -2913,9 +3224,76 @@ def get_municipality_overview(
             .order_by(
                 CensusMunicipalOverviewDistrict.is_summary_row.asc(),
                 CensusMunicipalOverviewDistrict.row_index.asc(),
+                CensusMunicipalOverviewDistrict.id.asc(),
             )
         ).all():
             muni_ov_districts_map.setdefault(md.census_sheet_id, []).append(md)
+
+    # First pass: deduplicate & repair genuine Obecný prehľad sheets (excluding sheets whose md_rows are bogus house rows)
+    has_real_muni_overview_for_year: set[int] = set()
+    linked_child_ov_ids: set[int] = set()
+    bogus_muni_ov_sheet_ids: set[int] = set()
+    for s in sheets:
+        if s.id is not None and (s.sheet_type or "household") == "municipal_overview":
+            raw_mds = muni_ov_districts_map.get(s.id, [])
+            if _md_rows_are_bogus_house_rows(raw_mds):
+                bogus_muni_ov_sheet_ids.add(s.id)
+                continue
+            if raw_mds:
+                cleaned_mds = _deduplicate_and_repair_municipal_overview(session, s, raw_mds)
+                muni_ov_districts_map[s.id] = cleaned_mds
+                has_real_muni_overview_for_year.add(int(s.census_year or 0))
+                for md in cleaned_mds:
+                    if not md.is_summary_row and md.matched_overview_sheet_id:
+                        linked_child_ov_ids.add(md.matched_overview_sheet_id)
+
+    # Second pass: auto-repair any district overview sheet (like cair-ko270vs) that was misclassified as 'municipal_overview'
+    # or had bogus CensusMunicipalOverviewDistrict rows
+    for s in sheets:
+        if s.id is None:
+            continue
+        raw_mds = muni_ov_districts_map.get(s.id, [])
+        if (
+            s.id in bogus_muni_ov_sheet_ids
+            or (raw_mds and (s.sheet_type or "household") == "overview")
+            or (
+                (s.sheet_type or "household") == "municipal_overview"
+                and (
+                    s.id in linked_child_ov_ids
+                    or (
+                        not raw_mds
+                        and (
+                            int(s.census_year or 0) in has_real_muni_overview_for_year
+                            or bool(s.obvod_number)
+                            or ov_counts_map.get(s.id, 0) > 0
+                        )
+                    )
+                )
+            )
+        ):
+            reconstructed_houses = _repair_misclassified_district_overview_sheet(
+                session, s, md_rows=raw_mds
+            )
+            muni_ov_districts_map.pop(s.id, None)
+            ov_counts_map[s.id] = len(reconstructed_houses)
+        if (s.sheet_type or "household") == "overview":
+            if s.commissioner_name:
+                norm_comm = _normalize_municipal_commissioner_name(
+                    s.commissioner_name,
+                    municipality=s.municipality,
+                    district=s.district,
+                )
+                if norm_comm and norm_comm != s.commissioner_name:
+                    s.commissioner_name = norm_comm
+                    session.add(s)
+                    session.commit()
+                    session.refresh(s)
+            if ov_counts_map.get(s.id, 0) == 0:
+                reconstructed_houses = reconstruct_overview_houses_from_existing_ocr(
+                    session, s, md_rows=raw_mds
+                )
+                if reconstructed_houses:
+                    ov_counts_map[s.id] = len(reconstructed_houses)
 
     ov_sheets_by_id_map: dict[int, CensusSheet] = {
         s.id: s for s in sheets if s.id is not None and (s.sheet_type or "household") == "overview"
@@ -3408,7 +3786,7 @@ def get_municipalities_summary(
     mov_houses_by_muni_key: dict[str, int] = {}
     mov_persons_by_muni_key: dict[str, int] = {}
     for md_list in mov_rows_by_sheet.values():
-        if not md_list:
+        if not md_list or _md_rows_are_bogus_house_rows(md_list):
             continue
         raw_muni = md_list[0].municipality
         m_key = canonical_municipality_key(raw_muni) or "neznama obec"

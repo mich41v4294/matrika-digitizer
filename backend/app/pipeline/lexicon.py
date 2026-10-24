@@ -617,8 +617,8 @@ _SEARCH_CONFUSION_COST: dict[frozenset[str], float] = {
 }
 
 _DIACRITIC_FOLD = str.maketrans(
-    "áéíóôöőúüűýÁÉÍÓÔÖŐÚÜŰÝäëÄËčďľĺňŕřšťžČĎĽĹŇŔŘŠŤŽ",
-    "aeioooouuuyAEIOOOOUUUYaeAEcdllnrrstzCDLLNRRSTZ",
+    "áéíóôöőúüűýÁÉÍÓÔÖŐÚÜŰÝäëÄËčďěľĺňńŕřśšťůźżžČĎĚĽĹŇŃŔŘŚŠŤŮŹŻŽćĆłŁđĐøØ",
+    "aeioooouuuyAEIOOOOUUUYaeAEcdellnnrrsstuzzzCDELLNNRRSSTUZZZcClLdDoO",
 )
 
 _FS_NAME_CACHE: dict[str, Any] | None = None

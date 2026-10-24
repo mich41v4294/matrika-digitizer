@@ -2046,7 +2046,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             </a>
             <button
               onClick={handleDownloadAndProcess}
-              disabled={processing}
+              disabled={processing || switchingType}
               className="px-3.5 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               {processing ? (
@@ -2861,13 +2861,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                   <thead>
                     <tr className="border-b border-stone-300 bg-stone-100 text-stone-800 font-bold">
                       <th className="py-2.5 px-2">
-                        {lang === "sk" ? "Radové č." : "Ord. #"}
+                        {lang === "sk" ? "Osada" : "Settlement"}
                       </th>
-                      {!splitLayout && (
-                        <th className="py-2.5 px-2">
-                          {lang === "sk" ? "Meno osady" : "Settlement"}
-                        </th>
-                      )}
                       <th className="py-2.5 px-2">
                         {lang === "sk" ? "Obvod č." : "District #"}
                       </th>
@@ -2920,20 +2915,24 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 : "hover:bg-stone-50"
                             }`}
                           >
-                            <td className="py-2.5 px-2 align-middle font-mono font-bold text-stone-800 whitespace-nowrap">
+                            <td className="py-2.5 px-2 align-middle text-stone-800 whitespace-nowrap">
                               {d.is_summary_row ? (
                                 <span className="px-2 py-0.5 rounded bg-indigo-900 text-white text-xs font-sans font-bold">
                                   {lang === "sk" ? "Spolu" : "Total"}
                                 </span>
                               ) : (
-                                d.ordinal_number ?? d.row_index
+                                <span>
+                                  <span className="font-mono font-bold text-stone-600 mr-1">
+                                    {d.ordinal_number ?? 1}.
+                                  </span>
+                                  <span>
+                                    {normalizePlaceSpelling(d.settlement_name) ||
+                                      normalizePlaceSpelling(sheet.municipality_name) ||
+                                      "—"}
+                                  </span>
+                                </span>
                               )}
                             </td>
-                            {!splitLayout && (
-                              <td className="py-2.5 px-2 align-middle text-stone-800">
-                                {normalizePlaceSpelling(d.settlement_name) || "—"}
-                              </td>
-                            )}
                             <td className="py-2.5 px-2 align-middle whitespace-nowrap">
                               {d.is_summary_row ? (
                                 <span className="text-xs text-stone-600">

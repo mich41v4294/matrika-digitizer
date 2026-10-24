@@ -23,10 +23,14 @@ from backend.app.db.models import (
 from backend.app.pipeline.ai_client import ai_client
 from backend.app.pipeline.ocr_stage import media_rel_to_path, resolve_row_extraction_crop
 from backend.app.pipeline.census_layout import (
+    classify_overview_rows_structure,
     detect_is_municipal_overview_sheet,
     detect_is_overview_sheet,
     extract_municipal_overview_header_metadata,
     extract_overview_header_metadata,
+    is_known_municipality_or_district_text,
+    is_occupancy_status_token,
+    is_valid_commissioner_or_revisor_name,
     slice_census_overview_sheet,
 )
 from backend.app.pipeline.lexicon import (
@@ -3478,6 +3482,8 @@ def _normalize_overview_owner(raw_owner: str | None, prev_owner: str | None = No
     low = s.lower().strip(".,;:")
     if _is_census_ditto(s) or low in ("dtto", "dto", "tto", "dt0", "dtu", "dtt", "-11-", "- 11 -"):
         return prev_owner
+    if is_occupancy_status_token(s)[0]:
+        return None
 
     # Clean common cursive OCR phrase misreads and restore standard Slovak feminine/patronymic suffixes
     s = re.sub(r"\bmate\s+of\b", "Matej", s, flags=re.IGNORECASE)
@@ -3489,7 +3495,10 @@ def _normalize_overview_owner(raw_owner: str | None, prev_owner: str | None = No
     if "ministerstvo" in s.lower() and "škol" in s.lower():
         return "Ministerstvo školstva – štát. ľud. škola"
 
-    tokens = s.split()
+    tokens = [t for t in s.split() if not is_occupancy_status_token(t)[0]]
+    if not tokens:
+        return None
+    s = " ".join(tokens)
     if tokens:
         first_clean = tokens[0].strip(".,;:()").lower()
         if first_clean in _OVERVIEW_GIVEN_NAME_FIXES and len(tokens) <= 4:
@@ -3540,19 +3549,9 @@ def _heuristic_parse_overview_row(
             elif not owner_name and prev_house:
                 owner_name = prev_house.owner_name
             continue
-        if "neobýv" in low or "neobyv" in low or re.match(r"^neob[a-záčďéíľĺňóôŕšťúýž']{2,10}$", low):
-            is_inhabited = False
-            continue
-        if (
-            "obýv" in low
-            or "obyv" in low
-            or re.match(
-                r"^(?:ob|ab|sb|sh|ph|mh|al|pl|sy)[a-záčďéíľĺňóôŕšťúýž'żž]{2,9}$",
-                low,
-            )
-            or low in {"by very", "may vany", "in ivory", "abby august", "shy raing", "stiguation", "suffrage"}
-        ):
-            is_inhabited = True
+        is_occ, is_inhab = is_occupancy_status_token(c)
+        if is_occ:
+            is_inhabited = is_inhab
             continue
         if c.strip(" .") in ("-", "—", "/", "+", "√", "%", "x", "X", "✕", "✗", "×", "≠", "♥", "★", "✩", "No", "M", "I"):
             continue
@@ -3997,6 +3996,10 @@ async def extract_census_overview_sheet(
     # Sort all rows across all pages in true booklet page order (Page 1 -> Page 2 -> Page 3 -> Page 4 -> ...)
     raw_ocr_items.sort(key=lambda item: (item[0], item[1], item[2]))
 
+    if not force_district_overview and classify_overview_rows_structure([item[6] for item in raw_ocr_items]) == "municipal_overview":
+        await extract_census_municipal_overview_sheet(session, sheet, front_scan, back_scan)
+        return []
+
     # Infer starting house number (1 for Obvod I, or e.g. 55 / 76 / 88 for Obvod II+)
     start_house_num = _infer_overview_starting_house_number(raw_ocr_items, default_settlement=sheet.municipality)
 
@@ -4222,17 +4225,26 @@ def normalize_obvod_roman(raw: str | int | None, fallback_idx: int | None = None
     return None
 
 
-def _normalize_municipal_commissioner_name(raw_name: str | None) -> str | None:
+def _normalize_municipal_commissioner_name(
+    raw_name: str | None,
+    *,
+    municipality: str | None = None,
+    district: str | None = None,
+) -> str | None:
     if not raw_name:
         return None
     s = re.sub(r"\s+", " ", str(raw_name)).strip(" .,;:-_|/\\")
     if not s or len(s) < 3:
         return None
+    if is_occupancy_status_token(s)[0]:
+        return None
     low = s.lower()
     if any(k in low for k in ("spolu", "spoleu", "súhrn", "suhrn", "úhrn", "uhrn", "celkom", "schrumm")):
         return None
-    # Known paleographic repairs for 1930 census commissioners
-    if any(k in low for k in ("lollicky", "zoltick", "žoltick", "zahorsk", "záhorsk")):
+    if not is_valid_commissioner_or_revisor_name(s, municipality=municipality, district=district):
+        return None
+    # Paleographic cursive repairs for 1930 census commissioners
+    if any(k in low for k in ("lollicky", "lottick", "zoltick", "žoltick", "zahorsk", "záhorsk")):
         return "Eduard Zoltický"
     if any(k in low for k in ("rafajid", "rafajd")):
         return "Michal Rafajdus"
@@ -4246,7 +4258,10 @@ def _normalize_municipal_commissioner_name(raw_name: str | None) -> str | None:
         return "Alexander Lackovič"
     if "rehac" in low or "boháč" in low or "bohac" in low:
         return "František Boháč"
-    return _normalize_overview_owner(s, None)
+    cleaned = _normalize_overview_owner(s, None)
+    if not is_valid_commissioner_or_revisor_name(cleaned, municipality=municipality, district=district):
+        return None
+    return cleaned
 
 
 def _parse_ocr_int_cell(cell_text: str) -> list[int]:
@@ -4323,6 +4338,7 @@ def _heuristic_parse_municipal_overview_row(
     commissioner_name: str | None = None
     remarks: str | None = None
     nums_after: list[int] = []
+    has_occupancy_token = False
 
     # Pre-scan for explicit Roman numeral obvod cell ('I.', 'II.', 'III.', or OCR '11' before commissioner_name)
     roman_cell_idx: int | None = None
@@ -4351,6 +4367,9 @@ def _heuristic_parse_municipal_overview_row(
                 "počet bytových",
             )
         ):
+            continue
+        if is_occupancy_status_token(c)[0]:
+            has_occupancy_token = True
             continue
         if is_summary and any(
             tok in low
@@ -4394,23 +4413,8 @@ def _heuristic_parse_municipal_overview_row(
                 roman_cell_idx is None
                 and not commissioner_name
                 and (
-                    (default_settlement and ascii_fold(default_settlement)[:5] in ascii_fold(c))
-                    or any(
-                        v in low
-                        for v in (
-                            "zelenic",
-                            "zeleu",
-                            "releui",
-                            "vilke",
-                            "pirove",
-                            "surovc",
-                            "sulovc",
-                            "ripnan",
-                            "dedina",
-                            "obec",
-                            "osada",
-                        )
-                    )
+                    is_known_municipality_or_district_text(c, sheet_municipality=default_settlement)
+                    or any(v in low for v in ("dedina", "obec", "osada", "mesto", "ulica", "samota", "majer", "dvor"))
                 )
             )
             if is_settlement_tok:
@@ -4421,7 +4425,9 @@ def _heuristic_parse_municipal_overview_row(
                 continue
 
             if not commissioner_name and any(ch.isalpha() for ch in c) and len(c) >= 3:
-                norm_comm = _normalize_municipal_commissioner_name(c)
+                norm_comm = _normalize_municipal_commissioner_name(
+                    c, municipality=default_settlement
+                )
                 if norm_comm:
                     commissioner_name = norm_comm
                     continue
@@ -4471,6 +4477,8 @@ def _heuristic_parse_municipal_overview_row(
     return {
         "skip": False,
         "is_summary_row": is_summary,
+        "has_occupancy_token": has_occupancy_token,
+        "explicit_roman": roman_cell_idx is not None,
         "ordinal_number": ordinal_number,
         "settlement_name": settlement_name,
         "obvod_number": obvod_number,
@@ -4706,6 +4714,18 @@ async def _discover_and_link_district_overview_sheets(
     return linked_sheets
 
 
+_SHEET_EXTRACTION_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _get_sheet_extraction_lock(sheet_id: int | None) -> asyncio.Lock:
+    key = int(sheet_id or 0)
+    lock = _SHEET_EXTRACTION_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SHEET_EXTRACTION_LOCKS[key] = lock
+    return lock
+
+
 async def extract_census_municipal_overview_sheet(
     session: Session,
     sheet: CensusSheet,
@@ -4718,17 +4738,58 @@ async def extract_census_municipal_overview_sheet(
     'Prehľad sčítacieho obvodu' ('Prehľad domov', `sheet_type == 'overview'`) sheets
     across the census districts (`Obvod I, II, ...`) of a municipality.
     """
+    async with _get_sheet_extraction_lock(sheet.id):
+        return await _extract_census_municipal_overview_sheet_locked(
+            session, sheet, front_scan, back_scan
+        )
+
+
+async def _extract_census_municipal_overview_sheet_locked(
+    session: Session,
+    sheet: CensusSheet,
+    front_scan: ScanImage | None = None,
+    back_scan: ScanImage | None = None,
+) -> list[CensusMunicipalOverviewDistrict]:
     from pathlib import Path
     from backend.app.db.models import WorkflowTrace
     from backend.app.pipeline.ocr_stage import html_table_to_pipe_text, media_rel_to_path
-
-    sheet.sheet_type = "municipal_overview"
-    session.add(sheet)
 
     if front_scan is None and sheet.front_scan_id:
         front_scan = session.get(ScanImage, sheet.front_scan_id)
     if back_scan is None and sheet.back_scan_id:
         back_scan = session.get(ScanImage, sheet.back_scan_id)
+
+    # Guard: if this sheet is actually a Prehľad sčítacieho obvodu (e.g. linked as matched_overview_sheet_id
+    # of an Obecný prehľad, or its header OCR matches Prehľad sčítacieho obvodu), extract it as 'overview'!
+    linked_as_child = (
+        session.exec(
+            select(CensusMunicipalOverviewDistrict).where(
+                CensusMunicipalOverviewDistrict.matched_overview_sheet_id == sheet.id,
+                CensusMunicipalOverviewDistrict.census_sheet_id != sheet.id,
+            )
+        ).first()
+        if sheet.id is not None
+        else None
+    )
+    if linked_as_child is not None or (
+        front_scan
+        and front_scan.header_raw_ocr
+        and detect_is_overview_sheet(front_scan.header_raw_ocr, sheet.slovakiana_key)
+    ):
+        if linked_as_child is not None:
+            if linked_as_child.obvod_number:
+                sheet.obvod_number = linked_as_child.obvod_number
+            if linked_as_child.commissioner_name:
+                sheet.commissioner_name = linked_as_child.commissioner_name
+        await extract_census_overview_sheet(
+            session, sheet, front_scan, back_scan, force_district_overview=True
+        )
+        return []
+
+    sheet.sheet_type = "municipal_overview"
+    if not is_valid_commissioner_or_revisor_name(sheet.commissioner_name):
+        sheet.commissioner_name = None
+    session.add(sheet)
 
     # 1. Delete any bogus PersonFact / FamilySearchMatch / CensusHousehold / CensusOverviewHouse previously created on this sheet
     for pf in session.exec(select(PersonFact).where(PersonFact.census_sheet_id == sheet.id)).all():
@@ -4828,9 +4889,11 @@ async def extract_census_municipal_overview_sheet(
         if page_side == "front" and layout_res.header_crop_rel:
             h_path = media_rel_to_path(layout_res.header_crop_rel)
             cached_h = trace_by_img.get(layout_res.header_crop_rel)
-            if cached_h and ("prehľad" in cached_h.lower() or "prehlad" in cached_h.lower() or "revízor" in cached_h.lower() or "revizor" in cached_h.lower()):
+            h_text = ""
+            if cached_h and ("revízor" in cached_h.lower() or "revizor" in cached_h.lower() or "obecný" in cached_h.lower() or "obecny" in cached_h.lower()):
                 h_text = html_table_to_pipe_text(cached_h)
-            elif h_path and h_path.exists():
+            meta = extract_municipal_overview_header_metadata(h_text) if h_text else {"revisor_name": None}
+            if (not h_text or not meta.get("revisor_name")) and h_path and h_path.exists():
                 res_h = await ai_client.chat_completion(
                     stage="ocr_header",
                     model=settings.model_ocr,
@@ -4841,13 +4904,20 @@ async def extract_census_municipal_overview_sheet(
                     max_tokens=500,
                 )
                 h_text = html_table_to_pipe_text(res_h["content"])
-            else:
-                h_text = ""
+                meta = extract_municipal_overview_header_metadata(h_text)
             if h_text:
                 scan_obj.header_raw_ocr = h_text
-                meta = extract_municipal_overview_header_metadata(h_text)
+                if detect_is_overview_sheet(h_text, sheet.slovakiana_key):
+                    session.add(scan_obj)
+                    session.commit()
+                    await extract_census_overview_sheet(
+                        session, sheet, front_scan, back_scan, force_district_overview=True
+                    )
+                    return []
                 if meta.get("revisor_name"):
                     sheet.commissioner_name = meta["revisor_name"]
+                elif not is_valid_commissioner_or_revisor_name(sheet.commissioner_name):
+                    sheet.commissioner_name = None
                 sheet.header_json = json.dumps(
                     {
                         "form_type": "Obecný prehľad",
@@ -4902,6 +4972,15 @@ async def extract_census_municipal_overview_sheet(
             booklet_page = 1 if page_side == "front" else (2 if page_side == "back" else scan_order + 1)
             raw_ocr_items.append((booklet_page, scan_order, r_info.row_index, scan_obj, r_info, r_rec, combined_ocr))
 
+            if len(raw_ocr_items) >= 3 and classify_overview_rows_structure([item[6] for item in raw_ocr_items]) == "overview":
+                scan_obj.status = "ocr_done"
+                session.add(scan_obj)
+                session.commit()
+                await extract_census_overview_sheet(
+                    session, sheet, front_scan, back_scan, force_district_overview=True
+                )
+                return []
+
             if len(raw_ocr_items) >= 2 and any(
                 tok in combined_ocr.lower()
                 for tok in ("spolu", "spoleu", "súhrn", "suhrn", "súhrnom", "suhrnom", "schrumm", "úhrn", "uhrn", "celkom")
@@ -4914,7 +4993,14 @@ async def extract_census_municipal_overview_sheet(
 
     raw_ocr_items.sort(key=lambda item: (item[0], item[1], item[2]))
 
+    if classify_overview_rows_structure([item[6] for item in raw_ocr_items]) == "overview":
+        await extract_census_overview_sheet(
+            session, sheet, front_scan, back_scan, force_district_overview=True
+        )
+        return []
+
     created_rows: list[CensusMunicipalOverviewDistrict] = []
+    seen_district_keys: set[tuple[bool, str]] = set()
     seq_district_idx = 0
     kept_row_ids: set[int] = set()
 
@@ -4934,8 +5020,63 @@ async def extract_census_municipal_overview_sheet(
         is_summary = bool(heur.get("is_summary_row"))
         if is_summary and seq_district_idx == 0:
             continue
+
+        if not is_summary and (
+            not heur.get("commissioner_name")
+            or heur.get("houses_total") is None
+            or heur.get("houses_inhabited") is None
+            or heur.get("present_persons_count") is None
+        ):
+            session.commit()
+            prompt = (
+                f"Transcribe row #{seq_district_idx + 1} of Obecný prehľad (Municipality: {sheet.municipality or 'Unknown'}).\n"
+                f"Heuristic hints: obvod={heur.get('obvod_number')}, commissioner={heur.get('commissioner_name')}, "
+                f"houses_total={heur.get('houses_total')}, inhabited={heur.get('houses_inhabited')}, "
+                f"uninhabited={heur.get('houses_uninhabited')}, households={heur.get('household_count')}, "
+                f"persons={heur.get('present_persons_count')}\n"
+                f"OCR text:\n{combined_ocr}"
+            )
+            res_ext = await ai_client.chat_completion(
+                stage="extract",
+                model=settings.model_extract,
+                system_prompt=CENSUS_MUNICIPAL_OVERVIEW_SYSTEM_PROMPT,
+                prompt=prompt,
+                scan_id=scan_obj.id,
+                row_id=r_rec.id,
+                max_tokens=220,
+                temperature=0.0,
+                timeout_sec=35.0,
+                skip_thinking=True,
+                response_model=LLMCensusMunicipalOverviewRowSchema,
+            )
+            parsed_llm = res_ext.get("parsed") or {}
+            if parsed_llm.get("is_summary_row"):
+                is_summary = True
+                heur["is_summary_row"] = True
+            if not heur.get("commissioner_name") and parsed_llm.get("commissioner_name"):
+                norm_c = _normalize_municipal_commissioner_name(
+                    parsed_llm.get("commissioner_name"),
+                    municipality=sheet.municipality,
+                    district=sheet.district,
+                )
+                if norm_c:
+                    heur["commissioner_name"] = norm_c
+            if parsed_llm.get("obvod_number") and not heur.get("explicit_roman"):
+                norm_obv = normalize_obvod_roman(parsed_llm.get("obvod_number"), fallback_idx=seq_district_idx + 1)
+                if norm_obv:
+                    heur["obvod_number"] = norm_obv
+            for num_k in ("houses_total", "houses_inhabited", "houses_uninhabited", "household_count", "present_persons_count"):
+                if heur.get(num_k) is None and parsed_llm.get(num_k) is not None:
+                    heur[num_k] = parsed_llm[num_k]
+
         if not is_summary and not heur.get("commissioner_name") and heur.get("houses_total") is None:
             continue
+
+        obv_key = "SPOLU" if is_summary else str(heur.get("obvod_number") or (seq_district_idx + 1)).strip().upper()
+        dedup_key = (is_summary, obv_key)
+        if dedup_key in seen_district_keys:
+            continue
+        seen_district_keys.add(dedup_key)
 
         if not is_summary:
             seq_district_idx += 1
@@ -4988,6 +5129,13 @@ async def extract_census_municipal_overview_sheet(
     district_only_rows = [r for r in created_rows if not r.is_summary_row]
     await _discover_and_link_district_overview_sheets(session, sheet, district_only_rows)
 
+    # Ensure any rows inserted by a concurrent/prior run are purged right before inserting created_rows
+    for stale_md in session.exec(
+        select(CensusMunicipalOverviewDistrict).where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+    ).all():
+        session.delete(stale_md)
+    session.flush()
+
     for dr in created_rows:
         session.add(dr)
 
@@ -5002,5 +5150,242 @@ async def extract_census_municipal_overview_sheet(
     for dr in created_rows:
         session.refresh(dr)
     return created_rows
+
+
+def reconstruct_overview_houses_from_existing_ocr(
+    session: Session,
+    sheet: CensusSheet,
+    md_rows: list[CensusMunicipalOverviewDistrict] | None = None,
+) -> list[CensusOverviewHouse]:
+    """
+    Reconstructs `CensusOverviewHouse` records on the fly from already-OCR'd `RecordRow` rows
+    (or from bogus `CensusMunicipalOverviewDistrict` rows if a `Prehľad domov` sheet was previously
+    misclassified and extracted as `municipal_overview`), without needing to re-run GLM-OCR.
+    """
+    if sheet.id is None:
+        return []
+
+    scan_ids: list[int] = []
+    scan_order_by_id: dict[int, int] = {}
+    for idx_s, sid in enumerate(filter(None, [sheet.front_scan_id, sheet.back_scan_id])):
+        if sid not in scan_order_by_id:
+            scan_order_by_id[sid] = idx_s
+            scan_ids.append(sid)
+    for extra_sc in session.exec(
+        select(ScanImage).where(ScanImage.census_sheet_id == sheet.id).order_by(ScanImage.id.asc())
+    ).all():
+        if extra_sc.id is not None and extra_sc.id not in scan_order_by_id:
+            scan_order_by_id[extra_sc.id] = len(scan_ids)
+            scan_ids.append(extra_sc.id)
+
+    record_rows: list[RecordRow] = []
+    if scan_ids:
+        record_rows = list(
+            session.exec(
+                select(RecordRow)
+                .where(RecordRow.scan_id.in_(scan_ids))  # type: ignore[union-attr]
+                .order_by(RecordRow.scan_id.asc(), RecordRow.row_index.asc())
+            ).all()
+        )
+    rows_with_ocr = [r for r in record_rows if (r.raw_ocr_combined or r.raw_ocr_left)]
+
+    class _StubSlice:
+        def __init__(self, stitched_crop_rel: str | None) -> None:
+            self.stitched_crop_rel = stitched_crop_rel
+
+    raw_ocr_items: list[tuple[int, int, int, Any, Any, RecordRow | None, str]] = []
+    if rows_with_ocr and len(rows_with_ocr) >= len(md_rows or []):
+        for r_rec in rows_with_ocr:
+            s_ord = scan_order_by_id.get(r_rec.scan_id, 0)
+            bp = 1 if s_ord == 0 else (2 if s_ord == 1 else s_ord + 1)
+            if r_rec.cell_crops_json:
+                try:
+                    cc = json.loads(r_rec.cell_crops_json)
+                    if isinstance(cc, list) and cc and isinstance(cc[0], dict):
+                        if isinstance(cc[0].get("booklet_page"), int):
+                            bp = cc[0]["booklet_page"]
+                except Exception:
+                    pass
+            ocr_txt = (r_rec.raw_ocr_combined or r_rec.raw_ocr_left or "").strip()
+            raw_ocr_items.append(
+                (bp, s_ord, r_rec.row_index, None, _StubSlice(r_rec.stitched_crop_path), r_rec, ocr_txt)
+            )
+    elif md_rows:
+        row_by_crop = {r.stitched_crop_path: r for r in record_rows if r.stitched_crop_path}
+        for idx_m, md in enumerate(md_rows, start=1):
+            ocr_txt = (md.raw_ocr_text or "").strip()
+            if not ocr_txt:
+                parts = [
+                    str(md.houses_total) if md.houses_total is not None else "",
+                    md.commissioner_name or "",
+                    md.remarks or "",
+                    str(md.houses_inhabited) if md.houses_inhabited is not None else "",
+                    str(md.houses_uninhabited) if md.houses_uninhabited is not None else "",
+                ]
+                ocr_txt = " | ".join(p for p in parts if p)
+            if not ocr_txt:
+                continue
+            r_match = row_by_crop.get(md.stitched_crop_path or "")
+            s_ord = scan_order_by_id.get(md.scan_id or 0, 0)
+            raw_ocr_items.append(
+                (
+                    1,
+                    s_ord,
+                    md.row_index or idx_m,
+                    None,
+                    _StubSlice(md.stitched_crop_path),
+                    r_match,
+                    ocr_txt,
+                )
+            )
+
+    if not raw_ocr_items:
+        return []
+
+    raw_ocr_items.sort(key=lambda item: (item[0], item[1], item[2]))
+    start_house_num = _infer_overview_starting_house_number(
+        raw_ocr_items,  # type: ignore[arg-type]
+        default_settlement=sheet.municipality,
+    )
+
+    muni_canon = canonical_municipality_key(sheet.municipality)
+    candidate_sheets = session.exec(
+        select(CensusSheet).where(
+            CensusSheet.census_year == sheet.census_year,
+            CensusSheet.id != sheet.id,
+        )
+    ).all()
+    sheet_by_house_num: dict[str, CensusSheet] = {}
+    for cs in candidate_sheets:
+        if cs.sheet_type in ("overview", "municipal_overview"):
+            continue
+        if not muni_canon or canonical_municipality_key(cs.municipality) != muni_canon:
+            continue
+        hn_key = normalize_house_number(cs.house_number)
+        if hn_key and hn_key not in sheet_by_house_num:
+            sheet_by_house_num[hn_key] = cs
+
+    for old_ov in session.exec(
+        select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
+    ).all():
+        session.delete(old_ov)
+    session.flush()
+
+    created_houses: list[CensusOverviewHouse] = []
+    prev_house: CensusOverviewHouse | None = None
+    seq_house_num = 0
+
+    for booklet_page, _scan_order, _scan_row_idx, _scan_obj, r_info, r_rec, combined_ocr in raw_ocr_items:
+        if not combined_ocr or len(re.sub(r"[^A-Za-z0-9Á-ž]", "", combined_ocr)) < 2:
+            continue
+        low_comb = combined_ocr.lower()
+        if any(
+            tok in low_comb
+            for tok in ("úhrn", "uhrn", "súhrn", "suhrn", "spolu", "celkom", "i. strana", "ii. strana", "iii. strana", "všetko spolu", "vsetko spolu")
+        ):
+            continue
+
+        expected_ord = seq_house_num + 1
+        expected_hn = (
+            (prev_house.house_number_int + 1)
+            if (prev_house and prev_house.house_number_int is not None)
+            else (start_house_num + expected_ord - 1)
+        )
+        heur = _heuristic_parse_overview_row(
+            combined_ocr,
+            default_ordinal=expected_ord,
+            default_settlement=sheet.municipality,
+            prev_house=prev_house,
+            expected_house_num=expected_hn,
+        )
+        owner = _normalize_overview_owner(
+            heur.get("owner_name"),
+            prev_house.owner_name if prev_house else None,
+        )
+        house_no_cand = str(heur.get("house_number") or expected_hn).strip()
+        if not owner and not re.search(r"\d", house_no_cand):
+            continue
+
+        seq_house_num += 1
+        ord_num = seq_house_num
+        expected_hn = (
+            (prev_house.house_number_int + 1)
+            if (prev_house and prev_house.house_number_int is not None)
+            else (start_house_num + ord_num - 1)
+        )
+        settlement = (
+            heur.get("settlement_name")
+            or (prev_house.settlement_name if prev_house else (sheet.municipality or "dedina"))
+        )
+        if _is_census_ditto(settlement) or str(settlement).lower() in ("-11-", "- 11 -", "medina"):
+            settlement = (prev_house.settlement_name if prev_house else None) or sheet.municipality or "dedina"
+
+        house_no = str(heur.get("house_number") or expected_hn).strip()
+        if _is_census_ditto(house_no) and prev_house and prev_house.house_number:
+            house_no = prev_house.house_number
+        if house_no.isdigit() and abs(int(house_no) - expected_hn) > 5 and ord_num <= 100:
+            house_no = str(expected_hn)
+
+        m_int = re.search(r"(\d+)", house_no)
+        house_no_int = int(m_int.group(1)) if m_int else None
+        hn_lookup = normalize_house_number(house_no)
+        matched_sheet = sheet_by_house_num.get(hn_lookup)
+        owner_surname_folded = owner_surname_folded_from_name(owner)
+        is_inhab = heur.get("is_inhabited", True)
+        hh_cnt = heur.get("household_count")
+        pp_cnt = heur.get("present_persons_count")
+
+        ov_house = CensusOverviewHouse(
+            census_sheet_id=sheet.id or 0,
+            scan_id=(r_rec.scan_id if r_rec else sheet.front_scan_id),
+            row_index=ord_num,
+            census_year=sheet.census_year,
+            district=sheet.district,
+            municipality=canonical_municipality_display(sheet.municipality) or sheet.municipality,
+            obvod_number=sheet.obvod_number,
+            ordinal_number=str(ord_num),
+            settlement_name=settlement,
+            house_number=house_no,
+            house_number_int=house_no_int,
+            is_inhabited=bool(is_inhab),
+            owner_name=owner,
+            owner_surname_folded=owner_surname_folded,
+            household_count=int(hh_cnt) if hh_cnt is not None else None,
+            present_persons_count=int(pp_cnt) if pp_cnt is not None else None,
+            remarks=heur.get("remarks"),
+            matched_sheet_id=None,
+            stitched_crop_path=r_info.stitched_crop_rel,
+            raw_ocr_text=combined_ocr,
+            confidence=0.92,
+        )
+        if matched_sheet and can_match_overview_house_to_sheet(ov_house, matched_sheet, overview_sheet=sheet):
+            ov_house.matched_sheet_id = matched_sheet.id
+        session.add(ov_house)
+
+        if r_rec is not None:
+            r_rec.entry_number = str(ord_num)
+            r_rec.status = "extracted"
+            r_rec.normalized_json = json.dumps(
+                {
+                    "ordinal_number": ord_num,
+                    "booklet_page": booklet_page,
+                    "settlement_name": settlement,
+                    "house_number": house_no,
+                    "owner_name": owner,
+                    "household_count": ov_house.household_count,
+                    "present_persons_count": ov_house.present_persons_count,
+                },
+                ensure_ascii=False,
+            )
+            session.add(r_rec)
+
+        created_houses.append(ov_house)
+        prev_house = ov_house
+
+    session.commit()
+    for ovh in created_houses:
+        session.refresh(ovh)
+    return created_houses
+
 
 

@@ -29,30 +29,132 @@ from backend.app.pipeline.layout import (
     _AngledLineModel,
     _warp_piecewise_angled_strip,
 )
-from backend.app.pipeline.lexicon import fold_text_diacritics
+from backend.app.pipeline.lexicon import (
+    REGIONAL_GAZETTEER_100KM,
+    VILLAGE_MAP,
+    _SLOVAKIANA_DISTRICTS,
+    _SLOVAKIANA_MUNICIPALITIES_BY_FOLDED,
+    _ensure_slovakiana_facets_loaded,
+    _paleographic_similarity,
+    fold_text_diacritics,
+    normalize_given_name,
+)
 
 
 MUNICIPAL_OVERVIEW_HEADER_MARKERS: tuple[str, ...] = (
     "obecny prehlad",
+    "prehlad obecny",
+    "suhrn obvodov",
     "meno scitacieho revizora",
     "vyplni scitaci revizor",
     "vyhotovi revizor",
     "v obciach rozdelenych na dva alebo viac",
-    "sucet pre celu obec",
     "podla prehladov scitacich obvodov",
+    "sucet pre celu obec",
 )
 
 OVERVIEW_HEADER_MARKERS: tuple[str, ...] = (
     "prehlad scitacieho obvodu",
     "prehlad obvodu",
+    "prehlad domov",
     "meno scitacieho komisara",
     "scitaci komisar",
+    "vyplni scitaci komisar",
     "pocet bytovych stran",
     "radove cislo osad",
+    "popisne cislo domu",
+    "cislo domu",
     "meno majitela domu",
+    "majitela domu",
     "dom je obyvany",
+    "ci je dom obyvany",
+    "obyvany alebo neobyvany",
     "pocet pritomnych osob",
+    "sucet pre cely scitaci obvod",
 )
+
+
+def _fold_header_for_detection(text: str) -> str:
+    folded = fold_text_diacritics(text)
+    # Collapse 1930 Slovak printed caron-apostrophes like "prehl'ad" -> "prehlad", "l'udu" -> "ludu", "majitel'a" -> "majitela"
+    return re.sub(r"([a-z])['’`´]([a-z])", r"\1\2", folded)
+
+
+_KNOWN_OCCUPANCY_PHRASES: frozenset[str] = frozenset(
+    {
+        "by very",
+        "may vany",
+        "in ivory",
+        "abby august",
+        "shy raing",
+        "stiguation",
+        "suffrage",
+    }
+)
+
+
+def is_occupancy_status_token(text: str | None) -> tuple[bool, bool]:
+    """
+    Detects whether `text` is a house occupancy status word ('obývaný' or 'neobývaný')
+    or a cursive/OCR distortion of it (e.g. 'objvany', 'obfvany', 'objvány', 'objrany',
+    'objvarij', 'objvary', 'obijrany', 'obfryany', 'objrani', 'objvranž', 'neobyvany', 'prázdny').
+    Returns `(is_occupancy_token, is_inhabited)`.
+    """
+    if not text:
+        return False, False
+    s = str(text).strip(" .,;:-_|/\\'\"()[]{}")
+    if len(s) < 3 or len(s) > 22:
+        return False, False
+    low_fold = _fold_header_for_detection(s)
+    low_clean = re.sub(r"[^a-z\s]", "", low_fold).strip()
+    if not low_clean:
+        return False, False
+    if low_clean in _KNOWN_OCCUPANCY_PHRASES:
+        return True, True
+
+    compact = low_clean.replace(" ", "")
+    if len(compact) < 3 or len(compact) > 16:
+        return False, False
+
+    # 1. Uninhabited ('neobývaný', 'neobyv.', 'prázdny', and cursive distortions)
+    if (
+        "neobyv" in compact
+        or "prazdn" in compact
+        or re.fullmatch(r"(?:ne|m)e?(?:ob|ab|sb|ol|ot)[a-z]{2,10}", compact)
+    ):
+        return True, False
+    if compact.startswith(("ne", "no", "me")) and 6 <= len(compact) <= 12:
+        if max(
+            _paleographic_similarity(compact, "neobyvany"),
+            _paleographic_similarity(compact, "neobyvane"),
+        ) >= 0.72:
+            return True, False
+
+    # 2. Inhabited ('obývaný', 'obyv.', 'objvany', 'obfvany', 'objrany', 'objvarij', 'obijrany', 'obfryany', 'objvranž', etc.)
+    if "obyv" in compact or compact in {"obyv", "obiv", "obyr"}:
+        return True, True
+
+    if re.fullmatch(
+        r"(?:ob|ab|sb|sh|ph|mh|al|pl|sy|ol)[jfvriyl]{0,4}(?:va|ra|wa|ve|re|vr|vy|ry)[nrmv]?[a-z]{0,4}",
+        compact,
+    ):
+        return True, True
+
+    if (
+        " " not in low_clean
+        and 5 <= len(compact) <= 10
+        and compact.startswith(("ob", "ab", "sb", "ol", "ot"))
+    ):
+        sim_inhab = max(
+            _paleographic_similarity(compact, "obyvany"),
+            _paleographic_similarity(compact, "obyvane"),
+            _paleographic_similarity(compact, "objvany"),
+            _paleographic_similarity(compact, "objrany"),
+        )
+        if sim_inhab >= 0.68:
+            return True, True
+
+    return False, False
 
 
 def detect_is_municipal_overview_sheet(header_text: str | None, raw_ocr: str | None = "") -> bool:
@@ -63,12 +165,40 @@ def detect_is_municipal_overview_sheet(header_text: str | None, raw_ocr: str | N
     combined = f"{header_text or ''} {raw_ocr or ''}".strip()
     if not combined:
         return False
-    folded = fold_text_diacritics(combined)
-    if "meno majitela domu" in folded or "popisne cislo domu" in folded:
+    folded = _fold_header_for_detection(combined)
+    # Reject if any District House Overview ('Prehľad sčítacieho obvodu' / 'Prehľad domov') rubric or subtitle markers appear
+    if any(
+        ov_only in folded
+        for ov_only in (
+            "prehlad scitacieho obvodu",
+            "prehlad obvodu",
+            "prehlad domov",
+            "meno majitela",
+            "majitela domu",
+            "majitel domu",
+            "popisne cislo domu",
+            "cislo domu",
+            "dom je",
+            "ci je dom",
+            "obyvany alebo neobyvany",
+            "vyplni scitaci komisar",
+            "obsazenych v instrukcii",
+            "sucet pre cely scitaci obvod",
+            "pre cely scitaci obvod",
+        )
+    ):
         return False
     for marker in MUNICIPAL_OVERVIEW_HEADER_MARKERS:
         if marker in folded:
             return True
+    # Structural column rubric check: Obecný prehľad has both 'cislo scitacieho obvodu' and 'meno scitacieho komisara'
+    # alongside 'pocet domov' ('z nich obyvane' / 'neobyvane')
+    if (
+        "cislo scitacieho obvodu" in folded
+        and "meno scitacieho komisara" in folded
+        and ("pocet domov" in folded or "obyvane" in folded or "neobyvane" in folded)
+    ):
+        return True
     return False
 
 
@@ -82,39 +212,282 @@ def detect_is_overview_sheet(header_text: str | None, raw_ocr: str | None = "") 
     combined = f"{header_text or ''} {raw_ocr or ''}".strip()
     if not combined:
         return False
-    folded = fold_text_diacritics(combined)
+    folded = _fold_header_for_detection(combined)
     for marker in OVERVIEW_HEADER_MARKERS:
         if marker in folded:
             return True
     return False
 
 
+_FORBIDDEN_COMMISSIONER_SUBSTRINGS: tuple[str, ...] = (
+    "meno",
+    "obec",
+    "prehl",
+    "prehľ",
+    "vypln",
+    "okres",
+    "scit",
+    "sčít",
+    "sčit",
+    "pocet",
+    "počet",
+    "domov",
+    "stran",
+    "strán",
+    "tlaciv",
+    "tlačiv",
+    "republ",
+    "krajin",
+    "osad",
+    "revizor",
+    "revízor",
+    "komisar",
+    "komisár",
+    "obvod",
+    "cislo",
+    "číslo",
+    "suhrn",
+    "súhrn",
+    "uhrn",
+    "úhrn",
+    "spolu",
+    "celkom",
+    "instrukc",
+    "inštrukc",
+    "popisn",
+    "majitel",
+    "majiteľ",
+    "pritomn",
+    "prítomn",
+    "obyv",
+    "obýv",
+    "neobyv",
+    "neobýv",
+)
+
+
+def is_known_municipality_or_district_text(
+    text: str | None,
+    *,
+    sheet_municipality: str | None = None,
+    sheet_district: str | None = None,
+) -> bool:
+    """Returns True if `text` matches a Slovak municipality, settlement, or district name rather than a person name."""
+    if not text:
+        return False
+    folded = _fold_header_for_detection(str(text).strip(" .,;:-_|/\\'\""))
+    if not folded or len(folded) < 3:
+        return False
+    if any(
+        w in folded
+        for w in ("dedina", "medina", "mesto", "ulica", "samota", "majer", "osada", "kopanice", "skupina domov")
+    ):
+        return True
+    for ref in (sheet_municipality, sheet_district):
+        if ref:
+            ref_f = _fold_header_for_detection(ref)
+            if ref_f and (
+                ref_f in folded
+                or folded in ref_f
+                or _paleographic_similarity(folded, ref_f) >= 0.74
+            ):
+                return True
+            for ref_tok in ref_f.split():
+                if len(ref_tok) >= 5 and ref_tok not in {"horne", "hornie", "dolne", "dolnie", "velke", "male", "stredne"}:
+                    for cand_tok in folded.split():
+                        if len(cand_tok) >= 4 and _paleographic_similarity(cand_tok, ref_tok) >= 0.72:
+                            return True
+    _ensure_slovakiana_facets_loaded()
+    if folded in _SLOVAKIANA_MUNICIPALITIES_BY_FOLDED or folded in VILLAGE_MAP:
+        return True
+    for d_name in _SLOVAKIANA_DISTRICTS:
+        if _fold_header_for_detection(d_name) == folded:
+            return True
+    for g_name in REGIONAL_GAZETTEER_100KM:
+        if _fold_header_for_detection(g_name) == folded:
+            return True
+    return False
+
+
+def is_valid_commissioner_or_revisor_name(
+    cand: str | None,
+    *,
+    municipality: str | None = None,
+    district: str | None = None,
+) -> bool:
+    """Returns True if `cand` is a plausible person name and not a form title, occupancy word, or municipality name."""
+    if not cand:
+        return False
+    s = str(cand).strip(" .,;:-_|/\\'\"")
+    if len(s) < 3:
+        return False
+    if is_occupancy_status_token(s)[0]:
+        return False
+    folded = _fold_header_for_detection(s)
+    if any(bad in folded for bad in _FORBIDDEN_COMMISSIONER_SUBSTRINGS):
+        return False
+    toks = [t.strip(".,;:-'\"") for t in s.split() if t.strip(".,;:-'\"")]
+    if not toks or not any(any(ch.isalpha() for ch in t) for t in toks):
+        return False
+    if any(is_occupancy_status_token(t)[0] for t in toks):
+        return False
+    if is_known_municipality_or_district_text(s, sheet_municipality=municipality, sheet_district=district):
+        return False
+    return True
+
+
+def _clean_revisor_name(raw_rev: str) -> str:
+    raw_rev = raw_rev.strip(" .,;:-'\"")
+    raw_rev = re.sub(r"\bFranti[sš]el\w*\b|\bFranti[sš]ek\w+\b", "František", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bMally\u0301?\b", "Mallý", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bChlumsky\b", "Chlumský", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bEuglius\b|\bJulias\b", "Július", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bJoref\b|\bZoref\b", "Jozef", raw_rev, flags=re.IGNORECASE)
+    toks = raw_rev.split()
+    if toks:
+        g_norm, _ = normalize_given_name(toks[0])
+        if g_norm:
+            toks[0] = g_norm
+            raw_rev = " ".join(toks)
+    return raw_rev.strip(" .,;:-'\"")
+
+
+def classify_overview_rows_structure(raw_ocr_texts: list[str]) -> str:
+    """
+    Classifies a list of OCR row strings structurally into:
+    - `'overview'` (Prehľad sčítacieho obvodu / Prehľad domov: per-house rows with occupancy status tokens or sequential house numbers)
+    - `'municipal_overview'` (Obecný prehľad: census district summary rows I, II, ... + Spolu row with 3-column house count sums)
+    - `'unknown'` if insufficient signal.
+    """
+    non_empty = [r.strip() for r in raw_ocr_texts if r and len(re.sub(r"[^A-Za-z0-9Á-ž]", "", r)) >= 2]
+    if not non_empty:
+        return "unknown"
+
+    occ_token_rows = 0
+    explicit_roman_rows = 0
+    district_math_rows = 0
+    has_summary_row = False
+    first_ints: list[int] = []
+
+    for row_txt in non_empty:
+        cells = [
+            re.sub(r"\s+", " ", c).strip()
+            for ln in row_txt.splitlines()
+            for c in ln.split("|")
+            if c.strip()
+        ]
+        low_row = row_txt.lower()
+        if any(
+            s_tok in low_row
+            for s_tok in ("spolu", "spoleu", "súhrn", "suhrn", "súhrnom", "suhrnom", "schrumm", "úhrn", "uhrn", "celkom")
+        ):
+            has_summary_row = True
+            continue
+
+        row_has_occ = any(is_occupancy_status_token(c)[0] for c in cells)
+        if row_has_occ:
+            occ_token_rows += 1
+
+        # Check for explicit Roman numeral obvod cell ('I', 'II', 'III', 'IV'...)
+        for idx_c, c in enumerate(cells[:4]):
+            c_rom = c.strip(" .,;:-").upper()
+            if c_rom in {"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"} and not row_has_occ:
+                # Note: 'I' alone at idx 0 can also be ordinal 1, so only count 'I' as Roman if idx_c >= 1 or followed by person name + >=4 ints
+                if c_rom != "I" or idx_c >= 1:
+                    explicit_roman_rows += 1
+                    break
+
+        row_ints: list[int] = []
+        for c in cells:
+            if re.fullmatch(r"[\[{/.+-√✓]*\d{1,4}[/.+-√✓}\]]*", c):
+                m_d = re.search(r"(\d+)", c)
+                if m_d:
+                    row_ints.append(int(m_d.group(1)))
+        if row_ints:
+            # Record first plausible house/ordinal number (1..500)
+            for v in row_ints[:2]:
+                if 1 <= v <= 500:
+                    first_ints.append(v)
+                    break
+        # Check if trailing integers satisfy 5-column Obecný prehľad district structure:
+        # (houses_total, houses_inhabited, houses_uninhabited, household_count, present_persons_count)
+        if len(row_ints) >= 4 and not row_has_occ:
+            tail = row_ints[1:] if (len(row_ints) >= 5 and row_ints[0] <= 5) else row_ints
+            if len(tail) >= 4:
+                h_tot, h_inh = tail[0], tail[1]
+                h_uninh = tail[2] if len(tail) >= 5 else max(0, h_tot - h_inh)
+                pp_cnt = tail[-1]
+                if (
+                    h_tot >= 5
+                    and h_inh >= 5
+                    and abs(h_tot - (h_inh + h_uninh)) <= 3
+                    and pp_cnt >= h_inh * 2
+                ):
+                    district_math_rows += 1
+
+    # Signal 1: Presence of 'obývaný' / 'neobývaný' (or OCR variants like 'objvany', 'obfvany') in rows
+    if occ_token_rows >= 2 or (occ_token_rows >= 1 and len(non_empty) >= 3 and district_math_rows == 0):
+        return "overview"
+
+    # Signal 2: Sequential house numbers (e.g. 55, 56, 57, 58... or 1, 2, 3, 4...) across rows
+    seq_increments = 0
+    for i in range(1, len(first_ints)):
+        if 1 <= (first_ints[i] - first_ints[i - 1]) <= 2:
+            seq_increments += 1
+    if seq_increments >= 4 and district_math_rows <= 1:
+        return "overview"
+
+    # Signal 3: More than 10 data rows without district math rows
+    if len(non_empty) > 10 and district_math_rows <= 1:
+        return "overview"
+
+    # Signal 4: Obecný prehľad structure (<= 10 rows, no occupancy status words, district math rows + summary/Roman)
+    if (
+        occ_token_rows == 0
+        and len(non_empty) <= 10
+        and (
+            (district_math_rows >= 1 and (has_summary_row or explicit_roman_rows >= 1))
+            or district_math_rows >= 2
+        )
+    ):
+        return "municipal_overview"
+
+    return "unknown"
+
+
 def extract_municipal_overview_header_metadata(header_text: str | None) -> dict[str, str | None]:
     """Extracts revisor_name from Obecný prehľad header OCR."""
     if not header_text:
         return {"revisor_name": None}
-    revisor_name: str | None = None
-    m_rev = re.search(
-        r"(?:rev[ií]zor\w*)\s*[:\-|]?\s*([A-ZÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ][A-Za-záčďéěíľĺňóôŕřšťúůýžÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ.\-\s\u0301]{2,40})",
+
+    # 1. Direct match after 'Meno sčítacieho revízora' / 'revízora'
+    for m_rev in re.finditer(
+        r"(?:meno\s+s[čc][ií]tacieho\s+rev[ií]zora|rev[ií]zor\w*)\s*[:\-|]?\s*([A-ZÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ][A-Za-záčďéěíľĺňóôŕřšťúůýžÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ.\-\s\u0301'\u2019]{2,40})",
         header_text,
         re.IGNORECASE,
-    )
-    if m_rev:
-        raw_rev = m_rev.group(1).split("|")[0].split("\n")[0].strip(" .,;:-")
-        if (
-            len(raw_rev) >= 3
-            and "meno" not in raw_rev.lower()
-            and "obec" not in raw_rev.lower()
-            and "prehľad" not in raw_rev.lower()
-            and "prehlad" not in raw_rev.lower()
-            and "vypln" not in raw_rev.lower()
-        ):
-            raw_rev = re.sub(r"\bFranti[sš]el\w*\b|\bFranti[sš]ek\w+\b", "František", raw_rev, flags=re.IGNORECASE)
-            raw_rev = re.sub(r"\bMally\u0301?\b", "Mallý", raw_rev, flags=re.IGNORECASE)
-            raw_rev = re.sub(r"\bChlumsky\b", "Chlumský", raw_rev, flags=re.IGNORECASE)
-            raw_rev = re.sub(r"\bEuglius\b|\bJulias\b", "Július", raw_rev, flags=re.IGNORECASE)
-            revisor_name = raw_rev
-    return {"revisor_name": revisor_name}
+    ):
+        raw_rev = m_rev.group(1).split("|")[0].split("\n")[0].strip(" .,;:-'\"")
+        cand = _clean_revisor_name(raw_rev)
+        if is_valid_commissioner_or_revisor_name(cand):
+            return {"revisor_name": cand}
+
+    # 2. Fallback for 2-column / signature-above-label OCR where the revisor's name appears on an adjacent line/cell
+    segments = [
+        re.sub(r"\s+", " ", cell).strip(" .,;:-'\"")
+        for ln in header_text.splitlines()
+        for cell in ln.split("|")
+        if cell.strip(" .,;:-'\"")
+    ]
+    for idx, seg in enumerate(segments):
+        seg_f = fold_text_diacritics(seg)
+        if "revizor" in seg_f and len(seg_f) < 42:
+            for n_idx in (idx + 1, idx - 1, idx + 2, idx - 2):
+                if 0 <= n_idx < len(segments):
+                    cand = _clean_revisor_name(segments[n_idx])
+                    if is_valid_commissioner_or_revisor_name(cand) and len(cand.split()) in (2, 3):
+                        return {"revisor_name": cand}
+
+    return {"revisor_name": None}
 
 
 def extract_overview_header_metadata(header_text: str | None) -> dict[str, str | None]:
@@ -135,15 +508,15 @@ def extract_overview_header_metadata(header_text: str | None) -> dict[str, str |
             obvod_number = cand
 
     m_kom = re.search(
-        r"(?:komis[aá]r\w*|rev[ií]zor\w*)\s*[:\-|]?\s*([A-ZÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ][A-Za-záčďéěíľĺňóôŕřšťúůýžÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ.\-\s]{2,40})",
+        r"(?:komis[aá]r\w*|rev[ií]zor\w*)\s*[:\-|]?\s*([A-ZÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ][A-Za-záčďéěíľĺňóôŕřšťúůýžÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ.\-\s\u0301'\u2019]{2,40})",
         header_text,
         re.IGNORECASE,
     )
     if m_kom:
-        raw_kom = m_kom.group(1).split("|")[0].split("\n")[0].strip(" .,;:-")
-        if len(raw_kom) >= 3 and "meno" not in raw_kom.lower() and "prehľad" not in raw_kom.lower() and "prehlad" not in raw_kom.lower():
-            raw_kom = re.sub(r"\bJoref\b|\bZoref\b", "Jozef", raw_kom, flags=re.IGNORECASE)
-            commissioner_name = raw_kom
+        raw_kom = m_kom.group(1).split("|")[0].split("\n")[0].strip(" .,;:-'\"")
+        cand_kom = _clean_revisor_name(raw_kom)
+        if is_valid_commissioner_or_revisor_name(cand_kom):
+            commissioner_name = cand_kom
 
     return {"obvod_number": obvod_number, "commissioner_name": commissioner_name}
 

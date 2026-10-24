@@ -714,10 +714,11 @@ async def process_census_sheet_pipeline(
             front_scan = session.get(ScanImage, front_scan_id) if front_scan_id else None
             back_scan = session.get(ScanImage, back_scan_id) if back_scan_id else None
             districts = await extract_census_municipal_overview_sheet(session, sheet, front_scan, back_scan)
+            session.refresh(sheet)
             return {
                 "census_sheet_id": sheet.id,
                 "slovakiana_key": sheet.slovakiana_key,
-                "sheet_type": "municipal_overview",
+                "sheet_type": sheet.sheet_type,
                 "rows_processed": len(districts),
                 "municipal_districts_count": len([d for d in districts if not d.is_summary_row]),
                 "download_status": sheet.download_status,

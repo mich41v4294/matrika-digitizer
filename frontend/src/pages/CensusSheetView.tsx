@@ -394,6 +394,40 @@ export interface CensusOverviewHouseRow {
   y_end?: number | null;
 }
 
+export interface CensusMunicipalOverviewDistrictRow {
+  id: number;
+  census_sheet_id: number;
+  scan_id?: number | null;
+  row_id?: number | null;
+  page_side?: string | null;
+  page_number?: number | null;
+  header_crop_url?: string | null;
+  row_index: number;
+  census_year: number;
+  district: string | null;
+  municipality: string;
+  ordinal_number: string | number | null;
+  settlement_name: string | null;
+  obvod_number: string | null;
+  commissioner_name: string | null;
+  houses_total: number | null;
+  houses_inhabited: number | null;
+  houses_uninhabited: number | null;
+  household_count: number | null;
+  present_persons_count: number | null;
+  remarks: string | null;
+  is_summary_row: boolean;
+  matched_overview_sheet_id: number | null;
+  matched_overview_slovakiana_key?: string | null;
+  matched_overview_houses_count?: number;
+  matched_overview_sheet?: CensusSheetDetail | null;
+  stitched_crop_path: string | null;
+  raw_ocr_text?: string | null;
+  confidence?: number;
+  y_start?: number | null;
+  y_end?: number | null;
+}
+
 interface ScanDetailInfo {
   id: number;
   filename: string;
@@ -459,6 +493,17 @@ interface SheetDetailResponse {
   members: CensusPersonMember[];
   rows?: ScanRowRecord[];
   overview_houses?: CensusOverviewHouseRow[];
+  municipal_overview_districts?: CensusMunicipalOverviewDistrictRow[];
+  linked_overview_sheets?: CensusSheetDetail[];
+  joined_overview_houses?: CensusOverviewHouseRow[];
+  linked_municipal_overview?: {
+    id: number;
+    slovakiana_id: string;
+    revisor_name?: string | null;
+    commissioner_name?: string | null;
+    districts?: CensusMunicipalOverviewDistrictRow[];
+    sibling_overview_sheets?: CensusSheetDetail[];
+  } | null;
   linked_overview_house?: CensusOverviewHouseRow | null;
   linked_house_sheets?: LinkedHouseSheet[];
   same_year_house_sheets?: LinkedHouseSheet[];
@@ -941,6 +986,14 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const [confirmDeleteHouseId, setConfirmDeleteHouseId] = useState<number | null>(null);
   const [deletingHouseId, setDeletingHouseId] = useState<number | null>(null);
 
+  // Municipal overview (Obecný prehľad) district row selection & editing
+  const [selectedDistrictRowId, setSelectedDistrictRowId] = useState<number | null>(null);
+  const [editingDistrictRowId, setEditingDistrictRowId] = useState<number | null>(null);
+  const [districtEditForm, setDistrictEditForm] = useState<Record<string, any>>({});
+  const [savingDistrictRowId, setSavingDistrictRowId] = useState<number | null>(null);
+  const [confirmDeleteDistrictRowId, setConfirmDeleteDistrictRowId] = useState<number | null>(null);
+  const [deletingDistrictRowId, setDeletingDistrictRowId] = useState<number | null>(null);
+
   const highlightPersonQuery = (
     searchParams.get("meno") ||
     searchParams.get("person_name") ||
@@ -1016,6 +1069,14 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             return data.overview_houses![0].id;
           });
         }
+        if (data.municipal_overview_districts && data.municipal_overview_districts.length > 0) {
+          setSelectedDistrictRowId((prev) => {
+            if (prev && data.municipal_overview_districts!.some((d) => d.id === prev)) {
+              return prev;
+            }
+            return data.municipal_overview_districts![0].id;
+          });
+        }
       }
     } finally {
       setLoading(false);
@@ -1042,10 +1103,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     }
   };
 
-  const handleToggleSheetType = async () => {
+  const handleSetSheetType = async (nextType: "household" | "overview" | "municipal_overview") => {
     if (!detail) return;
-    const currentType = detail.sheet.sheet_type === "overview" ? "overview" : "household";
-    const nextType = currentType === "overview" ? "household" : "overview";
     const sheetRef = detail.sheet.slovakiana_id || String(detail.sheet.id);
     setSwitchingType(true);
     try {
@@ -1065,6 +1124,18 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     } finally {
       setSwitchingType(false);
     }
+  };
+
+  const handleToggleSheetType = async () => {
+    if (!detail) return;
+    const currentType = detail.sheet.sheet_type || "household";
+    const nextType =
+      currentType === "household"
+        ? "overview"
+        : currentType === "overview"
+        ? "municipal_overview"
+        : "household";
+    await handleSetSheetType(nextType);
   };
 
   const startEditMember = (m: CensusPersonMember, inferredBytRoman?: string) => {
@@ -1330,6 +1401,108 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     }
   };
 
+  const startEditDistrictRow = (d: CensusMunicipalOverviewDistrictRow) => {
+    setSelectedDistrictRowId(d.id);
+    setEditingDistrictRowId(d.id);
+    setDistrictEditForm({
+      ordinal_number: d.ordinal_number ?? "",
+      settlement_name: d.settlement_name ?? "",
+      obvod_number: d.obvod_number ?? "",
+      commissioner_name: d.commissioner_name ?? "",
+      houses_total: d.houses_total ?? "",
+      houses_inhabited: d.houses_inhabited ?? "",
+      houses_uninhabited: d.houses_uninhabited ?? "",
+      household_count: d.household_count ?? "",
+      present_persons_count: d.present_persons_count ?? "",
+      remarks: d.remarks ?? "",
+    });
+  };
+
+  const handleSaveDistrictRow = async (districtId: number) => {
+    setSavingDistrictRowId(districtId);
+    setActionError(null);
+    try {
+      const payload = {
+        ordinal_number:
+          districtEditForm.ordinal_number !== "" ? String(districtEditForm.ordinal_number) : null,
+        settlement_name: districtEditForm.settlement_name || null,
+        obvod_number: districtEditForm.obvod_number || null,
+        commissioner_name: districtEditForm.commissioner_name || null,
+        houses_total:
+          districtEditForm.houses_total !== "" ? Number(districtEditForm.houses_total) : null,
+        houses_inhabited:
+          districtEditForm.houses_inhabited !== "" ? Number(districtEditForm.houses_inhabited) : null,
+        houses_uninhabited:
+          districtEditForm.houses_uninhabited !== "" ? Number(districtEditForm.houses_uninhabited) : null,
+        household_count:
+          districtEditForm.household_count !== "" ? Number(districtEditForm.household_count) : null,
+        present_persons_count:
+          districtEditForm.present_persons_count !== ""
+            ? Number(districtEditForm.present_persons_count)
+            : null,
+        remarks: districtEditForm.remarks || null,
+      };
+      const res = await fetch(`/api/census/municipal-overview-districts/${districtId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setActionError(
+          err.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa uložiť zmeny záznamu obvodu."
+              : "Failed to save district row changes.")
+        );
+        return;
+      }
+      setEditingDistrictRowId(null);
+      await loadDetail();
+      refreshStatus();
+    } catch {
+      setActionError(
+        lang === "sk"
+          ? "Chyba spojenia so serverom pri ukladaní obvodu."
+          : "Network error while saving district row."
+      );
+    } finally {
+      setSavingDistrictRowId(null);
+    }
+  };
+
+  const handleDeleteDistrictRow = async (districtId: number) => {
+    setDeletingDistrictRowId(districtId);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/census/municipal-overview-districts/${districtId}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setActionError(
+          err.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa vymazať riadok obvodu."
+              : "Failed to delete district row.")
+        );
+        return;
+      }
+      setConfirmDeleteDistrictRowId(null);
+      if (editingDistrictRowId === districtId) setEditingDistrictRowId(null);
+      await loadDetail();
+      refreshStatus();
+    } catch {
+      setActionError(
+        lang === "sk"
+          ? "Chyba spojenia pri mazaní riadku obvodu."
+          : "Network error while deleting district row."
+      );
+    } finally {
+      setDeletingDistrictRowId(null);
+    }
+  };
+
   // Build Byt (dwelling unit / household) groups across the sheet (memoized so editForm keystrokes do not recompute)
   const { groups: bytGroups, memberBytMap } = useMemo(
     () =>
@@ -1362,6 +1535,10 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     members,
     rows = [],
     overview_houses = [],
+    municipal_overview_districts = [],
+    linked_overview_sheets = [],
+    joined_overview_houses = [],
+    linked_municipal_overview,
     linked_overview_house,
   } = detail;
   const linkedHouseSheets: LinkedHouseSheet[] = (
@@ -1372,6 +1549,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const sameYearHouseSheets: LinkedHouseSheet[] =
     detail.same_year_house_sheets || sheet.same_year_house_sheets || [];
 
+  const isMunicipalOverviewSheet =
+    featureFlags.census_overview_sheets && sheet.sheet_type === "municipal_overview";
   const isOverviewSheet =
     featureFlags.census_overview_sheets && sheet.sheet_type === "overview";
   const hasMultipleByty = bytGroups.length >= 2;
@@ -1465,6 +1644,10 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
   const selectedHouse =
     overview_houses.find((h) => h.id === selectedHouseId) || overview_houses[0] || null;
+  const selectedDistrictRow =
+    municipal_overview_districts.find((d) => d.id === selectedDistrictRowId) ||
+    municipal_overview_districts[0] ||
+    null;
 
   // Determine active row crop props for <HoverZoomRowCrop>
   let activeCropUrl: string | null = null;
@@ -1481,7 +1664,28 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   let activeRowScanHeight: number | null = front_scan?.height || null;
   let activeRowScanWidth: number | null = front_scan?.width || null;
 
-  if (isOverviewSheet && selectedHouse) {
+  if (isMunicipalOverviewSheet && selectedDistrictRow) {
+    activeCropUrl = selectedDistrictRow.stitched_crop_path;
+    const matchRow =
+      (selectedDistrictRow.row_id && rowsById.get(selectedDistrictRow.row_id)) ||
+      (selectedDistrictRow.stitched_crop_path &&
+        rowsByCrop.get(selectedDistrictRow.stitched_crop_path)) ||
+      null;
+    activeRowYStart = selectedDistrictRow.y_start ?? matchRow?.y_start ?? null;
+    activeRowYEnd = selectedDistrictRow.y_end ?? matchRow?.y_end ?? null;
+    activeHeaderCropUrl =
+      selectedDistrictRow.header_crop_url ||
+      front_scan?.header_crop_path ||
+      front_scan?.header_crop_url ||
+      activeHeaderCropUrl;
+    activeRowLabel = selectedDistrictRow.is_summary_row
+      ? lang === "sk"
+        ? `Výrez súhrnného riadku (Spolu za celú obec): ${selectedDistrictRow.houses_total ?? "—"} domov, ${selectedDistrictRow.present_persons_count ?? "—"} osôb`
+        : `Summary row crop (Municipality Total): ${selectedDistrictRow.houses_total ?? "—"} houses, ${selectedDistrictRow.present_persons_count ?? "—"} residents`
+      : lang === "sk"
+      ? `Výrez sčítacieho obvodu č. ${selectedDistrictRow.obvod_number || selectedDistrictRow.row_index}: komisár ${selectedDistrictRow.commissioner_name || "—"} (${selectedDistrictRow.houses_total ?? "—"} domov, ${selectedDistrictRow.present_persons_count ?? "—"} osôb)`
+      : `District #${selectedDistrictRow.obvod_number || selectedDistrictRow.row_index} crop: commissioner ${selectedDistrictRow.commissioner_name || "—"} (${selectedDistrictRow.houses_total ?? "—"} houses, ${selectedDistrictRow.present_persons_count ?? "—"} residents)`;
+  } else if (isOverviewSheet && selectedHouse) {
     activeCropUrl = selectedHouse.stitched_crop_path;
     const matchRow = resolveOverviewHouseRow(selectedHouse);
     activeRowYStart = selectedHouse.y_start ?? matchRow?.y_start ?? null;
@@ -1596,13 +1800,22 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                 </span>
 
                 {/* Sheet Type Badge */}
-                {isOverviewSheet ? (
+                {isMunicipalOverviewSheet ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-950 border border-indigo-300 text-xs font-bold inline-flex items-center gap-1">
+                    <Layers className="w-3.5 h-3.5 text-indigo-800" />
+                    <span>
+                      {lang === "sk"
+                        ? "Obecný prehľad (Súhrn obvodov)"
+                        : "Municipal Overview (Districts Summary)"}
+                    </span>
+                  </span>
+                ) : isOverviewSheet ? (
                   <span className="px-2.5 py-0.5 rounded-full bg-purple-100 text-purple-900 border border-purple-300 text-xs font-bold inline-flex items-center gap-1">
                     <Building2 className="w-3.5 h-3.5" />
                     <span>
                       {lang === "sk"
-                        ? "Prehľad sčítacieho obvodu"
-                        : "District Overview Sheet"}
+                        ? "Prehľad sčítacieho obvodu (Prehľad domov)"
+                        : "District Overview Sheet (Houses)"}
                     </span>
                   </span>
                 ) : (
@@ -1619,6 +1832,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                 <h2 className="text-lg font-bold text-stone-900">
                   {normalizePlaceSpelling(sheet.municipality_name)}
                   {!isOverviewSheet &&
+                  !isMunicipalOverviewSheet &&
                   (sheet.house_number_conscription || sheet.house_number_raw)
                     ? ` – ${lang === "sk" ? "dom č." : "house #"}${
                         sheet.house_number_conscription || sheet.house_number_raw
@@ -1719,7 +1933,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                 )}
                 {sheet.commissioner_name && (
                   <span>
-                    · {lang === "sk" ? "Komisár:" : "Commissioner:"} {sheet.commissioner_name}
+                    ·{" "}
+                    {isMunicipalOverviewSheet
+                      ? lang === "sk"
+                        ? "Revízor:"
+                        : "Revisor:"
+                      : lang === "sk"
+                      ? "Komisár:"
+                      : "Commissioner:"}{" "}
+                    {sheet.commissioner_name}
                   </span>
                 )}
               </div>
@@ -1727,34 +1949,45 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {/* Manual Type Switch Button */}
+            {/* Manual Type Switch Selector */}
             {featureFlags.census_overview_sheets && (
-              <button
-                type="button"
-                onClick={handleToggleSheetType}
-                disabled={switchingType || processing}
-                title={
-                  lang === "sk"
-                    ? "Manuálne prepnúť typ hárku a prepočítať extrakciu"
-                    : "Manually switch sheet type and re-run extraction"
-                }
-                className="px-3 py-1.5 min-h-[34px] rounded-lg border border-purple-300 bg-purple-50 hover:bg-purple-100 text-purple-900 text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-              >
-                <Layers className="w-3.5 h-3.5" />
-                <span>
-                  {switchingType
-                    ? lang === "sk"
-                      ? "Prepínam typ…"
-                      : "Switching type…"
-                    : isOverviewSheet
-                    ? lang === "sk"
-                      ? "Prepnúť na hárok domácnosti"
-                      : "Switch to Household Sheet"
-                    : lang === "sk"
-                    ? "Označiť ako Prehľad obvodu"
-                    : "Mark as District Overview"}
-                </span>
-              </button>
+              <div className="inline-flex items-center gap-1.5">
+                <label className="text-xs font-semibold text-stone-700">
+                  {lang === "sk" ? "Typ hárku:" : "Sheet type:"}
+                </label>
+                <select
+                  value={
+                    isMunicipalOverviewSheet
+                      ? "municipal_overview"
+                      : isOverviewSheet
+                      ? "overview"
+                      : "household"
+                  }
+                  disabled={switchingType || processing}
+                  onChange={(e) =>
+                    handleSetSheetType(
+                      e.target.value as "household" | "overview" | "municipal_overview"
+                    )
+                  }
+                  className="px-2.5 py-1.5 min-h-[34px] rounded-lg border border-purple-300 bg-purple-50 hover:bg-purple-100 text-purple-950 text-xs font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  <option value="household">
+                    {lang === "sk"
+                      ? "Sčítací hárok domácnosti"
+                      : "Household Census Sheet"}
+                  </option>
+                  <option value="overview">
+                    {lang === "sk"
+                      ? "Prehľad obvodu (Prehľad domov)"
+                      : "District Overview (Houses)"}
+                  </option>
+                  <option value="municipal_overview">
+                    {lang === "sk"
+                      ? "Obecný prehľad (Súhrn obvodov)"
+                      : "Municipal Overview (Districts Summary)"}
+                  </option>
+                </select>
+              </div>
             )}
 
             <a
@@ -1848,9 +2081,65 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
           </div>
         )}
 
+        {/* Linked Municipal Overview Banner (when viewing a District Overview / Prehľad domov sheet) */}
+        {featureFlags.census_overview_sheets &&
+          isOverviewSheet &&
+          linked_municipal_overview && (
+            <div className="bg-indigo-50/90 border border-indigo-200 rounded-lg px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm text-indigo-950">
+              <div className="flex flex-wrap items-center gap-2">
+                <Layers className="w-4 h-4 text-indigo-700 shrink-0" />
+                <span>
+                  {lang === "sk"
+                    ? "Tento prehľad domov (Prehľad sčítacieho obvodu) je spojený v Obecnom prehľade"
+                    : "This house overview (District Overview) is joined in Municipal Overview"}{" "}
+                  <strong>{linked_municipal_overview.slovakiana_id}</strong>
+                  {linked_municipal_overview.revisor_name ||
+                  linked_municipal_overview.commissioner_name ? (
+                    <>
+                      {" "}
+                      ({lang === "sk" ? "revízor" : "revisor"}:{" "}
+                      <strong>
+                        {linked_municipal_overview.revisor_name ||
+                          linked_municipal_overview.commissioner_name}
+                      </strong>
+                      )
+                    </>
+                  ) : null}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {(linked_municipal_overview.sibling_overview_sheets || []).map((sib) => (
+                  <Link
+                    key={sib.slovakiana_id}
+                    to={`/scitacie-harky/${sib.slovakiana_id}`}
+                    className="px-2.5 py-1.5 min-h-[30px] rounded-lg bg-purple-100 hover:bg-purple-200 text-purple-950 border border-purple-300 text-xs font-semibold inline-flex items-center gap-1"
+                  >
+                    <Building2 className="w-3.5 h-3.5 text-purple-700" />
+                    <span>
+                      {lang === "sk" ? "Obvod" : "District"}{" "}
+                      {sib.obvod_number ? `č. ${sib.obvod_number}` : sib.slovakiana_id}
+                    </span>
+                  </Link>
+                ))}
+                <Link
+                  to={`/scitacie-harky/${linked_municipal_overview.slovakiana_id}`}
+                  className="px-3 py-1.5 min-h-[30px] rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>
+                    {lang === "sk"
+                      ? "Otvoriť obecný prehľad"
+                      : "Open municipal overview"}
+                  </span>
+                </Link>
+              </div>
+            </div>
+          )}
+
         {/* Linked Overview House Banner (when viewing a household sheet matched to an Obvod Overview row) */}
         {featureFlags.census_overview_sheets &&
           !isOverviewSheet &&
+          !isMunicipalOverviewSheet &&
           linked_overview_house && (
           <div className="bg-purple-50/90 border border-purple-200 rounded-lg px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm text-purple-950">
             <div className="flex flex-wrap items-center gap-2">
@@ -2425,8 +2714,651 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         </div>
       )}
 
-      {/* SECTION 6: Overview Sheet Panel OR SECTION 3: Household Table with Expandable Drawer */}
-      {isOverviewSheet ? (
+      {/* SECTION 6: Municipal Overview ('Obecný prehľad') OR District Overview ('Prehľad domov') OR Household Table */}
+      {isMunicipalOverviewSheet ? (
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-indigo-700" />
+                  <span>
+                    {lang === "sk"
+                      ? "Obecný prehľad – Súhrn sčítacích obvodov (Prehľadov domov)"
+                      : "Municipal Overview – Summary of Census Districts (House Overviews)"}
+                  </span>
+                </h3>
+                <p className="text-xs text-stone-600 mt-0.5">
+                  {lang === "sk"
+                    ? "Obecný prehľad (Tlačivo X) spája a sumarizuje jednotlivé Prehľady sčítacích obvodov (prehľady domov) v obciach rozdelených na viacero obvodov."
+                    : "The Municipal Overview (Form X) joins and summarizes individual District Overview (house directory) sheets across all census districts of the municipality."}
+                </p>
+              </div>
+
+              {(() => {
+                const districtOnly = municipal_overview_districts.filter((d) => !d.is_summary_row);
+                const summaryRow =
+                  municipal_overview_districts.find((d) => d.is_summary_row) || null;
+                const totHouses =
+                  summaryRow?.houses_total ??
+                  districtOnly.reduce((acc, d) => acc + (d.houses_total || 0), 0);
+                const totInhab =
+                  summaryRow?.houses_inhabited ??
+                  districtOnly.reduce((acc, d) => acc + (d.houses_inhabited || 0), 0);
+                const totUninhab =
+                  summaryRow?.houses_uninhabited ??
+                  districtOnly.reduce((acc, d) => acc + (d.houses_uninhabited || 0), 0);
+                const totUnits =
+                  summaryRow?.household_count ??
+                  districtOnly.reduce((acc, d) => acc + (d.household_count || 0), 0);
+                const totPersons =
+                  summaryRow?.present_persons_count ??
+                  districtOnly.reduce((acc, d) => acc + (d.present_persons_count || 0), 0);
+                return (
+                  <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm">
+                    <div className="px-3 py-1.5 rounded-lg bg-stone-100 border border-stone-200">
+                      <span className="text-stone-600">
+                        {lang === "sk" ? "Obec / Okres: " : "Municipality / District: "}
+                      </span>
+                      <strong className="text-stone-900">
+                        {sheet.municipality_name} ({sheet.district_name || "—"})
+                      </strong>
+                    </div>
+                    <div className="px-3 py-1.5 rounded-lg bg-indigo-50 border border-indigo-200">
+                      <span className="text-indigo-800">
+                        {lang === "sk" ? "Sčítací revízor: " : "Census Revisor: "}
+                      </span>
+                      <strong className="text-indigo-950">
+                        {sheet.commissioner_name || "—"}
+                      </strong>
+                    </div>
+                    <div className="px-3 py-1.5 rounded-lg bg-purple-50 border border-purple-200">
+                      <span className="text-purple-800">
+                        {lang === "sk" ? "Sčítacie obvody: " : "Census Districts: "}
+                      </span>
+                      <strong className="text-purple-950">{districtOnly.length}</strong>
+                    </div>
+                    <div className="px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200">
+                      <span className="text-emerald-900">
+                        {lang === "sk" ? "Domov spolu: " : "Total Houses: "}
+                      </span>
+                      <strong className="text-emerald-950">
+                        {totHouses} ({totInhab} obýv. / {totUninhab} neobýv.)
+                      </strong>
+                    </div>
+                    <div className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200">
+                      <span className="text-amber-900">
+                        {lang === "sk"
+                          ? "Bytové strany / Osôb spolu: "
+                          : "Units / Total Residents: "}
+                      </span>
+                      <strong className="text-amber-950">
+                        {totUnits} / {totPersons}
+                      </strong>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {municipal_overview_districts.length === 0 ? (
+              <div className="text-center py-8 text-stone-600 text-sm">
+                {lang === "sk" ? (
+                  <>
+                    Zatiaľ neboli z tohto obecného prehľadu extrahované žiadne sčítacie obvody. Kliknite vyššie na{" "}
+                    <strong>„Znova spustiť AI OCR & párovanie“</strong>.
+                  </>
+                ) : (
+                  <>
+                    No census districts have been extracted from this municipal overview yet. Click{" "}
+                    <strong>"Re-run AI OCR & matching"</strong> above.
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="w-full overflow-x-auto">
+                <table className="w-full table-auto text-left border-collapse text-xs sm:text-sm">
+                  <thead>
+                    <tr className="border-b border-stone-300 bg-stone-100 text-stone-800 font-bold">
+                      <th className="py-2.5 px-2">
+                        {lang === "sk" ? "Radové č." : "Ord. #"}
+                      </th>
+                      {!splitLayout && (
+                        <th className="py-2.5 px-2">
+                          {lang === "sk" ? "Meno osady" : "Settlement"}
+                        </th>
+                      )}
+                      <th className="py-2.5 px-2">
+                        {lang === "sk" ? "Obvod č." : "District #"}
+                      </th>
+                      <th className="py-2.5 px-2">
+                        {lang === "sk" ? "Meno sčítacieho komisára" : "Census Commissioner"}
+                      </th>
+                      <th className="py-2.5 px-2 text-center">
+                        {lang === "sk" ? "Domov úhrnom" : "Houses Total"}
+                      </th>
+                      <th className="py-2.5 px-2 text-center">
+                        {lang === "sk" ? "Obývané / Neobývané" : "Inhab. / Uninhab."}
+                      </th>
+                      <th className="py-2.5 px-2 text-center">
+                        {lang === "sk" ? "Bytové strany" : "Dwelling Units"}
+                      </th>
+                      <th className="py-2.5 px-2 text-center">
+                        {lang === "sk" ? "Prítomné osoby" : "Present Persons"}
+                      </th>
+                      <th className="py-2.5 px-2">
+                        {lang === "sk"
+                          ? "Spojený prehľad domov (obvodu)"
+                          : "Joined House Overview (District)"}
+                      </th>
+                      <th className="py-2.5 px-2 text-right">
+                        {lang === "sk" ? "Akcia" : "Action"}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-200">
+                    {municipal_overview_districts.map((d) => {
+                      const isSelected = selectedDistrictRow?.id === d.id;
+                      const isEditing = editingDistrictRowId === d.id;
+                      const linkedOvRef =
+                        d.matched_overview_slovakiana_key ||
+                        d.matched_overview_sheet?.slovakiana_id ||
+                        (d.matched_overview_sheet_id
+                          ? String(d.matched_overview_sheet_id)
+                          : null);
+                      return (
+                        <React.Fragment key={d.id}>
+                          <tr
+                            onClick={() => setSelectedDistrictRowId(d.id)}
+                            className={`cursor-pointer transition ${
+                              d.is_summary_row
+                                ? isSelected
+                                  ? "bg-indigo-100/90 font-bold"
+                                  : "bg-stone-100/90 font-bold hover:bg-indigo-50/70"
+                                : isSelected
+                                ? "bg-amber-50/80"
+                                : "hover:bg-stone-50"
+                            }`}
+                          >
+                            <td className="py-2.5 px-2 align-middle font-mono font-bold text-stone-800 whitespace-nowrap">
+                              {d.is_summary_row ? (
+                                <span className="px-2 py-0.5 rounded bg-indigo-900 text-white text-xs font-sans font-bold">
+                                  {lang === "sk" ? "Spolu" : "Total"}
+                                </span>
+                              ) : (
+                                d.ordinal_number ?? d.row_index
+                              )}
+                            </td>
+                            {!splitLayout && (
+                              <td className="py-2.5 px-2 align-middle text-stone-800">
+                                {normalizePlaceSpelling(d.settlement_name) || "—"}
+                              </td>
+                            )}
+                            <td className="py-2.5 px-2 align-middle whitespace-nowrap">
+                              {d.is_summary_row ? (
+                                <span className="text-xs text-stone-600">
+                                  {lang === "sk" ? "Celá obec" : "All districts"}
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full bg-purple-100 text-purple-950 border border-purple-300 text-xs font-bold">
+                                  {lang === "sk" ? "Obvod č." : "District #"}{" "}
+                                  {d.obvod_number || d.row_index}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-2 align-middle font-semibold text-stone-900">
+                              {d.is_summary_row
+                                ? lang === "sk"
+                                  ? "Súčet za celú obec"
+                                  : "Municipality Total"
+                                : d.commissioner_name || "—"}
+                            </td>
+                            <td className="py-2.5 px-2 align-middle text-center font-bold text-stone-900">
+                              {d.houses_total ?? "—"}
+                            </td>
+                            <td className="py-2.5 px-2 align-middle text-center whitespace-nowrap">
+                              <span className="text-emerald-800 font-semibold">
+                                {d.houses_inhabited ?? "—"}
+                              </span>
+                              <span className="text-stone-400 mx-1">/</span>
+                              <span className="text-stone-600">
+                                {d.houses_uninhabited ?? 0}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-2 align-middle text-center font-semibold text-stone-800">
+                              {d.household_count ?? "—"}
+                            </td>
+                            <td className="py-2.5 px-2 align-middle text-center font-bold text-amber-900">
+                              {d.present_persons_count ?? "—"}
+                            </td>
+                            <td className="py-2.5 px-2 align-middle">
+                              {d.is_summary_row ? (
+                                <span className="text-xs text-indigo-900 font-semibold">
+                                  {linked_overview_sheets.length}{" "}
+                                  {lang === "sk"
+                                    ? "spojené prehľady domov"
+                                    : "joined house overviews"}
+                                </span>
+                              ) : linkedOvRef ? (
+                                <Link
+                                  to={`/scitacie-harky/${linkedOvRef}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="px-2.5 py-1 min-h-[32px] rounded-md bg-purple-100 hover:bg-purple-200 text-purple-950 border border-purple-300 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
+                                >
+                                  <Building2 className="w-3.5 h-3.5 text-purple-700 shrink-0" />
+                                  <span>
+                                    {d.matched_overview_slovakiana_key || linkedOvRef}
+                                  </span>
+                                  {typeof d.matched_overview_houses_count === "number" &&
+                                    d.matched_overview_houses_count > 0 && (
+                                      <span className="px-1.5 py-0.5 rounded bg-purple-200 text-purple-950 font-bold">
+                                        {d.matched_overview_houses_count}{" "}
+                                        {lang === "sk" ? "domov" : "houses"}
+                                      </span>
+                                    )}
+                                </Link>
+                              ) : (
+                                <span className="text-stone-500 text-xs">
+                                  {lang === "sk" ? "Nespárované" : "Unpaired"}
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-2 align-middle text-right whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (isEditing) {
+                                      setEditingDistrictRowId(null);
+                                    } else {
+                                      startEditDistrictRow(d);
+                                    }
+                                  }}
+                                  className="px-3 py-1.5 min-h-[32px] rounded-md bg-stone-200 hover:bg-stone-300 text-stone-800 text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap cursor-pointer"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5 shrink-0" />
+                                  <span>
+                                    {isEditing
+                                      ? lang === "sk"
+                                        ? "Zavrieť"
+                                        : "Close"
+                                      : lang === "sk"
+                                      ? "Upraviť"
+                                      : "Edit"}
+                                  </span>
+                                </button>
+                                {confirmDeleteDistrictRowId === d.id ? (
+                                  <div
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="inline-flex items-center gap-1.5 bg-red-50 border border-red-300 rounded-md px-2.5 py-1 min-h-[32px]"
+                                  >
+                                    <button
+                                      type="button"
+                                      disabled={deletingDistrictRowId === d.id}
+                                      onClick={() => handleDeleteDistrictRow(d.id)}
+                                      className="text-xs font-bold text-red-700 hover:underline cursor-pointer"
+                                    >
+                                      {deletingDistrictRowId === d.id
+                                        ? "…"
+                                        : lang === "sk"
+                                        ? "Vymazať"
+                                        : "Delete"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteDistrictRowId(null)}
+                                      className="text-xs text-stone-600 hover:text-stone-900 cursor-pointer ml-1 px-1"
+                                    >
+                                      ✕
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setConfirmDeleteDistrictRowId(d.id);
+                                    }}
+                                    className="p-2 min-h-[32px] min-w-[32px] inline-flex items-center justify-center rounded-md bg-stone-200 hover:bg-red-100 text-stone-700 hover:text-red-700 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                          {isEditing && (
+                            <tr>
+                              <td
+                                colSpan={10}
+                                className="bg-amber-50/70 border-b border-amber-200 p-4"
+                              >
+                                <div className="space-y-3">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <h4 className="text-xs font-bold uppercase tracking-wider text-amber-950">
+                                      {lang === "sk"
+                                        ? `Úprava záznamu obvodu v obecnom prehľade (riadok #${d.row_index})`
+                                        : `Edit Municipal Overview District Row (#${d.row_index})`}
+                                    </h4>
+                                    <div className="flex items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSaveDistrictRow(d.id)}
+                                        disabled={savingDistrictRowId === d.id}
+                                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Save className="w-3.5 h-3.5" />
+                                        <span>
+                                          {lang === "sk" ? "Uložiť zmeny" : "Save changes"}
+                                        </span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingDistrictRowId(null)}
+                                        className="px-3 py-1.5 rounded-lg bg-stone-200 hover:bg-stone-300 text-stone-800 font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <X className="w-3.5 h-3.5" />
+                                        <span>{lang === "sk" ? "Zrušiť" : "Cancel"}</span>
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-1">
+                                        Číslo obvodu (stĺpec 3)
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={districtEditForm.obvod_number}
+                                        onChange={(e) =>
+                                          setDistrictEditForm({
+                                            ...districtEditForm,
+                                            obvod_number: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-1">
+                                        Meno komisára (stĺpec 4)
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={districtEditForm.commissioner_name}
+                                        onChange={(e) =>
+                                          setDistrictEditForm({
+                                            ...districtEditForm,
+                                            commissioner_name: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-1">
+                                        Domov úhrnom (stĺpec 5)
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={districtEditForm.houses_total}
+                                        onChange={(e) =>
+                                          setDistrictEditForm({
+                                            ...districtEditForm,
+                                            houses_total: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-1">
+                                        Obývané domy (stĺpec 6)
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={districtEditForm.houses_inhabited}
+                                        onChange={(e) =>
+                                          setDistrictEditForm({
+                                            ...districtEditForm,
+                                            houses_inhabited: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-1">
+                                        Neobývané domy (stĺpec 7)
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={districtEditForm.houses_uninhabited}
+                                        onChange={(e) =>
+                                          setDistrictEditForm({
+                                            ...districtEditForm,
+                                            houses_uninhabited: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-1">
+                                        Bytové strany (stĺpec 8)
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={districtEditForm.household_count}
+                                        onChange={(e) =>
+                                          setDistrictEditForm({
+                                            ...districtEditForm,
+                                            household_count: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-1">
+                                        Prítomné osoby (stĺpec 9)
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={districtEditForm.present_persons_count}
+                                        onChange={(e) =>
+                                          setDistrictEditForm({
+                                            ...districtEditForm,
+                                            present_persons_count: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block font-semibold text-stone-700 mb-1">
+                                        Poznámka (stĺpec 10)
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={districtEditForm.remarks}
+                                        onChange={(e) =>
+                                          setDistrictEditForm({
+                                            ...districtEditForm,
+                                            remarks: e.target.value,
+                                          })
+                                        }
+                                        className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Joined Prehľady domov (District Overview Sheets & Combined Houses Directory) */}
+          <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                  <Building2 className="w-5 h-5 text-purple-700" />
+                  <span>
+                    {lang === "sk"
+                      ? `Spojené prehľady domov zo sčítacích obvodov (${linked_overview_sheets.length} obvody · ${joined_overview_houses.length} domov)`
+                      : `Joined House Overviews from Census Districts (${linked_overview_sheets.length} districts · ${joined_overview_houses.length} houses)`}
+                  </span>
+                </h3>
+                <p className="text-xs text-stone-600 mt-0.5">
+                  {lang === "sk"
+                    ? "Jednotlivé Prehľady sčítacích obvodov (prehľady domov), ktoré tento Obecný prehľad spája do celoobecných súčtov."
+                    : "Individual District Overview (house list) sheets joined by this Municipal Overview."}
+                </p>
+              </div>
+            </div>
+
+            {linked_overview_sheets.length > 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {linked_overview_sheets.map((ov) => (
+                  <div
+                    key={ov.slovakiana_id}
+                    className="bg-purple-50/60 rounded-xl p-3.5 border border-purple-200 flex items-center justify-between gap-3"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
+                          {ov.slovakiana_id}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-purple-200 text-purple-950 text-xs font-bold">
+                          {lang === "sk" ? "Prehľad domov – Obvod" : "House Overview – District"}{" "}
+                          {ov.obvod_number ? `č. ${ov.obvod_number}` : ""}
+                        </span>
+                      </div>
+                      <div className="text-xs text-stone-800">
+                        {ov.commissioner_name && (
+                          <span>
+                            {lang === "sk" ? "Komisár:" : "Commissioner:"}{" "}
+                            <strong>{ov.commissioner_name}</strong> ·{" "}
+                          </span>
+                        )}
+                        <span>
+                          {lang === "sk" ? "Extrahovaných domov:" : "Extracted houses:"}{" "}
+                          <strong>{ov.overview_houses_count ?? 0}</strong>
+                        </span>
+                      </div>
+                    </div>
+                    <Link
+                      to={`/scitacie-harky/${ov.slovakiana_id}`}
+                      className="px-3 py-1.5 min-h-[34px] rounded-lg bg-purple-800 hover:bg-purple-900 text-white font-semibold text-xs inline-flex items-center gap-1.5 shrink-0"
+                    >
+                      <Building2 className="w-3.5 h-3.5" />
+                      <span>
+                        {lang === "sk" ? "Otvoriť prehľad domov" : "Open house overview"}
+                      </span>
+                    </Link>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {joined_overview_houses.length > 0 && (
+              <div className="w-full overflow-x-auto pt-1">
+                <table className="w-full table-auto text-left border-collapse text-xs sm:text-sm">
+                  <thead>
+                    <tr className="border-b border-stone-300 bg-stone-100 text-stone-800 font-bold">
+                      <th className="py-2 px-2">
+                        {lang === "sk" ? "Obvod" : "District"}
+                      </th>
+                      <th className="py-2 px-2">
+                        {lang === "sk" ? "Popisné č. domu" : "House #"}
+                      </th>
+                      <th className="py-2 px-2">
+                        {lang === "sk" ? "Meno majiteľa domu" : "House Owner"}
+                      </th>
+                      <th className="py-2 px-2 text-center">
+                        {lang === "sk" ? "Bytové strany" : "Units"}
+                      </th>
+                      <th className="py-2 px-2 text-center">
+                        {lang === "sk" ? "Prítomné osoby" : "Residents"}
+                      </th>
+                      <th className="py-2 px-2">
+                        {lang === "sk" ? "Prehľad domov" : "House Overview"}
+                      </th>
+                      <th className="py-2 px-2">
+                        {lang === "sk" ? "Sčítací hárok domu" : "Household Sheet"}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-200">
+                    {joined_overview_houses.map((jh) => {
+                      const linkedTarget = jh.matched_slovakiana_key || jh.matched_sheet_id;
+                      return (
+                        <tr key={jh.id} className="hover:bg-stone-50">
+                          <td className="py-2 px-2 align-middle whitespace-nowrap">
+                            <span className="px-2 py-0.5 rounded-full bg-purple-100 text-purple-900 text-xs font-bold">
+                              {jh.obvod_number ? `Obvod ${jh.obvod_number}` : "—"}
+                            </span>
+                          </td>
+                          <td className="py-2 px-2 align-middle whitespace-nowrap">
+                            <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-bold">
+                              Dom č. {jh.house_number || "—"}
+                            </span>
+                          </td>
+                          <td className="py-2 px-2 align-middle font-semibold text-stone-900">
+                            {jh.owner_name || "—"}
+                          </td>
+                          <td className="py-2 px-2 align-middle text-center">
+                            {jh.household_count ?? "—"}
+                          </td>
+                          <td className="py-2 px-2 align-middle text-center font-bold text-amber-900">
+                            {jh.present_persons_count ?? "—"}
+                          </td>
+                          <td className="py-2 px-2 align-middle whitespace-nowrap">
+                            {jh.overview_slovakiana_key ? (
+                              <Link
+                                to={`/scitacie-harky/${jh.overview_slovakiana_key}?house=${jh.id}`}
+                                className="text-purple-800 hover:underline font-mono text-xs font-semibold"
+                              >
+                                {jh.overview_slovakiana_key}
+                              </Link>
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                          <td className="py-2 px-2 align-middle whitespace-nowrap">
+                            {linkedTarget ? (
+                              <Link
+                                to={`/scitacie-harky/${linkedTarget}`}
+                                className="px-2.5 py-1 rounded-md bg-emerald-100 hover:bg-emerald-200 text-emerald-950 text-xs font-semibold inline-flex items-center gap-1"
+                              >
+                                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                                <span>{jh.matched_slovakiana_key || `Hárok #${linkedTarget}`}</span>
+                              </Link>
+                            ) : (
+                              <span className="text-stone-500 text-xs">
+                                {lang === "sk" ? "Nespárované" : "Unpaired"}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : isOverviewSheet ? (
         <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-4">
           {/* Obvod Metadata Summary Cards */}
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3">

@@ -2631,14 +2631,21 @@ _CANONICAL_MUNICIPALITY_SYNONYMS: dict[str, str] = {
     "velke surovce": "velke surovce",
     "surovce velke": "velke surovce",
     "vel surovce": "velke surovce",
+    "velke sulovce": "velke surovce",
+    "sulovce velke": "velke surovce",
+    "felke sluovce": "velke surovce",
     "male surovce": "male surovce",
     "surovce male": "male surovce",
     "mal surovce": "male surovce",
     "horne zelenice": "horne zelenice",
     "zelenice horne": "horne zelenice",
+    "hornie zelenice": "horne zelenice",
+    "zelenice hornie": "horne zelenice",
     "hor zelenice": "horne zelenice",
     "dolne zelenice": "dolne zelenice",
     "zelenice dolne": "dolne zelenice",
+    "dolnie zelenice": "dolne zelenice",
+    "zelenice dolnie": "dolne zelenice",
     "dol zelenice": "dolne zelenice",
     "velke ripnany": "velke ripnany",
     "ripnany velke": "velke ripnany",
@@ -2679,6 +2686,8 @@ def canonical_municipality_key(municipality: str | None) -> str:
     cleaned = re.sub(r"[^a-z0-9]+", " ", folded).strip()
     if not cleaned:
         return ""
+    cleaned = re.sub(r"\bhornie\b", "horne", cleaned)
+    cleaned = re.sub(r"\bdolnie\b", "dolne", cleaned)
     return _CANONICAL_MUNICIPALITY_SYNONYMS.get(cleaned, cleaned)
 
 
@@ -2848,7 +2857,7 @@ def can_match_overview_house_to_sheet(
     if ovh is None or candidate_sheet is None:
         return False
     cand_type = getattr(candidate_sheet, "sheet_type", None) or "household"
-    if cand_type == "overview":
+    if cand_type in ("overview", "municipal_overview"):
         return False
 
     ov_sheet_id = getattr(ovh, "census_sheet_id", None)

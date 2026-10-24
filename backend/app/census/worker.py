@@ -162,7 +162,7 @@ def _find_matching_census_sheets(
 
     matched.sort(
         key=lambda s: (
-            0 if (s.sheet_type == "overview" or not s.house_number) else 1,
+            0 if (s.sheet_type in ("municipal_overview", "overview") or not s.house_number) else 1,
             0
             if s.download_status in ("downloaded", "sliced", "queued")
             else (2 if s.download_status == "error" else 1),
@@ -211,6 +211,8 @@ def upsert_census_sheet_from_dict(session: Session, data: dict[str, Any]) -> Cen
     ):
         val = data.get(field)
         if val is not None:
+            if isinstance(val, str) and not val.strip() and getattr(sheet, field, None):
+                continue
             setattr(sheet, field, val)
 
     if sheet.municipality:

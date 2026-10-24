@@ -121,10 +121,28 @@ interface SerializedSheet {
   download_status: string;
   pipeline_status: string;
   front_scan_id: number | null;
-  sheet_type?: "household" | "overview" | string;
+  sheet_type?: "household" | "overview" | "municipal_overview" | string;
   obvod_number?: string | null;
   commissioner_name?: string | null;
   overview_houses_count?: number;
+  municipal_districts_count?: number;
+  municipal_overview_districts?: Array<{
+    id: number;
+    row_index: number;
+    ordinal_number: string | number | null;
+    settlement_name: string | null;
+    obvod_number: string | null;
+    commissioner_name: string | null;
+    houses_total: number | null;
+    houses_inhabited: number | null;
+    houses_uninhabited: number | null;
+    household_count: number | null;
+    present_persons_count: number | null;
+    is_summary_row: boolean;
+    matched_overview_sheet_id: number | null;
+    matched_overview_slovakiana_key?: string | null;
+    matched_overview_houses_count?: number;
+  }>;
   linked_house_sheets?: LinkedHouseSheet[];
   extracted_persons_preview?: ExtractedPersonPreview[];
   members_preview?: ExtractedPersonPreview[];
@@ -163,6 +181,8 @@ interface HouseDirectoryEntry {
   owner_name: string | null;
   overview_house_id: number | null;
   overview_sheet_id: number | null;
+  overview_slovakiana_key?: string | null;
+  obvod_number?: string | null;
   overview_household_count: number | null;
   overview_present_persons_count: number | null;
   remarks: string | null;
@@ -185,6 +205,7 @@ interface MunicipalityOverviewResponse {
   municipality: string | null;
   district: string | null;
   census_year: number;
+  municipal_overview_sheets?: SerializedSheet[];
   overview_sheets: SerializedSheet[];
   houses_directory: HouseDirectoryEntry[];
   total_houses: number;
@@ -1015,14 +1036,16 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
 
     return sheets.filter((row) => {
       const { sheet: s, household, extracted_members_count } = row;
-      const isOverview = s.sheet_type === "overview";
+      const isOverview =
+        s.sheet_type === "overview" || s.sheet_type === "municipal_overview";
       if (!featureFlags.census_overview_sheets && isOverview) return false;
       const isOcrDone =
         s.download_status === "ocr_done" ||
         s.download_status === "extracted" ||
         s.download_status === "matched" ||
         extracted_members_count > 0 ||
-        (s.overview_houses_count || 0) > 0;
+        (s.overview_houses_count || 0) > 0 ||
+        (s.municipal_districts_count || 0) > 0;
 
       if (cardSubFilter === "overview" && !isOverview) return false;
       if (cardSubFilter === "household" && isOverview) return false;
@@ -2613,6 +2636,142 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
         featureFlags.census_overview_sheets &&
         activeTab === "overview" ? (
           <div className="space-y-4">
+            {/* Municipal Overview ('Obecný prehľad') Section joining District Overviews */}
+            {muniOverview?.municipal_overview_sheets &&
+              muniOverview.municipal_overview_sheets.length > 0 && (
+                <div className="bg-white rounded-xl p-4 border border-indigo-300 space-y-3">
+                  {muniOverview.municipal_overview_sheets.map((mov) => {
+                    const dists = mov.municipal_overview_districts || [];
+                    const distOnly = dists.filter((d) => !d.is_summary_row);
+                    const sumRow = dists.find((d) => d.is_summary_row) || null;
+                    const totHouses =
+                      sumRow?.houses_total ??
+                      distOnly.reduce((a, d) => a + (d.houses_total || 0), 0);
+                    const totInhab =
+                      sumRow?.houses_inhabited ??
+                      distOnly.reduce((a, d) => a + (d.houses_inhabited || 0), 0);
+                    const totUninhab =
+                      sumRow?.houses_uninhabited ??
+                      distOnly.reduce((a, d) => a + (d.houses_uninhabited || 0), 0);
+                    const totUnits =
+                      sumRow?.household_count ??
+                      distOnly.reduce((a, d) => a + (d.household_count || 0), 0);
+                    const totPersons =
+                      sumRow?.present_persons_count ??
+                      distOnly.reduce((a, d) => a + (d.present_persons_count || 0), 0);
+                    return (
+                      <div key={mov.slovakiana_id} className="space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex items-start gap-3">
+                            {mov.thumbnail_url && (
+                              <img
+                                src={mov.thumbnail_url}
+                                alt={mov.slovakiana_id}
+                                className="w-20 h-16 object-cover rounded-lg border border-indigo-300 bg-stone-200 shrink-0"
+                              />
+                            )}
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
+                                  {mov.slovakiana_id}
+                                </span>
+                                <span className="px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-950 border border-indigo-300 text-xs font-bold">
+                                  {lang === "sk"
+                                    ? "Obecný prehľad (Súhrn obvodov)"
+                                    : "Municipal Overview (Districts Summary)"}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-xs font-bold">
+                                  {mov.census_year}
+                                </span>
+                              </div>
+                              <div className="font-bold text-sm text-stone-900">
+                                {mov.municipality_name}
+                                {mov.district_name ? ` (okr. ${mov.district_name})` : ""}
+                                {mov.commissioner_name
+                                  ? ` · ${lang === "sk" ? "Sčítací revízor:" : "Revisor:"} ${
+                                      mov.commissioner_name
+                                    }`
+                                  : ""}
+                              </div>
+                              <div className="text-xs text-stone-700 flex flex-wrap items-center gap-2">
+                                <span>
+                                  {lang === "sk" ? "Spojené obvody:" : "Joined districts:"}{" "}
+                                  <strong>{distOnly.length}</strong>
+                                </span>
+                                <span>·</span>
+                                <span>
+                                  {lang === "sk" ? "Domov spolu:" : "Total houses:"}{" "}
+                                  <strong>
+                                    {totHouses} ({totInhab} obýv. / {totUninhab} neobýv.)
+                                  </strong>
+                                </span>
+                                <span>·</span>
+                                <span>
+                                  {lang === "sk" ? "Bytové strany:" : "Dwelling units:"}{" "}
+                                  <strong>{totUnits}</strong>
+                                </span>
+                                <span>·</span>
+                                <span>
+                                  {lang === "sk" ? "Prítomné osoby:" : "Present residents:"}{" "}
+                                  <strong>{totPersons}</strong>
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <Link
+                            to={buildSheetDetailLink(mov.slovakiana_id)}
+                            className="px-3 py-1.5 min-h-[34px] rounded-lg bg-indigo-800 hover:bg-indigo-900 text-white font-semibold text-xs inline-flex items-center gap-1.5"
+                          >
+                            <Building2 className="w-3.5 h-3.5" />
+                            <span>
+                              {lang === "sk"
+                                ? "Otvoriť obecný prehľad"
+                                : "Open municipal overview"}
+                            </span>
+                          </Link>
+                        </div>
+
+                        {distOnly.length > 0 && (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 pt-1">
+                            {distOnly.map((d) => (
+                              <div
+                                key={d.id}
+                                className="bg-indigo-50/60 border border-indigo-200 rounded-lg px-3 py-2 text-xs flex flex-wrap items-center justify-between gap-2"
+                              >
+                                <div className="space-y-0.5">
+                                  <div className="font-bold text-indigo-950">
+                                    {lang === "sk" ? "Obvod č." : "District #"}{" "}
+                                    {d.obvod_number || d.row_index} ·{" "}
+                                    {d.commissioner_name || "—"}
+                                  </div>
+                                  <div className="text-stone-700">
+                                    {d.houses_total ?? "—"} domov ({d.houses_inhabited ?? "—"}{" "}
+                                    obýv. / {d.houses_uninhabited ?? 0} neobýv.) ·{" "}
+                                    {d.household_count ?? "—"} byt. strán ·{" "}
+                                    <strong>{d.present_persons_count ?? "—"} osôb</strong>
+                                  </div>
+                                </div>
+                                {d.matched_overview_slovakiana_key && (
+                                  <Link
+                                    to={buildSheetDetailLink(d.matched_overview_slovakiana_key)}
+                                    className="px-2.5 py-1 rounded bg-purple-100 hover:bg-purple-200 text-purple-950 border border-purple-300 font-semibold inline-flex items-center gap-1"
+                                  >
+                                    <span>
+                                      {lang === "sk" ? "Prehľad domov" : "House overview"}{" "}
+                                      ({d.matched_overview_slovakiana_key})
+                                    </span>
+                                  </Link>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
             {/* Top Section: Prehľady sčítacích obvodov cards */}
             {!muniOverview?.overview_sheets ||
             muniOverview.overview_sheets.length === 0 ? (
@@ -2810,6 +2969,11 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                                 <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-bold">
                                   Dom č. {entry.house_number || "—"}
                                 </span>
+                                {entry.obvod_number && (
+                                  <span className="px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-900 border border-purple-200 text-[11px] font-bold">
+                                    Obvod {entry.obvod_number}
+                                  </span>
+                                )}
                                 {entry.is_inhabited === false && (
                                   <span className="px-1.5 py-0.5 rounded bg-stone-200 text-stone-700 text-xs">
                                     {lang === "sk" ? "neobývaný" : "uninhabited"}
@@ -3156,9 +3320,11 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                     extracted_members,
                     overview_houses_count,
                   }) => {
-                    const isOverview = s.sheet_type === "overview";
+                    const isMunicipalOverview = s.sheet_type === "municipal_overview";
+                    const isOverview = s.sheet_type === "overview" || isMunicipalOverview;
                     const houseCount =
                       overview_houses_count ?? s.overview_houses_count ?? 0;
+                    const distCount = s.municipal_districts_count ?? 0;
                     const sheetMembersPreview =
                       extracted_persons_preview ||
                       members_preview ||
@@ -3171,7 +3337,9 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                       <div
                         key={s.slovakiana_id}
                         className={`rounded-xl p-3.5 border flex flex-col justify-between gap-3 transition ${
-                          isOverview
+                          isMunicipalOverview
+                            ? "bg-indigo-50/40 border-indigo-200 hover:border-indigo-500"
+                            : isOverview
                             ? "bg-purple-50/40 border-purple-200 hover:border-purple-500"
                             : "bg-stone-50 border-stone-200 hover:border-amber-500"
                         }`}
@@ -3194,9 +3362,14 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                               <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
                                 {s.slovakiana_id}
                               </span>
-                              {isOverview ? (
+                              {isMunicipalOverview ? (
+                                <span className="px-2 py-0.5 rounded-full bg-indigo-200 text-indigo-950 text-xs font-bold">
+                                  {lang === "sk" ? "Obecný prehľad" : "Municipal overview"}
+                                </span>
+                              ) : isOverview ? (
                                 <span className="px-2 py-0.5 rounded-full bg-purple-200 text-purple-950 text-xs font-bold">
-                                  {lang === "sk" ? "Prehľad obvodu" : "District overview"}
+                                  {lang === "sk" ? "Prehľad obvodu" : "District overview"}{" "}
+                                  {s.obvod_number ? `č. ${s.obvod_number}` : ""}
                                 </span>
                               ) : (
                                 (s.house_number_conscription ||
@@ -3264,7 +3437,20 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                           </div>
                         </div>
 
-                        {isOverview ? (
+                        {isMunicipalOverview ? (
+                          <div className="bg-indigo-100/70 border border-indigo-200 rounded-lg px-2.5 py-1.5 text-xs text-indigo-950 flex items-center justify-between">
+                            <span className="truncate">
+                              {s.commissioner_name
+                                ? `${lang === "sk" ? "Revízor:" : "Revisor:"} ${s.commissioner_name}`
+                                : lang === "sk"
+                                ? "Súhrn sčítacích obvodov obce"
+                                : "Summary of census districts"}
+                            </span>
+                            <span className="ml-2 px-1.5 py-0.5 rounded bg-indigo-200 font-bold shrink-0">
+                              {distCount} {lang === "sk" ? "obvody" : "districts"}
+                            </span>
+                          </div>
+                        ) : isOverview ? (
                           <div className="bg-purple-100/70 border border-purple-200 rounded-lg px-2.5 py-1.5 text-xs text-purple-950 flex items-center justify-between">
                             <span className="truncate">
                               {s.commissioner_name

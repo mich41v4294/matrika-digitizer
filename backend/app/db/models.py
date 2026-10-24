@@ -246,7 +246,7 @@ class CensusSheet(SQLModel, table=True):
     attributes_json: str = Field(default="{}")
     header_json: str = Field(default="{}")
     household_owner: Optional[str] = Field(default=None)
-    sheet_type: str = Field(default="household", index=True)  # "household" | "overview"
+    sheet_type: str = Field(default="household", index=True)  # "household" | "overview" | "municipal_overview"
     obvod_number: Optional[str] = Field(default=None, index=True)
     commissioner_name: Optional[str] = Field(default=None)
 
@@ -325,6 +325,32 @@ class CensusOverviewHouse(SQLModel, table=True):
     @raw_row_text.setter
     def raw_row_text(self, value: Optional[str]) -> None:
         self.raw_ocr_text = value
+
+
+class CensusMunicipalOverviewDistrict(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    census_sheet_id: int = Field(foreign_key="censussheet.id", index=True)
+    scan_id: Optional[int] = Field(default=None, foreign_key="scanimage.id", index=True)
+    row_index: int = Field(default=1, index=True)
+    census_year: int = Field(default=1930, index=True)
+    district: Optional[str] = Field(default=None, index=True)
+    municipality: str = Field(default="", index=True)
+    ordinal_number: Optional[str] = Field(default=None)
+    settlement_name: Optional[str] = Field(default=None)
+    obvod_number: Optional[str] = Field(default=None, index=True)
+    commissioner_name: Optional[str] = Field(default=None, index=True)
+    houses_total: Optional[int] = Field(default=None)
+    houses_inhabited: Optional[int] = Field(default=None)
+    houses_uninhabited: Optional[int] = Field(default=None)
+    household_count: Optional[int] = Field(default=None)
+    present_persons_count: Optional[int] = Field(default=None)
+    remarks: Optional[str] = Field(default=None)
+    is_summary_row: bool = Field(default=False, index=True)
+    matched_overview_sheet_id: Optional[int] = Field(default=None, foreign_key="censussheet.id", index=True)
+    stitched_crop_path: Optional[str] = Field(default=None)
+    raw_ocr_text: Optional[str] = Field(default=None)
+    confidence: float = Field(default=0.90)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class CensusHousehold(SQLModel, table=True):

@@ -200,7 +200,7 @@ def list_fs_matches(session: SessionDep, scan_id: int | None = None) -> dict[str
             continue
 
         sheet = sheets_by_id.get(fact.census_sheet_id) if fact.census_sheet_id else None
-        if sheet and getattr(sheet, "sheet_type", "household") == "overview":
+        if sheet and getattr(sheet, "sheet_type", "household") in ("overview", "municipal_overview"):
             continue
 
         if scan_id and fact.scan_id != scan_id:
@@ -421,7 +421,7 @@ async def sync_all_fs_matches(session: SessionDep) -> dict[str, Any]:
                 continue
             seen_sheet_ids.add(fact.census_sheet_id)
             sheet = sheets_by_id.get(fact.census_sheet_id)
-            if sheet and getattr(sheet, "sheet_type", "household") != "overview":
+            if sheet and getattr(sheet, "sheet_type", "household") not in ("overview", "municipal_overview"):
                 sheet_facts = [
                     sf
                     for sf in facts
@@ -452,7 +452,7 @@ async def sync_all_fs_matches(session: SessionDep) -> dict[str, Any]:
                     sheet = sheets_by_id.get(fact.census_sheet_id) or session.get(
                         CensusSheet, fact.census_sheet_id
                     )
-                    if sheet and getattr(sheet, "sheet_type", "household") != "overview":
+                    if sheet and getattr(sheet, "sheet_type", "household") not in ("overview", "municipal_overview"):
                         synced += await fs_mcp_manager.match_census_sheet(
                             session,
                             sheet,

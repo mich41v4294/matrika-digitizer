@@ -180,6 +180,17 @@ def parse_search_hit(item: dict[str, Any]) -> dict[str, Any]:
         if dm:
             district = dm.group(1).strip()
 
+    if not municipality and title_raw:
+        no_paren = re.sub(r"\s*\([^()]+\)\s*$", "", title_raw).strip()
+        if "," in no_paren:
+            cand_muni = no_paren.rsplit(",", 1)[-1].strip()
+            if cand_muni and not cand_muni.lower().startswith("sčítací"):
+                municipality = cand_muni
+        else:
+            m_concat = re.match(r"^Sčítací\s+h[aá]rok\s+\d+/\d+[A-Za-z]?\s*(.+)$", no_paren, re.IGNORECASE)
+            if m_concat and m_concat.group(1).strip(" ,-"):
+                municipality = m_concat.group(1).strip(" ,-")
+
     street_list = item.get("censusSheetStreet") or []
     street_entry = street_list[0] if isinstance(street_list, list) and street_list else None
     street_raw, house_number, house_number_int = parse_street_and_house_from_raw(
@@ -234,6 +245,16 @@ def parse_detail_and_digital_object(
         if aname:
             attrs[aname] = avals
 
+    if "Date" in attrs and attrs["Date"]:
+        raw_dt = str(attrs["Date"][0]).strip()
+        if raw_dt.isdigit():
+            base["census_year"] = int(raw_dt)
+    if "Municipality" in attrs and attrs["Municipality"] and not base.get("municipality"):
+        raw_muni = str(attrs["Municipality"][0]).strip()
+        if raw_muni:
+            canon_m = canonical_municipality_display(raw_muni) or raw_muni
+            base["municipality"] = canon_m
+            base["municipality_folded"] = canonical_municipality_key(canon_m)
     if "Box number" in attrs and attrs["Box number"]:
         raw_box = str(attrs["Box number"][0]).strip()
         base["box_number"] = raw_box.zfill(4) if raw_box.isdigit() else raw_box

@@ -976,7 +976,7 @@ class FamilySearchMcpManager:
 
         if fact.record_type == "census" and fact.census_sheet_id:
             sheet = session.get(CensusSheet, fact.census_sheet_id)
-            if sheet and getattr(sheet, "sheet_type", "household") == "overview":
+            if sheet and getattr(sheet, "sheet_type", "household") in ("overview", "municipal_overview"):
                 if fact.id is not None:
                     stale = session.exec(
                         select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == fact.id)
@@ -1274,7 +1274,7 @@ class FamilySearchMcpManager:
             if not sheet_obj:
                 return 0
             sheet = sheet_obj
-        if getattr(sheet, "sheet_type", "household") == "overview":
+        if getattr(sheet, "sheet_type", "household") in ("overview", "municipal_overview"):
             overview_facts = session.exec(
                 select(PersonFact).where(PersonFact.census_sheet_id == sheet.id)
             ).all()

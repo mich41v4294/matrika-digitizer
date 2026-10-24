@@ -45,11 +45,12 @@ export interface CensusSheetDetail {
   source_web_url: string | null;
   download_status: string;
   pipeline_status: string;
-  sheet_type?: "household" | "overview" | string;
+  sheet_type?: "household" | "overview" | "municipal_overview" | string;
   household_owner?: string | null;
   obvod_number?: string | null;
   commissioner_name?: string | null;
   overview_houses_count?: number;
+  municipal_districts_count?: number;
   linked_house_sheets?: LinkedHouseSheet[];
   same_year_house_sheets?: LinkedHouseSheet[];
 }

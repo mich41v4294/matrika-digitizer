@@ -29,6 +29,7 @@ from backend.app.census.worker import (
 from backend.app.db.models import (
     CensusDownloadJob,
     CensusHousehold,
+    CensusMunicipalOverviewDistrict,
     CensusOverviewHouse,
     CensusSheet,
     FamilySearchMatch,
@@ -45,6 +46,7 @@ from backend.app.mcp.familysearch_client import (
 )
 from backend.app.pipeline.extraction_stage import (
     _format_birth_place_raw,
+    extract_census_municipal_overview_sheet,
     extract_census_overview_sheet,
     reconcile_census_household_relationships,
 )
@@ -104,7 +106,11 @@ def _census_thumbnail_url(slovakiana_key: str, census_root: Path) -> str | None:
     return None
 
 
-def _serialize_sheet(s: CensusSheet, overview_houses_count: int = 0) -> dict[str, Any]:
+def _serialize_sheet(
+    s: CensusSheet,
+    overview_houses_count: int = 0,
+    municipal_districts_count: int = 0,
+) -> dict[str, Any]:
     imgs = json.loads(s.image_urls_json or "[]")
     front_url = imgs[0].get("jpeg_url") if imgs else None
     back_url = imgs[1].get("jpeg_url") if len(imgs) > 1 else None
@@ -125,6 +131,7 @@ def _serialize_sheet(s: CensusSheet, overview_houses_count: int = 0) -> dict[str
         "obvod_number": s.obvod_number,
         "commissioner_name": s.commissioner_name,
         "overview_houses_count": overview_houses_count,
+        "municipal_districts_count": municipal_districts_count,
         "cair_id": s.slovakiana_key,
         "slovakiana_id": s.slovakiana_key,
         "district_name": s.district,
@@ -581,7 +588,7 @@ class UpdateCensusPersonRequest(CreateCensusPersonRequest):
 
 
 class SetSheetTypeRequest(BaseModel):
-    sheet_type: str = "overview"  # "overview" | "household"
+    sheet_type: str = "overview"  # "overview" | "municipal_overview" | "household"
     obvod_number: str | None = None
     commissioner_name: str | None = None
     run_extract: bool = True
@@ -597,6 +604,21 @@ class OverviewHousePatchRequest(BaseModel):
     present_persons_count: int | None = None
     remarks: str | None = None
     matched_sheet_id: int | None = None
+
+
+class MunicipalOverviewDistrictPatchRequest(BaseModel):
+    ordinal_number: int | str | None = None
+    settlement_name: str | None = None
+    obvod_number: str | None = None
+    commissioner_name: str | None = None
+    houses_total: int | None = None
+    houses_inhabited: int | None = None
+    houses_uninhabited: int | None = None
+    household_count: int | None = None
+    present_persons_count: int | None = None
+    remarks: str | None = None
+    is_summary_row: bool | None = None
+    matched_overview_sheet_id: int | None = None
 
 
 @router.get("/facets")
@@ -937,6 +959,8 @@ def list_census_sheets(
     all_households_by_sheet: dict[int, list[CensusHousehold]] = {}
     facts_by_sheet: dict[int, list[PersonFact]] = {}
     overview_counts_by_sheet: dict[int, int] = {}
+    municipal_districts_counts_by_sheet: dict[int, int] = {}
+    muni_districts_by_sheet: dict[int, list[CensusMunicipalOverviewDistrict]] = {}
     matched_ovh_owners_by_sheet: dict[int, list[str]] = {}
     matched_ovh_settlements_by_sheet: dict[int, list[str]] = {}
     ovh_by_overview_sheet: dict[int, list[CensusOverviewHouse]] = {}
@@ -991,6 +1015,16 @@ def list_census_sheets(
                 for tx in (ovh.owner_name, ovh.raw_ocr_text, ovh.remarks):
                     if tx:
                         matched_ovh_owners_by_sheet.setdefault(ovh.matched_sheet_id, []).append(tx)
+        for md in session.exec(
+            select(CensusMunicipalOverviewDistrict).where(
+                CensusMunicipalOverviewDistrict.census_sheet_id.in_(candidate_ids)
+            )
+        ).all():
+            muni_districts_by_sheet.setdefault(md.census_sheet_id, []).append(md)
+            if not md.is_summary_row:
+                municipal_districts_counts_by_sheet[md.census_sheet_id] = (
+                    municipal_districts_counts_by_sheet.get(md.census_sheet_id, 0) + 1
+                )
 
         filtered_sheets: list[CensusSheet] = []
         step_size = max(1, len(all_matching) // 8)
@@ -1016,6 +1050,8 @@ def list_census_sheets(
             ]
             for ovh_item in s_ovhs:
                 name_parts.extend([ovh_item.owner_name, ovh_item.raw_ocr_text, ovh_item.remarks])
+            for md_item in muni_districts_by_sheet.get(sid, []):
+                name_parts.extend([md_item.commissioner_name, md_item.raw_ocr_text, md_item.remarks])
             for hh_item in s_hhs:
                 hh_ser = _serialize_household(hh_item)
                 if hh_ser:
@@ -1129,6 +1165,15 @@ def list_census_sheets(
             overview_counts_by_sheet[ovh.census_sheet_id] = (
                 overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
             )
+        for md in session.exec(
+            select(CensusMunicipalOverviewDistrict).where(
+                CensusMunicipalOverviewDistrict.census_sheet_id.in_(sheet_ids)
+            )
+        ).all():
+            if not md.is_summary_row:
+                municipal_districts_counts_by_sheet[md.census_sheet_id] = (
+                    municipal_districts_counts_by_sheet.get(md.census_sheet_id, 0) + 1
+                )
 
     census_root = _census_storage_root()
     linked_by_sheet_id = _batch_find_linked_house_sheets(session, page_items)
@@ -1142,6 +1187,7 @@ def list_census_sheets(
         if not _census_thumbnail_url(s.slovakiana_key, census_root) and s.thumbnail_id:
             missing_thumbs.append({"slovakiana_key": s.slovakiana_key, "thumbnail_id": s.thumbnail_id})
         ov_cnt = overview_counts_by_sheet.get(sid, 0)
+        md_cnt = municipal_districts_counts_by_sheet.get(sid, 0)
         linked_sheets = linked_by_sheet_id.get(sid, [])
 
         persons_preview: list[dict[str, Any]] = []
@@ -1162,7 +1208,11 @@ def list_census_sheets(
                 )
             persons_preview.append(_serialize_person_preview(pf, matched_filter=is_pf_match))
 
-        s_payload = _serialize_sheet(s, overview_houses_count=ov_cnt)
+        s_payload = _serialize_sheet(
+            s,
+            overview_houses_count=ov_cnt,
+            municipal_districts_count=md_cnt,
+        )
         if not s_payload.get("street_name"):
             fallback_st = (
                 (hh.street if hh and hh.street else None)
@@ -1398,7 +1448,7 @@ def _find_matching_village_house_sheets(
     sheet: CensusSheet,
 ) -> list[CensusSheet]:
     eff_type = sheet.sheet_type or "household"
-    if eff_type == "overview":
+    if eff_type in ("overview", "municipal_overview"):
         return []
     target_muni = canonical_municipality_key(sheet.municipality)
     target_hn = normalize_house_number(sheet.house_number)
@@ -1418,7 +1468,7 @@ def _find_matching_village_house_sheets(
     matched_others: list[CensusSheet] = []
     for other in candidates:
         other_type = other.sheet_type or "household"
-        if other_type == "overview":
+        if other_type in ("overview", "municipal_overview"):
             continue
         if canonical_municipality_key(other.municipality) != target_muni:
             continue
@@ -1469,7 +1519,7 @@ def _batch_find_linked_house_sheets(
     hn_ints: set[int] = set()
     hn_strs: set[str] = set()
     for s in sheets:
-        if s.id is None or (s.sheet_type or "household") == "overview":
+        if s.id is None or (s.sheet_type or "household") in ("overview", "municipal_overview"):
             continue
         t_muni = canonical_municipality_key(s.municipality)
         t_hn = normalize_house_number(s.house_number)
@@ -1499,7 +1549,7 @@ def _batch_find_linked_house_sheets(
     candidates = list(session.exec(stmt).all())
     by_muni_hn: dict[tuple[str, str], list[CensusSheet]] = {}
     for c in candidates:
-        if (c.sheet_type or "household") == "overview":
+        if (c.sheet_type or "household") in ("overview", "municipal_overview"):
             continue
         c_muni = canonical_municipality_key(c.municipality)
         c_hn = normalize_house_number(c.house_number)
@@ -1631,7 +1681,7 @@ def _serialize_overview_house(
         if candidate_sheets is None:
             stmt = select(CensusSheet).where(
                 CensusSheet.house_number.is_not(None),
-                CensusSheet.sheet_type != "overview",
+                CensusSheet.sheet_type.notin_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
             )
             if ovh.house_number_int is not None:
                 stmt = stmt.where(
@@ -1643,7 +1693,7 @@ def _serialize_overview_house(
             sheets_iter = candidate_sheets
         for cs in sheets_iter:
             eff_type = cs.sheet_type or "household"
-            if eff_type == "overview":
+            if eff_type in ("overview", "municipal_overview"):
                 continue
             if canonical_municipality_key(cs.municipality) != target_muni:
                 continue
@@ -1731,6 +1781,8 @@ def _serialize_overview_house(
 
     return {
         **ovh_dump,
+        "overview_slovakiana_key": overview_sheet.slovakiana_key if overview_sheet else None,
+        "obvod_number": ovh.obvod_number or (overview_sheet.obvod_number if overview_sheet else None),
         "row_id": row_obj.id if row_obj else None,
         "page_side": page_side,
         "page_number": page_number,
@@ -1745,6 +1797,78 @@ def _serialize_overview_house(
         "matched_members_count": matched_members_count or (matched_sheet_entry["persons_count"] if matched_sheet_entry else 0),
         "matched_sheet": matched_sheet_entry,
         "matched_sheets": matched_sheets_entries,
+    }
+
+
+def _serialize_municipal_overview_district(
+    session: SessionDep,
+    md: CensusMunicipalOverviewDistrict,
+    *,
+    municipal_sheet: CensusSheet | None = None,
+    row_obj: RecordRow | None = None,
+    scan_obj: ScanImage | None = None,
+    overview_sheets_by_id: dict[int, CensusSheet] | None = None,
+    overview_house_counts: dict[int, int] | None = None,
+) -> dict[str, Any]:
+    if municipal_sheet is None and md.census_sheet_id:
+        municipal_sheet = session.get(CensusSheet, md.census_sheet_id)
+    if scan_obj is None and md.scan_id:
+        scan_obj = session.get(ScanImage, md.scan_id)
+
+    matched_ov_sheet: CensusSheet | None = None
+    if md.matched_overview_sheet_id:
+        if overview_sheets_by_id and md.matched_overview_sheet_id in overview_sheets_by_id:
+            matched_ov_sheet = overview_sheets_by_id[md.matched_overview_sheet_id]
+        else:
+            matched_ov_sheet = session.get(CensusSheet, md.matched_overview_sheet_id)
+
+    if matched_ov_sheet is not None:
+        m_canon = canonical_municipality_key(municipal_sheet.municipality if municipal_sheet else md.municipality)
+        if canonical_municipality_key(matched_ov_sheet.municipality) != m_canon or (
+            municipal_sheet and matched_ov_sheet.census_year != municipal_sheet.census_year
+        ):
+            matched_ov_sheet = None
+
+    ov_houses_cnt = 0
+    if matched_ov_sheet and matched_ov_sheet.id is not None:
+        if overview_house_counts is not None and matched_ov_sheet.id in overview_house_counts:
+            ov_houses_cnt = overview_house_counts[matched_ov_sheet.id]
+        else:
+            ov_houses_cnt = session.exec(
+                select(func.count())
+                .select_from(CensusOverviewHouse)
+                .where(CensusOverviewHouse.census_sheet_id == matched_ov_sheet.id)
+            ).one()
+
+    page_side = "front"
+    if scan_obj and scan_obj.page_side:
+        page_side = scan_obj.page_side
+    elif municipal_sheet and md.scan_id and md.scan_id == municipal_sheet.back_scan_id:
+        page_side = "back"
+    page_number = 1 if page_side == "front" else 2
+    header_crop_url = scan_obj.header_crop_path if scan_obj else None
+    y_start = row_obj.y_start if row_obj else None
+    y_end = row_obj.y_end if row_obj else None
+
+    md_dump = md.model_dump()
+    md_dump["municipality"] = canonical_municipality_display(md.municipality) or md.municipality
+    md_dump["matched_overview_sheet_id"] = matched_ov_sheet.id if matched_ov_sheet else None
+
+    return {
+        **md_dump,
+        "row_id": row_obj.id if row_obj else None,
+        "page_side": page_side,
+        "page_number": page_number,
+        "header_crop_url": header_crop_url,
+        "y_start": y_start,
+        "y_end": y_end,
+        "matched_overview_slovakiana_key": matched_ov_sheet.slovakiana_key if matched_ov_sheet else None,
+        "matched_overview_houses_count": ov_houses_cnt,
+        "matched_overview_sheet": (
+            _serialize_sheet(matched_ov_sheet, overview_houses_count=ov_houses_cnt)
+            if matched_ov_sheet
+            else None
+        ),
     }
 
 
@@ -1918,7 +2042,7 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             session.exec(
                 select(CensusSheet).where(
                     CensusSheet.house_number.is_not(None),
-                    CensusSheet.sheet_type != "overview",
+                    CensusSheet.sheet_type.notin_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
                 )
             ).all()
         )
@@ -1944,9 +2068,176 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             )
         )
 
-    linked_overview_house: dict[str, Any] | None = None
     eff_sheet_type = sheet.sheet_type or "household"
-    if eff_sheet_type != "overview" and sheet.house_number:
+    muni_canon = canonical_municipality_key(sheet.municipality)
+
+    # Municipal Overview ('Obecný prehľad') districts + joined Prehľad domov ('overview') sheets & houses
+    municipal_overview_districts: list[dict[str, Any]] = []
+    linked_overview_sheets: list[dict[str, Any]] = []
+    joined_overview_houses: list[dict[str, Any]] = []
+    linked_municipal_overview: dict[str, Any] | None = None
+
+    if eff_sheet_type == "municipal_overview":
+        md_rows = list(
+            session.exec(
+                select(CensusMunicipalOverviewDistrict)
+                .where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+                .order_by(
+                    CensusMunicipalOverviewDistrict.is_summary_row.asc(),
+                    CensusMunicipalOverviewDistrict.row_index.asc(),
+                )
+            ).all()
+        )
+        same_muni_ov_sheets = [
+            cs
+            for cs in session.exec(
+                select(CensusSheet).where(
+                    CensusSheet.census_year == sheet.census_year,
+                    CensusSheet.id != sheet.id,
+                    CensusSheet.sheet_type == "overview",
+                )
+            ).all()
+            if muni_canon and canonical_municipality_key(cs.municipality) == muni_canon
+        ]
+        same_muni_ov_sheets.sort(key=lambda cs: (cs.sheet_number or "9999", cs.id or 0))
+        ov_sheets_by_id: dict[int, CensusSheet] = {
+            cs.id: cs for cs in same_muni_ov_sheets if cs.id is not None
+        }
+        for md in md_rows:
+            if md.matched_overview_sheet_id and md.matched_overview_sheet_id not in ov_sheets_by_id:
+                extra_ov = session.get(CensusSheet, md.matched_overview_sheet_id)
+                if extra_ov and extra_ov.id is not None:
+                    ov_sheets_by_id[extra_ov.id] = extra_ov
+                    same_muni_ov_sheets.append(extra_ov)
+
+        ov_sids = list(ov_sheets_by_id.keys())
+        ov_house_counts: dict[int, int] = {}
+        joined_ovh_rows: list[CensusOverviewHouse] = []
+        if ov_sids:
+            joined_ovh_rows = list(
+                session.exec(
+                    select(CensusOverviewHouse)
+                    .where(CensusOverviewHouse.census_sheet_id.in_(ov_sids))  # type: ignore[union-attr]
+                    .order_by(CensusOverviewHouse.census_sheet_id.asc(), CensusOverviewHouse.row_index.asc())
+                ).all()
+            )
+            for jh in joined_ovh_rows:
+                ov_house_counts[jh.census_sheet_id] = ov_house_counts.get(jh.census_sheet_id, 0) + 1
+
+        for md in md_rows:
+            matched_row = rows_by_crop.get(md.stitched_crop_path or "")
+            if matched_row is None and md.scan_id:
+                for r_cand in rows_by_id.values():
+                    if r_cand.scan_id == md.scan_id and r_cand.row_index == md.row_index:
+                        matched_row = r_cand
+                        break
+            municipal_overview_districts.append(
+                _serialize_municipal_overview_district(
+                    session,
+                    md,
+                    municipal_sheet=sheet,
+                    row_obj=matched_row,
+                    scan_obj=scans_by_id.get(md.scan_id or 0),
+                    overview_sheets_by_id=ov_sheets_by_id,
+                    overview_house_counts=ov_house_counts,
+                )
+            )
+
+        for ov_s in same_muni_ov_sheets:
+            cnt = ov_house_counts.get(ov_s.id or 0, 0)
+            linked_overview_sheets.append(_serialize_sheet(ov_s, overview_houses_count=cnt))
+
+        if joined_ovh_rows:
+            j_hn_ints = {jh.house_number_int for jh in joined_ovh_rows if jh.house_number_int is not None}
+            j_hn_strs = {str(jh.house_number).strip() for jh in joined_ovh_rows if jh.house_number}
+            j_cand_stmt = select(CensusSheet).where(
+                CensusSheet.house_number.is_not(None),
+                CensusSheet.sheet_type.notin_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
+            )
+            if j_hn_ints and j_hn_strs:
+                j_cand_stmt = j_cand_stmt.where(
+                    (CensusSheet.house_number_int.in_(j_hn_ints))  # type: ignore[union-attr]
+                    | (CensusSheet.house_number.in_(j_hn_strs))  # type: ignore[union-attr]
+                )
+            elif j_hn_ints:
+                j_cand_stmt = j_cand_stmt.where(CensusSheet.house_number_int.in_(j_hn_ints))  # type: ignore[union-attr]
+            elif j_hn_strs:
+                j_cand_stmt = j_cand_stmt.where(CensusSheet.house_number.in_(j_hn_strs))  # type: ignore[union-attr]
+            j_cand_sheets = list(session.exec(j_cand_stmt).all())
+            for jh in joined_ovh_rows:
+                parent_ov = ov_sheets_by_id.get(jh.census_sheet_id)
+                joined_overview_houses.append(
+                    _serialize_overview_house(
+                        session,
+                        jh,
+                        overview_sheet=parent_ov,
+                        candidate_sheets=j_cand_sheets,
+                    )
+                )
+            joined_overview_houses.sort(
+                key=lambda item: (
+                    item.get("house_number_int") if item.get("house_number_int") is not None else 999999,
+                    str(item.get("house_number") or ""),
+                )
+            )
+    elif eff_sheet_type == "overview" and muni_canon:
+        # Check if this Prehľad sčítacieho obvodu ('Prehľad domov') belongs to a parent Obecný prehľad
+        parent_muni_sheets = [
+            cs
+            for cs in session.exec(
+                select(CensusSheet).where(
+                    CensusSheet.census_year == sheet.census_year,
+                    CensusSheet.sheet_type == "municipal_overview",
+                )
+            ).all()
+            if canonical_municipality_key(cs.municipality) == muni_canon
+        ]
+        if parent_muni_sheets:
+            parent_ms = parent_muni_sheets[0]
+            md_rows_parent = list(
+                session.exec(
+                    select(CensusMunicipalOverviewDistrict)
+                    .where(CensusMunicipalOverviewDistrict.census_sheet_id == parent_ms.id)
+                    .order_by(
+                        CensusMunicipalOverviewDistrict.is_summary_row.asc(),
+                        CensusMunicipalOverviewDistrict.row_index.asc(),
+                    )
+                ).all()
+            )
+            sibling_ov_sheets = [
+                cs
+                for cs in session.exec(
+                    select(CensusSheet).where(
+                        CensusSheet.census_year == sheet.census_year,
+                        CensusSheet.sheet_type == "overview",
+                    )
+                ).all()
+                if canonical_municipality_key(cs.municipality) == muni_canon
+            ]
+            sibling_ov_sheets.sort(key=lambda cs: (cs.sheet_number or "9999", cs.id or 0))
+            sib_by_id = {cs.id: cs for cs in sibling_ov_sheets if cs.id is not None}
+            linked_municipal_overview = {
+                **_serialize_sheet(
+                    parent_ms,
+                    municipal_districts_count=len([d for d in md_rows_parent if not d.is_summary_row]),
+                ),
+                "revisor_name": parent_ms.commissioner_name,
+                "districts": [
+                    _serialize_municipal_overview_district(
+                        session,
+                        md,
+                        municipal_sheet=parent_ms,
+                        overview_sheets_by_id=sib_by_id,
+                    )
+                    for md in md_rows_parent
+                ],
+                "sibling_overview_sheets": [
+                    _serialize_sheet(cs) for cs in sibling_ov_sheets if cs.id != sheet.id
+                ],
+            }
+
+    linked_overview_house: dict[str, Any] | None = None
+    if eff_sheet_type not in ("overview", "municipal_overview") and sheet.house_number:
         ov_match = session.exec(
             select(CensusOverviewHouse).where(CensusOverviewHouse.matched_sheet_id == sheet.id)
         ).first()
@@ -1982,7 +2273,12 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
     linked_house_sheets = _find_linked_house_sheets(session, sheet)
     same_year_house_sheets = _find_same_year_house_sheets(session, sheet)
 
-    sheet_dict = _serialize_sheet(sheet, overview_houses_count=len(overview_houses))
+    muni_dist_cnt = len([d for d in municipal_overview_districts if not d.get("is_summary_row")])
+    sheet_dict = _serialize_sheet(
+        sheet,
+        overview_houses_count=len(overview_houses) or len(joined_overview_houses),
+        municipal_districts_count=muni_dist_cnt,
+    )
     sheet_dict["linked_house_sheets"] = linked_house_sheets
     sheet_dict["same_year_house_sheets"] = same_year_house_sheets
     front_local_url = _scan_to_media_url(front_scan)
@@ -2051,6 +2347,10 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
         "persons": persons,
         "rows": serialized_rows,
         "overview_houses": overview_houses,
+        "municipal_overview_districts": municipal_overview_districts,
+        "linked_overview_sheets": linked_overview_sheets,
+        "joined_overview_houses": joined_overview_houses,
+        "linked_municipal_overview": linked_municipal_overview,
         "linked_overview_house": linked_overview_house,
         "linked_house_sheets": linked_house_sheets,
         "same_year_house_sheets": same_year_house_sheets,
@@ -2266,7 +2566,12 @@ async def set_census_sheet_type(
     session: SessionDep,
 ) -> dict[str, Any]:
     sheet = await _resolve_census_sheet(session, sheet_ref)
-    target_type = "overview" if req.sheet_type == "overview" else "household"
+    if req.sheet_type in ("municipal_overview", "obecny_prehlad"):
+        target_type = "municipal_overview"
+    elif req.sheet_type == "overview":
+        target_type = "overview"
+    else:
+        target_type = "household"
     sheet.sheet_type = target_type
     if req.obvod_number is not None:
         sheet.obvod_number = req.obvod_number
@@ -2277,20 +2582,44 @@ async def set_census_sheet_type(
     session.refresh(sheet)
 
     overview_houses: list[CensusOverviewHouse] = []
+    municipal_districts: list[CensusMunicipalOverviewDistrict] = []
     if req.run_extract:
-        if target_type == "overview":
+        if target_type == "municipal_overview":
+            if not sheet.front_scan_id:
+                await download_and_process_single_census_sheet(sheet.id or 0, run_pipeline=True, run_mcp=False)
+                session.refresh(sheet)
+                municipal_districts = list(
+                    session.exec(
+                        select(CensusMunicipalOverviewDistrict)
+                        .where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+                        .order_by(CensusMunicipalOverviewDistrict.row_index.asc())
+                    ).all()
+                )
+            else:
+                front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
+                back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
+                municipal_districts = await extract_census_municipal_overview_sheet(
+                    session, sheet, front_scan, back_scan
+                )
+        elif target_type == "overview":
             if not sheet.front_scan_id:
                 await download_and_process_single_census_sheet(sheet.id or 0, run_pipeline=True, run_mcp=False)
                 session.refresh(sheet)
             else:
                 front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
                 back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
-                overview_houses = await extract_census_overview_sheet(session, sheet, front_scan, back_scan)
+                overview_houses = await extract_census_overview_sheet(
+                    session, sheet, front_scan, back_scan, force_district_overview=True
+                )
         else:
             for ovh in session.exec(
                 select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
             ).all():
                 session.delete(ovh)
+            for md in session.exec(
+                select(CensusMunicipalOverviewDistrict).where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+            ).all():
+                session.delete(md)
             session.commit()
             if sheet.front_scan_id:
                 from backend.app.pipeline.orchestrator import process_census_sheet_pipeline
@@ -2302,9 +2631,66 @@ async def set_census_sheet_type(
 
     return {
         "status": "updated",
-        "sheet": _serialize_sheet(sheet, overview_houses_count=len(overview_houses)),
+        "sheet": _serialize_sheet(
+            sheet,
+            overview_houses_count=len(overview_houses),
+            municipal_districts_count=len([d for d in municipal_districts if not d.is_summary_row]),
+        ),
         "overview_houses": [_serialize_overview_house(session, h) for h in overview_houses],
+        "municipal_overview_districts": [
+            _serialize_municipal_overview_district(session, md, municipal_sheet=sheet)
+            for md in municipal_districts
+        ],
     }
+
+
+@router.patch("/municipal-overview-districts/{district_id}")
+def patch_municipal_overview_district(
+    district_id: int,
+    req: MunicipalOverviewDistrictPatchRequest,
+    session: SessionDep,
+) -> dict[str, Any]:
+    md = session.get(CensusMunicipalOverviewDistrict, district_id)
+    if not md:
+        raise HTTPException(status_code=404, detail="CensusMunicipalOverviewDistrict not found")
+
+    updates = req.model_dump(exclude_unset=True)
+    if "ordinal_number" in updates and updates["ordinal_number"] is not None:
+        updates["ordinal_number"] = str(updates["ordinal_number"])
+    for k in (
+        "ordinal_number",
+        "settlement_name",
+        "obvod_number",
+        "commissioner_name",
+        "houses_total",
+        "houses_inhabited",
+        "houses_uninhabited",
+        "household_count",
+        "present_persons_count",
+        "remarks",
+        "is_summary_row",
+        "matched_overview_sheet_id",
+    ):
+        if k in updates:
+            setattr(md, k, updates[k])
+
+    session.add(md)
+    session.commit()
+    session.refresh(md)
+    return {
+        "status": "updated",
+        "municipal_overview_district": _serialize_municipal_overview_district(session, md),
+    }
+
+
+@router.delete("/municipal-overview-districts/{district_id}")
+def delete_municipal_overview_district(district_id: int, session: SessionDep) -> dict[str, Any]:
+    md = session.get(CensusMunicipalOverviewDistrict, district_id)
+    if not md:
+        raise HTTPException(status_code=404, detail="CensusMunicipalOverviewDistrict not found")
+    session.delete(md)
+    session.commit()
+    return {"status": "deleted", "district_id": district_id}
 
 
 @router.patch("/overview-houses/{house_id}")
@@ -2461,11 +2847,15 @@ def get_municipality_overview(
                         ov_row_ocr_by_id[r_obj.id] = ocr_t
 
     overview_sheets: list[dict[str, Any]] = []
+    municipal_overview_sheets: list[dict[str, Any]] = []
     household_sheets_by_id: dict[int, CensusSheet] = {}
     # Keyed strictly by (canonical_municipality_key, census_year, normalize_house_number)
     household_sheets_by_muni_year_hn: dict[tuple[str, int, str], list[CensusSheet]] = {}
 
     ov_sheet_ids = [s.id for s in sheets if s.id is not None and (s.sheet_type or "household") == "overview"]
+    muni_ov_sheet_ids = [
+        s.id for s in sheets if s.id is not None and (s.sheet_type or "household") == "municipal_overview"
+    ]
     ov_counts_map: dict[int, int] = {}
     if ov_sheet_ids:
         for ov_sid, cnt in session.exec(
@@ -2476,9 +2866,40 @@ def get_municipality_overview(
             if ov_sid is not None:
                 ov_counts_map[int(ov_sid)] = int(cnt)
 
+    muni_ov_districts_map: dict[int, list[CensusMunicipalOverviewDistrict]] = {}
+    if muni_ov_sheet_ids:
+        for md in session.exec(
+            select(CensusMunicipalOverviewDistrict)
+            .where(CensusMunicipalOverviewDistrict.census_sheet_id.in_(muni_ov_sheet_ids))  # type: ignore[union-attr]
+            .order_by(
+                CensusMunicipalOverviewDistrict.is_summary_row.asc(),
+                CensusMunicipalOverviewDistrict.row_index.asc(),
+            )
+        ).all():
+            muni_ov_districts_map.setdefault(md.census_sheet_id, []).append(md)
+
+    ov_sheets_by_id_map: dict[int, CensusSheet] = {
+        s.id: s for s in sheets if s.id is not None and (s.sheet_type or "household") == "overview"
+    }
+
     for s in sheets:
         eff_type = s.sheet_type or "household"
-        if eff_type == "overview":
+        if eff_type == "municipal_overview":
+            md_list = muni_ov_districts_map.get(s.id or 0, [])
+            dist_cnt = len([d for d in md_list if not d.is_summary_row])
+            ser_ms = _serialize_sheet(s, municipal_districts_count=dist_cnt)
+            ser_ms["municipal_overview_districts"] = [
+                _serialize_municipal_overview_district(
+                    session,
+                    md,
+                    municipal_sheet=s,
+                    overview_sheets_by_id=ov_sheets_by_id_map,
+                    overview_house_counts=ov_counts_map,
+                )
+                for md in md_list
+            ]
+            municipal_overview_sheets.append(ser_ms)
+        elif eff_type == "overview":
             ov_cnt = ov_counts_map.get(s.id or 0, 0)
             overview_sheets.append(_serialize_sheet(s, overview_houses_count=ov_cnt))
         else:
@@ -2728,6 +3149,8 @@ def get_municipality_overview(
             "owner_name": ovh.owner_name,
             "overview_house_id": ovh.id,
             "overview_sheet_id": ovh.census_sheet_id,
+            "overview_slovakiana_key": ov_parent.slovakiana_key if ov_parent else None,
+            "obvod_number": ovh.obvod_number or (ov_parent.obvod_number if ov_parent else None),
             "overview_household_count": ovh.household_count,
             "overview_present_persons_count": ovh.present_persons_count,
             "remarks": ovh.remarks,
@@ -2751,7 +3174,7 @@ def get_municipality_overview(
     # Also add any household CensusSheets that weren't in the overview table yet
     for s in sheets:
         eff_type = s.sheet_type or "household"
-        if eff_type == "overview" or (s.id and s.id in covered_sheet_ids):
+        if eff_type in ("overview", "municipal_overview") or (s.id and s.id in covered_sheet_ids):
             continue
         hn_str = str(s.house_number or "").strip()
         hn_int = int(hn_str) if hn_str.isdigit() else 999999
@@ -2818,6 +3241,7 @@ def get_municipality_overview(
         "municipality": resolved_muni,
         "district": resolved_dist,
         "census_year": resolved_year,
+        "municipal_overview_sheets": municipal_overview_sheets,
         "overview_sheets": overview_sheets,
         "houses_directory": houses_directory,
         "total_houses": len(houses_directory),
@@ -2880,7 +3304,7 @@ def list_overview_houses(
             session.exec(
                 select(CensusSheet).where(
                     CensusSheet.house_number.is_not(None),
-                    CensusSheet.sheet_type != "overview",
+                    CensusSheet.sheet_type.notin_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
                 )
             ).all()
         )
@@ -2962,7 +3386,7 @@ def get_municipalities_summary(
             entry["downloaded_sheets"] += 1
         if s.download_status in ("ocr_done", "extracted", "matched"):
             entry["ocr_done_sheets"] += 1
-        if s.sheet_type == "overview":
+        if s.sheet_type in ("overview", "municipal_overview"):
             entry["overview_sheets_count"] += 1
         if s.id:
             entry["extracted_persons_count"] += person_counts_by_sheet.get(s.id, 0)

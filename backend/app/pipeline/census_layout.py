@@ -32,12 +32,21 @@ from backend.app.pipeline.layout import (
 from backend.app.pipeline.lexicon import fold_text_diacritics
 
 
+MUNICIPAL_OVERVIEW_HEADER_MARKERS: tuple[str, ...] = (
+    "obecny prehlad",
+    "meno scitacieho revizora",
+    "vyplni scitaci revizor",
+    "vyhotovi revizor",
+    "v obciach rozdelenych na dva alebo viac",
+    "sucet pre celu obec",
+    "podla prehladov scitacich obvodov",
+)
+
 OVERVIEW_HEADER_MARKERS: tuple[str, ...] = (
     "prehlad scitacieho obvodu",
     "prehlad obvodu",
     "meno scitacieho komisara",
     "scitaci komisar",
-    "meno revizora",
     "pocet bytovych stran",
     "radove cislo osad",
     "meno majitela domu",
@@ -46,11 +55,30 @@ OVERVIEW_HEADER_MARKERS: tuple[str, ...] = (
 )
 
 
+def detect_is_municipal_overview_sheet(header_text: str | None, raw_ocr: str | None = "") -> bool:
+    """
+    Detects whether a census sheet is an 'Obecný prehľad' (Municipal Overview Sheet, Form X)
+    which joins and summarizes multiple 'Prehľad sčítacieho obvodu' (District Overview / Prehľad domov) sheets.
+    """
+    combined = f"{header_text or ''} {raw_ocr or ''}".strip()
+    if not combined:
+        return False
+    folded = fold_text_diacritics(combined)
+    if "meno majitela domu" in folded or "popisne cislo domu" in folded:
+        return False
+    for marker in MUNICIPAL_OVERVIEW_HEADER_MARKERS:
+        if marker in folded:
+            return True
+    return False
+
+
 def detect_is_overview_sheet(header_text: str | None, raw_ocr: str | None = "") -> bool:
     """
-    Detects whether a census sheet is a 'Prehľad sčítacieho obvodu' (District Overview Sheet)
-    rather than an individual household sheet ('Popisný / Sčítací hárok').
+    Detects whether a census sheet is a 'Prehľad sčítacieho obvodu' (District Overview Sheet / Prehľad domov)
+    rather than an 'Obecný prehľad' ('municipal_overview') or an individual household sheet ('household').
     """
+    if detect_is_municipal_overview_sheet(header_text, raw_ocr):
+        return False
     combined = f"{header_text or ''} {raw_ocr or ''}".strip()
     if not combined:
         return False
@@ -59,6 +87,34 @@ def detect_is_overview_sheet(header_text: str | None, raw_ocr: str | None = "") 
         if marker in folded:
             return True
     return False
+
+
+def extract_municipal_overview_header_metadata(header_text: str | None) -> dict[str, str | None]:
+    """Extracts revisor_name from Obecný prehľad header OCR."""
+    if not header_text:
+        return {"revisor_name": None}
+    revisor_name: str | None = None
+    m_rev = re.search(
+        r"(?:rev[ií]zor\w*)\s*[:\-|]?\s*([A-ZÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ][A-Za-záčďéěíľĺňóôŕřšťúůýžÁČĎÉĚÍĽĹŇÓÔŔŘŠŤÚŮÝŽ.\-\s\u0301]{2,40})",
+        header_text,
+        re.IGNORECASE,
+    )
+    if m_rev:
+        raw_rev = m_rev.group(1).split("|")[0].split("\n")[0].strip(" .,;:-")
+        if (
+            len(raw_rev) >= 3
+            and "meno" not in raw_rev.lower()
+            and "obec" not in raw_rev.lower()
+            and "prehľad" not in raw_rev.lower()
+            and "prehlad" not in raw_rev.lower()
+            and "vypln" not in raw_rev.lower()
+        ):
+            raw_rev = re.sub(r"\bFranti[sš]el\w*\b|\bFranti[sš]ek\w+\b", "František", raw_rev, flags=re.IGNORECASE)
+            raw_rev = re.sub(r"\bMally\u0301?\b", "Mallý", raw_rev, flags=re.IGNORECASE)
+            raw_rev = re.sub(r"\bChlumsky\b", "Chlumský", raw_rev, flags=re.IGNORECASE)
+            raw_rev = re.sub(r"\bEuglius\b|\bJulias\b", "Július", raw_rev, flags=re.IGNORECASE)
+            revisor_name = raw_rev
+    return {"revisor_name": revisor_name}
 
 
 def extract_overview_header_metadata(header_text: str | None) -> dict[str, str | None]:
@@ -263,10 +319,8 @@ def _detect_census_row_boundaries(
     xc = 0.5 * w
 
     bg = float(np.percentile(strip, 78))
-    inv = np.clip(bg - strip.astype(np.float64), 0.0, None)
-
+    inv_u8 = np.clip(bg - strip.astype(np.float32), 0.0, 255.0).astype(np.uint8)
     # Dilate vertically by 3px before horizontal morphological opening so slightly tilted 1-2px lines survive
-    inv_u8 = np.clip(inv, 0, 255).astype(np.uint8)
     inv_dil = cv2.dilate(inv_u8, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)))
     morph_w = max(50, (x1 - x0) // 45)
     horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_w, 1))
@@ -450,8 +504,7 @@ def _detect_overview_subpage_lines(
     xc = page_x0 + 0.5 * page_w
 
     bg = float(np.percentile(strip, 78))
-    inv = np.clip(bg - strip.astype(np.float64), 0.0, None)
-    inv_u8 = np.clip(inv, 0, 255).astype(np.uint8)
+    inv_u8 = np.clip(bg - strip.astype(np.float32), 0.0, 255.0).astype(np.uint8)
     inv_dil = cv2.dilate(inv_u8, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)))
     morph_w = max(45, (x1 - x0) // 30)
     horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_w, 1))
@@ -626,16 +679,16 @@ def slice_census_overview_sheet(
                     )
 
                 has_ink = _overview_row_has_handwriting(stitched_strip)
-                if booklet_page == 4:
+                if booklet_page in (3, 4) or page_half == "full":
                     if has_ink:
-                        # Stop before the 'Súhrn' settlement summary table in the middle of Page 4
-                        if consec_empty >= 2:
+                        # Stop before the 'Súhrn' settlement summary table or revisor signature block
+                        if any_kept_on_subpage and consec_empty >= 2:
                             break
                         consec_empty = 0
                         any_kept_on_subpage = True
                     else:
                         consec_empty += 1
-                        if not any_kept_on_subpage and consec_empty >= 2:
+                        if not any_kept_on_subpage and booklet_page == 4 and consec_empty >= 2:
                             break
                         continue
                 else:

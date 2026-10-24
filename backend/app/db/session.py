@@ -102,6 +102,12 @@ def _ensure_sqlite_columns() -> None:
                 "ON familysearchmatch (fs_person_id)"
             )
         )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_censusmunicipaloverviewdistrict_sheet_row "
+                "ON censusmunicipaloverviewdistrict (census_sheet_id, row_index)"
+            )
+        )
         # Remove any stale unmatched FamilySearchMatch rows (fs_person_id IS NULL or empty)
         try:
             conn.execute(

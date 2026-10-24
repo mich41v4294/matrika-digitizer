@@ -13,7 +13,9 @@ from backend.app.config import settings
 from backend.app.db.models import RecordRow, ScanImage
 from backend.app.pipeline.ai_client import ai_client
 from backend.app.pipeline.census_layout import (
+    detect_is_municipal_overview_sheet,
     detect_is_overview_sheet,
+    extract_municipal_overview_header_metadata,
     extract_overview_header_metadata,
 )
 
@@ -212,10 +214,20 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
     header_path = media_rel_to_path(scan.header_crop_path)
     if not header_path or not header_path.exists():
         return
+    sheet = None
+    if scan.census_sheet_id:
+        from backend.app.db.models import CensusSheet
+
+        sheet = session.get(CensusSheet, scan.census_sheet_id)
+    hdr_prompt = (
+        "Text Recognition:"
+        if (sheet and (sheet.sheet_type in ("overview", "municipal_overview") or not sheet.house_number))
+        else "Table Recognition:"
+    )
     res = await ai_client.chat_completion(
         stage="ocr_header",
         model=settings.model_ocr,
-        prompt="Table Recognition:",
+        prompt=hdr_prompt,
         image_path=header_path,
         image_rel_url=scan.header_crop_path,
         scan_id=scan.id,
@@ -228,11 +240,14 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
         scan.detected_year = year
     if scan.detected_type != "census":
         scan.detected_type = rec_type
-    if scan.census_sheet_id:
-        from backend.app.db.models import CensusSheet
-
-        sheet = session.get(CensusSheet, scan.census_sheet_id)
-        if sheet and detect_is_overview_sheet(raw_text, f"{scan.filename} {sheet.slovakiana_key}"):
+    if sheet:
+        if detect_is_municipal_overview_sheet(raw_text, f"{scan.filename} {sheet.slovakiana_key}"):
+            sheet.sheet_type = "municipal_overview"
+            meta_rev = extract_municipal_overview_header_metadata(raw_text)
+            if meta_rev.get("revisor_name") and not sheet.commissioner_name:
+                sheet.commissioner_name = meta_rev["revisor_name"]
+            session.add(sheet)
+        elif detect_is_overview_sheet(raw_text, f"{scan.filename} {sheet.slovakiana_key}"):
             sheet.sheet_type = "overview"
             meta = extract_overview_header_metadata(raw_text)
             if meta.get("obvod_number") and not sheet.obvod_number:
@@ -267,7 +282,7 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
         if sheet:
             if sheet.is_blackened:
                 is_blackened_census = True
-            if sheet.sheet_type == "overview":
+            if sheet.sheet_type in ("overview", "municipal_overview"):
                 is_overview_sheet = True
 
     right_cell_sections: dict[str, str] = {}

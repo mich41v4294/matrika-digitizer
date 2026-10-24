@@ -1540,3 +1540,69 @@ class LLMCensusOverviewRowSchema(BaseModel):
         except Exception:
             return 0.85
 
+
+class LLMCensusMunicipalOverviewRowSchema(BaseModel):
+    """
+    Type-safe Pydantic schema for extracting a single census district (obvod) or summary row
+    from an Obecný prehľad (1930/1940 Municipal Overview Sheet, Form X).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    ordinal_number: str | None = None
+    settlement_name: str | None = None
+    obvod_number: str | None = None
+    commissioner_name: str | None = None
+    houses_total: int | None = None
+    houses_inhabited: int | None = None
+    houses_uninhabited: int | None = None
+    household_count: int | None = None
+    present_persons_count: int | None = None
+    remarks: str | None = None
+    is_summary_row: bool = False
+    confidence: float = Field(default=0.90, ge=0.0, le=1.0)
+
+    @field_validator(
+        "ordinal_number",
+        "settlement_name",
+        "obvod_number",
+        "commissioner_name",
+        "remarks",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_muni_opt_str(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s or s.lower() in {"null", "none", "n/a", "undefined"}:
+            return None
+        return s
+
+    @field_validator(
+        "houses_total",
+        "houses_inhabited",
+        "houses_uninhabited",
+        "household_count",
+        "present_persons_count",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_muni_opt_int(cls, v: Any) -> int | None:
+        if v is None or str(v).strip() == "":
+            return None
+        try:
+            m = re.search(r"(\d+)", str(v))
+            return int(m.group(1)) if m else None
+        except Exception:
+            return None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_muni_confidence(cls, v: Any) -> float:
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except Exception:
+            return 0.90
+
+

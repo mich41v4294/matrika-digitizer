@@ -1431,6 +1431,170 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
             self.assertEqual(batch_res["scans_skipped"], 1)
             self.assertEqual(ocr_called_scan_ids, [sc_todo_id])
 
+    def test_municipal_overview_sheet_detection_extraction_and_district_joining(self) -> None:
+        import asyncio
+        import re as _re
+        from unittest.mock import patch
+        from sqlmodel import select
+        from backend.app.config import settings
+        from backend.app.db.models import CensusMunicipalOverviewDistrict, ScanImage
+        from backend.app.pipeline.ai_client import ai_client
+        from backend.app.pipeline.census_layout import (
+            detect_is_municipal_overview_sheet,
+            detect_is_overview_sheet,
+        )
+        from backend.app.pipeline.extraction_stage import extract_census_overview_sheet
+
+        obecny_header = (
+            "Sčítanie ľudu 1930\nPolitický okres Hlohovec\nObec Hornie Zelenice\n"
+            "Meno sčítacieho revízora Františel Mallý\nObecný prehľad\n"
+            "vyplní sčítací revízor, ale len v obciach rozdelených na dva alebo viacej sčítacích obvodov.\n"
+            "Na koniec vypočíta súčet pre celú obec."
+        )
+        district_header = (
+            "Sčítanie ľudu 1930\nPolitický okres Hlohovec\nČíslo sčítacieho obvodu I.\n"
+            "Obec Horné Zelenice\nMeno sčítacieho komisára Eduard Zoltický\n"
+            "Prehľad sčítacieho obvodu\nRadové číslo osád | Meno osady | Popisné číslo domu | Meno majiteľa domu"
+        )
+        self.assertTrue(detect_is_municipal_overview_sheet(obecny_header))
+        self.assertFalse(detect_is_overview_sheet(obecny_header))
+        self.assertFalse(detect_is_municipal_overview_sheet(district_header))
+        self.assertTrue(detect_is_overview_sheet(district_header))
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            settings, "crops_dir", Path(tmp_dir) / "crops"
+        ), patch(
+            "backend.app.pipeline.ocr_stage.settings.crops_dir", Path(tmp_dir) / "crops"
+        ):
+            tmp_path = Path(tmp_dir)
+            h, w = 1400, 1000
+            front_img = np.full((h, w, 3), 240, dtype=np.uint8)
+            for i in range(6):
+                y = 480 + i * 50
+                cv2.line(front_img, (40, y), (w - 40, y), (20, 20, 20), 6 if i == 0 else 2)
+                if 1 <= i <= 4:
+                    for col_x in (60, 180, 320, 440, 520, 620, 740):
+                        cv2.putText(
+                            front_img,
+                            f"Obvod {i}",
+                            (col_x, y - 16),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.65,
+                            (15, 15, 15),
+                            2,
+                        )
+            front_path = tmp_path / "cair-ko2a0od_front.jpg"
+            cv2.imwrite(str(front_path), front_img)
+
+            test_engine = create_engine("sqlite:///:memory:")
+            SQLModel.metadata.create_all(test_engine)
+            ensure_fts_schema(test_engine)
+
+            with Session(test_engine) as session:
+                sheet = CensusSheet(
+                    slovakiana_key="cair-ko2a0od",
+                    census_year=1930,
+                    district="Hlohovec",
+                    district_key="715",
+                    municipality="Horné Zelenice",
+                    municipality_key="7647",
+                    municipality_folded="horne zelenice",
+                    box_number="1196",
+                    sheet_number="0108",
+                    sheet_type="overview",  # Even if misclassified as overview initially!
+                    download_status="downloaded",
+                )
+                ov1 = CensusSheet(
+                    slovakiana_key="cair-ko270vr",
+                    census_year=1930,
+                    district="Hlohovec",
+                    municipality="Horné Zelenice",
+                    municipality_folded="horne zelenice",
+                    box_number="1196",
+                    sheet_number="0074",
+                    sheet_type="overview",
+                )
+                ov2 = CensusSheet(
+                    slovakiana_key="cair-ko270vs",
+                    census_year=1930,
+                    district="Hlohovec",
+                    municipality="Horné Zelenice",
+                    municipality_folded="horne zelenice",
+                    box_number="1196",
+                    sheet_number="0075",
+                    sheet_type="overview",
+                )
+                session.add_all([sheet, ov1, ov2])
+                session.commit()
+                session.refresh(sheet)
+                session.refresh(ov1)
+                session.refresh(ov2)
+
+                front_scan = ScanImage(
+                    census_sheet_id=sheet.id,
+                    page_side="front",
+                    filename="cair-ko2a0od_front.jpg",
+                    original_path=str(front_path),
+                    detected_year="1930",
+                    detected_type="census",
+                    status="uploaded",
+                )
+                session.add(front_scan)
+                session.commit()
+                session.refresh(front_scan)
+                sheet.front_scan_id = front_scan.id
+                session.add(sheet)
+                session.commit()
+
+                row_ocrs = {
+                    1: "1 | Homie Zeleuca | I. | Edward Lollicky | 55 | 52 | 3 | 81 | 420",
+                    2: "11 | Auchal Rafajidus | 53 | 50 | 23 | 72 | 344",
+                    3: "Spolu | 105 | 102 |  | 153 | 769",
+                    4: "v Horných Zeleniciach, dňa 10. dec. 1930 | 761",
+                }
+
+                async def fake_chat_completion(**kwargs: object) -> dict[str, object]:
+                    stage = str(kwargs.get("stage") or "")
+                    if stage == "ocr_header":
+                        return {"content": obecny_header}
+                    img_rel = str(kwargs.get("image_rel_url") or "")
+                    m_r = _re.search(r"row_0*(\d+)_", img_rel)
+                    r_idx = int(m_r.group(1)) if m_r else 1
+                    return {"content": row_ocrs.get(r_idx, "")}
+
+                with patch.object(ai_client, "chat_completion", side_effect=fake_chat_completion):
+                    houses = asyncio.run(extract_census_overview_sheet(session, sheet, front_scan, None))
+
+                self.assertEqual(houses, [])
+                session.refresh(sheet)
+                self.assertEqual(sheet.sheet_type, "municipal_overview")
+                self.assertEqual(sheet.commissioner_name, "František Mallý")
+
+                districts = list(
+                    session.exec(
+                        select(CensusMunicipalOverviewDistrict)
+                        .where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+                        .order_by(CensusMunicipalOverviewDistrict.row_index.asc())
+                    ).all()
+                )
+                self.assertEqual(len(districts), 3)
+                d1, d2, d_sum = districts[0], districts[1], districts[2]
+                self.assertEqual(d1.obvod_number, "I")
+                self.assertEqual(d1.commissioner_name, "Eduard Zoltický")
+                self.assertEqual((d1.houses_total, d1.houses_inhabited, d1.houses_uninhabited), (53, 52, 1))
+                self.assertEqual((d1.household_count, d1.present_persons_count), (81, 420))
+                self.assertEqual(d1.matched_overview_sheet_id, ov1.id)
+
+                self.assertEqual(d2.obvod_number, "II")
+                self.assertEqual(d2.commissioner_name, "Michal Rafajdus")
+                self.assertEqual((d2.houses_total, d2.houses_inhabited, d2.houses_uninhabited), (52, 50, 2))
+                self.assertEqual((d2.household_count, d2.present_persons_count), (72, 344))
+                self.assertEqual(d2.matched_overview_sheet_id, ov2.id)
+
+                self.assertTrue(d_sum.is_summary_row)
+                self.assertEqual((d_sum.houses_total, d_sum.houses_inhabited, d_sum.houses_uninhabited), (105, 102, 3))
+                self.assertEqual((d_sum.household_count, d_sum.present_persons_count), (153, 764))
+
 
 
 if __name__ == "__main__":

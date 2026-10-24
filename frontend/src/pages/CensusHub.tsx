@@ -2639,145 +2639,11 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
         featureFlags.census_overview_sheets &&
         activeTab === "overview" ? (
           <div className="space-y-4">
-            {/* Municipal Overview ('Obecný prehľad') Section joining District Overviews */}
-            {muniOverview?.municipal_overview_sheets &&
-              muniOverview.municipal_overview_sheets.length > 0 && (
-                <div className="bg-white rounded-xl p-4 border border-indigo-300 space-y-3">
-                  {muniOverview.municipal_overview_sheets.map((mov) => {
-                    const dists = mov.municipal_overview_districts || [];
-                    const distOnly = dists.filter((d) => !d.is_summary_row);
-                    const sumRow = dists.find((d) => d.is_summary_row) || null;
-                    const totHouses =
-                      sumRow?.houses_total ??
-                      distOnly.reduce((a, d) => a + (d.houses_total || 0), 0);
-                    const totInhab =
-                      sumRow?.houses_inhabited ??
-                      distOnly.reduce((a, d) => a + (d.houses_inhabited || 0), 0);
-                    const totUninhab =
-                      sumRow?.houses_uninhabited ??
-                      distOnly.reduce((a, d) => a + (d.houses_uninhabited || 0), 0);
-                    const totUnits =
-                      sumRow?.household_count ??
-                      distOnly.reduce((a, d) => a + (d.household_count || 0), 0);
-                    const totPersons =
-                      sumRow?.present_persons_count ??
-                      distOnly.reduce((a, d) => a + (d.present_persons_count || 0), 0);
-                    return (
-                      <div key={mov.slovakiana_id} className="space-y-3">
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div className="flex items-start gap-3">
-                            {mov.thumbnail_url && (
-                              <img
-                                src={mov.thumbnail_url}
-                                alt={mov.slovakiana_id}
-                                className="w-20 h-16 object-cover rounded-lg border border-indigo-300 bg-stone-200 shrink-0"
-                              />
-                            )}
-                            <div className="space-y-1">
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
-                                  {mov.slovakiana_id}
-                                </span>
-                                <span className="px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-950 border border-indigo-300 text-xs font-bold">
-                                  {lang === "sk"
-                                    ? "Obecný prehľad (Súhrn obvodov)"
-                                    : "Municipal Overview (Districts Summary)"}
-                                </span>
-                                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-xs font-bold">
-                                  {mov.census_year}
-                                </span>
-                              </div>
-                              <div className="font-bold text-sm text-stone-900">
-                                {mov.municipality_name}
-                                {mov.district_name ? ` (okr. ${mov.district_name})` : ""}
-                                {mov.commissioner_name
-                                  ? ` · ${lang === "sk" ? "Sčítací revízor:" : "Revisor:"} ${
-                                      mov.commissioner_name
-                                    }`
-                                  : ""}
-                              </div>
-                              <div className="text-xs text-stone-700 flex flex-wrap items-center gap-2">
-                                <span>
-                                  {lang === "sk" ? "Spojené obvody:" : "Joined districts:"}{" "}
-                                  <strong>{distOnly.length}</strong>
-                                </span>
-                                <span>·</span>
-                                <span>
-                                  {lang === "sk" ? "Domov spolu:" : "Total houses:"}{" "}
-                                  <strong>
-                                    {totHouses} ({totInhab} obýv. / {totUninhab} neobýv.)
-                                  </strong>
-                                </span>
-                                <span>·</span>
-                                <span>
-                                  {lang === "sk" ? "Bytové strany:" : "Dwelling units:"}{" "}
-                                  <strong>{totUnits}</strong>
-                                </span>
-                                <span>·</span>
-                                <span>
-                                  {lang === "sk" ? "Prítomné osoby:" : "Present residents:"}{" "}
-                                  <strong>{totPersons}</strong>
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                          <Link
-                            to={buildSheetDetailLink(mov.slovakiana_id)}
-                            className="px-3 py-1.5 min-h-[34px] rounded-lg bg-indigo-800 hover:bg-indigo-900 text-white font-semibold text-xs inline-flex items-center gap-1.5"
-                          >
-                            <Building2 className="w-3.5 h-3.5" />
-                            <span>
-                              {lang === "sk"
-                                ? "Otvoriť obecný prehľad"
-                                : "Open municipal overview"}
-                            </span>
-                          </Link>
-                        </div>
-
-                        {distOnly.length > 0 && (
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 pt-1">
-                            {distOnly.map((d) => (
-                              <div
-                                key={d.id}
-                                className="bg-indigo-50/60 border border-indigo-200 rounded-lg px-3 py-2 text-xs flex flex-wrap items-center justify-between gap-2"
-                              >
-                                <div className="space-y-0.5">
-                                  <div className="font-bold text-indigo-950">
-                                    {lang === "sk" ? "Obvod č." : "District #"}{" "}
-                                    {d.obvod_number || d.row_index} ·{" "}
-                                    {d.commissioner_name || "—"}
-                                  </div>
-                                  <div className="text-stone-700">
-                                    {d.houses_total ?? "—"} domov ({d.houses_inhabited ?? "—"}{" "}
-                                    obýv. / {d.houses_uninhabited ?? 0} neobýv.) ·{" "}
-                                    {d.household_count ?? "—"} byt. strán ·{" "}
-                                    <strong>{d.present_persons_count ?? "—"} osôb</strong>
-                                  </div>
-                                </div>
-                                {d.matched_overview_slovakiana_key && (
-                                  <Link
-                                    to={buildSheetDetailLink(d.matched_overview_slovakiana_key)}
-                                    className="px-2.5 py-1 rounded bg-purple-100 hover:bg-purple-200 text-purple-950 border border-purple-300 font-semibold inline-flex items-center gap-1"
-                                  >
-                                    <span>
-                                      {lang === "sk" ? "Prehľad domov" : "House overview"}{" "}
-                                      ({d.matched_overview_slovakiana_key})
-                                    </span>
-                                  </Link>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-            {/* Top Section: Prehľady sčítacích obvodov cards */}
-            {!muniOverview?.overview_sheets ||
-            muniOverview.overview_sheets.length === 0 ? (
+            {/* Unified Section: Obecný prehľad (Súhrn obvodov) + Prehľady sčítacích obvodov (Prehľady domov) */}
+            {(!muniOverview?.overview_sheets ||
+              muniOverview.overview_sheets.length === 0) &&
+            (!muniOverview?.municipal_overview_sheets ||
+              muniOverview.municipal_overview_sheets.length === 0) ? (
               <div className="bg-white rounded-xl px-4 py-2.5 border border-stone-300 flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm">
                 <div className="flex items-center gap-2 font-bold text-stone-800">
                   <Building2 className="w-4 h-4 text-purple-700 shrink-0" />
@@ -2800,108 +2666,275 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 </span>
               </div>
             ) : (
-            <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
-                    <Building2 className="w-5 h-5 text-purple-700" />
-                    <span>
+              <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                      <Building2 className="w-5 h-5 text-purple-700" />
+                      <span>
+                        {lang === "sk"
+                          ? "Prehľady sčítacích obvodov"
+                          : "District Overview Sheets"}{" "}
+                        ({muniOverview?.overview_sheets.length ?? 0})
+                      </span>
+                    </h2>
+                    <p className="text-xs sm:text-sm text-stone-600">
                       {lang === "sk"
-                        ? "Prehľady sčítacích obvodov"
-                        : "District Overview Sheets"}{" "}
-                      ({muniOverview?.overview_sheets.length ?? 0})
-                    </span>
-                  </h2>
-                  <p className="text-xs sm:text-sm text-stone-600">
-                    {lang === "sk"
-                      ? "Sumárne hárky sčítacích komisárov so zoznamom všetkých domov, majiteľov a počtom prítomných osôb v obci."
-                      : "Summary sheets by census commissioners listing all houses, owners, and present residents in the municipality."}
-                  </p>
+                        ? "Sumárne hárky sčítacích komisárov so zoznamom všetkých domov, majiteľov a počtom prítomných osôb v obci."
+                        : "Summary sheets by census commissioners listing all houses, owners, and present residents in the municipality."}
+                    </p>
+                  </div>
                 </div>
-              </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {muniOverview.overview_sheets.map((ov) => (
-                    <div
-                      key={ov.slovakiana_id}
-                      className="bg-purple-50/50 rounded-xl p-3.5 border border-purple-200 flex flex-col justify-between gap-3"
-                    >
-                      <div className="flex gap-3">
-                        {ov.thumbnail_url ? (
-                          <img
-                            src={ov.thumbnail_url}
-                            alt={ov.slovakiana_id}
-                            className="w-20 h-16 object-cover rounded-lg border border-purple-300 bg-stone-200 shrink-0"
-                          />
-                        ) : (
-                          <div className="w-20 h-16 rounded-lg border border-purple-300 bg-purple-100 flex items-center justify-center text-xs font-bold text-purple-900 shrink-0">
-                            Obvod
-                          </div>
-                        )}
-                        <div className="min-w-0 flex-1 space-y-1">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
-                              {ov.slovakiana_id}
-                            </span>
-                            <span className="px-2 py-0.5 rounded-full bg-purple-200 text-purple-950 text-xs font-bold">
-                              {lang === "sk" ? "Prehľad obvodu" : "District overview"}{" "}
-                              {ov.obvod_number ? `č. ${ov.obvod_number}` : ""}
-                            </span>
-                            <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-xs font-bold">
-                              {ov.census_year}
-                            </span>
-                          </div>
-                          <div className="font-bold text-sm text-stone-900">
-                            {ov.municipality_name}
-                            {ov.district_name ? ` (okr. ${ov.district_name})` : ""}
-                          </div>
-                          <div className="text-xs text-stone-700 flex flex-wrap items-center gap-2">
-                            {ov.commissioner_name && (
-                              <span>
-                                {lang === "sk" ? "Komisár:" : "Commissioner:"}{" "}
-                                <strong>{ov.commissioner_name}</strong>
+                {/* Top Banner inside the card: Obecný prehľad (Tlačivo X) if present */}
+                {muniOverview?.municipal_overview_sheets &&
+                  muniOverview.municipal_overview_sheets.map((mov) => {
+                    const dists = mov.municipal_overview_districts || [];
+                    const distOnly = dists.filter((d) => !d.is_summary_row);
+                    const sumRow = dists.find((d) => d.is_summary_row) || null;
+                    const totHouses =
+                      sumRow?.houses_total ??
+                      distOnly.reduce((a, d) => a + (d.houses_total || 0), 0);
+                    const totInhab =
+                      sumRow?.houses_inhabited ??
+                      distOnly.reduce((a, d) => a + (d.houses_inhabited || 0), 0);
+                    const totUninhab =
+                      sumRow?.houses_uninhabited ??
+                      distOnly.reduce((a, d) => a + (d.houses_uninhabited || 0), 0);
+                    const totUnits =
+                      sumRow?.household_count ??
+                      distOnly.reduce((a, d) => a + (d.household_count || 0), 0);
+                    const totPersons =
+                      sumRow?.present_persons_count ??
+                      distOnly.reduce((a, d) => a + (d.present_persons_count || 0), 0);
+                    return (
+                      <div
+                        key={mov.slovakiana_id}
+                        className="bg-indigo-50/70 rounded-xl p-3.5 border border-indigo-200 flex flex-wrap items-center justify-between gap-3"
+                      >
+                        <div className="flex items-start gap-3 min-w-0">
+                          {mov.thumbnail_url && (
+                            <img
+                              src={mov.thumbnail_url}
+                              alt={mov.slovakiana_id}
+                              className="w-20 h-16 object-cover rounded-lg border border-indigo-300 bg-stone-200 shrink-0"
+                            />
+                          )}
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
+                                {mov.slovakiana_id}
                               </span>
-                            )}
-                            <span>
-                              {lang === "sk" ? "Zaznamenaných domov:" : "Recorded houses:"}{" "}
-                              <strong>{ov.overview_houses_count ?? 0}</strong>
-                            </span>
+                              <span className="px-2.5 py-0.5 rounded-full bg-indigo-200 text-indigo-950 text-xs font-bold">
+                                {lang === "sk"
+                                  ? "Obecný prehľad (Súhrn obvodov)"
+                                  : "Municipal Overview (Districts Summary)"}
+                              </span>
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-xs font-bold">
+                                {mov.census_year}
+                              </span>
+                            </div>
+                            <div className="font-bold text-sm text-stone-900">
+                              {mov.municipality_name}
+                              {mov.district_name ? ` (okr. ${mov.district_name})` : ""}
+                              {mov.commissioner_name
+                                ? ` · ${lang === "sk" ? "Sčítací revízor:" : "Revisor:"} ${
+                                    mov.commissioner_name
+                                  }`
+                                : ""}
+                            </div>
+                            <div className="text-xs text-stone-800 flex flex-wrap items-center gap-2">
+                              <span>
+                                {lang === "sk" ? "Spojené obvody:" : "Joined districts:"}{" "}
+                                <strong>{distOnly.length}</strong>
+                              </span>
+                              <span>·</span>
+                              <span>
+                                {lang === "sk" ? "Domov spolu:" : "Total houses:"}{" "}
+                                <strong>
+                                  {totHouses} ({totInhab} obýv. / {totUninhab} neobýv.)
+                                </strong>
+                              </span>
+                              <span>·</span>
+                              <span>
+                                {lang === "sk" ? "Bytové strany:" : "Dwelling units:"}{" "}
+                                <strong>{totUnits}</strong>
+                              </span>
+                              <span>·</span>
+                              <span>
+                                {lang === "sk" ? "Prítomné osoby:" : "Present residents:"}{" "}
+                                <strong>{totPersons}</strong>
+                              </span>
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      <div className="flex items-center justify-between gap-2 pt-2 border-t border-purple-200/70">
-                        <Link
-                          to={buildSheetDetailLink(ov.slovakiana_id)}
-                          className="px-3 py-1.5 min-h-[34px] rounded-lg bg-purple-800 hover:bg-purple-900 text-white font-semibold text-xs inline-flex items-center gap-1.5"
-                        >
-                          <Building2 className="w-3.5 h-3.5" />
-                          <span>
-                            {lang === "sk"
-                              ? "Otvoriť prehľad obvodu"
-                              : "Open district overview"}
-                          </span>
-                        </Link>
-                        <button
-                          type="button"
-                          onClick={() => handleProcessSingleSheet(ov.slovakiana_id)}
-                          disabled={processingSheetId === ov.slovakiana_id}
-                          className="px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                        >
-                          {processingSheetId === ov.slovakiana_id ? (
-                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Download className="w-3.5 h-3.5" />
-                          )}
-                          <span>
-                            {lang === "sk" ? "Prečítať OCR obvodu" : "Read district OCR"}
-                          </span>
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Link
+                            to={buildSheetDetailLink(mov.slovakiana_id)}
+                            className="px-3 py-1.5 min-h-[34px] rounded-lg bg-indigo-800 hover:bg-indigo-900 text-white font-semibold text-xs inline-flex items-center gap-1.5"
+                          >
+                            <Building2 className="w-3.5 h-3.5" />
+                            <span>
+                              {lang === "sk"
+                                ? "Otvoriť obecný prehľad"
+                                : "Open municipal overview"}
+                            </span>
+                          </Link>
+                          <button
+                            type="button"
+                            onClick={() => handleProcessSingleSheet(mov.slovakiana_id)}
+                            disabled={processingSheetId === mov.slovakiana_id}
+                            className="px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                          >
+                            {processingSheetId === mov.slovakiana_id ? (
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Download className="w-3.5 h-3.5" />
+                            )}
+                            <span>
+                              {lang === "sk" ? "Prečítať OCR" : "Read OCR"}
+                            </span>
+                          </button>
+                        </div>
                       </div>
+                    );
+                  })}
+
+                {/* Grid of District Overview Cards (Prehľad obvodu č. I, II, ...) */}
+                {muniOverview?.overview_sheets &&
+                  muniOverview.overview_sheets.length > 0 && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {muniOverview.overview_sheets.map((ov) => {
+                        const allMuniDists = (
+                          muniOverview.municipal_overview_sheets || []
+                        ).flatMap((m) =>
+                          (m.municipal_overview_districts || []).filter(
+                            (d) => !d.is_summary_row
+                          )
+                        );
+                        const matchedDist =
+                          allMuniDists.find(
+                            (d) =>
+                              d.matched_overview_sheet_id === ov.id ||
+                              d.matched_overview_slovakiana_key === ov.slovakiana_id ||
+                              (ov.obvod_number &&
+                                d.obvod_number &&
+                                d.obvod_number.toUpperCase() ===
+                                  ov.obvod_number.toUpperCase())
+                          ) || null;
+                        const effObvod = ov.obvod_number || matchedDist?.obvod_number || null;
+                        const effComm =
+                          matchedDist?.commissioner_name || ov.commissioner_name || null;
+
+                        return (
+                          <div
+                            key={ov.slovakiana_id}
+                            className="bg-purple-50/50 rounded-xl p-3.5 border border-purple-200 flex flex-col justify-between gap-3"
+                          >
+                            <div className="flex gap-3">
+                              {ov.thumbnail_url ? (
+                                <img
+                                  src={ov.thumbnail_url}
+                                  alt={ov.slovakiana_id}
+                                  className="w-20 h-16 object-cover rounded-lg border border-purple-300 bg-stone-200 shrink-0"
+                                />
+                              ) : (
+                                <div className="w-20 h-16 rounded-lg border border-purple-300 bg-purple-100 flex items-center justify-center text-xs font-bold text-purple-900 shrink-0">
+                                  Obvod
+                                </div>
+                              )}
+                              <div className="min-w-0 flex-1 space-y-1">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
+                                    {ov.slovakiana_id}
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded-full bg-purple-200 text-purple-950 text-xs font-bold">
+                                    {lang === "sk" ? "Prehľad obvodu" : "District overview"}{" "}
+                                    {effObvod ? `č. ${effObvod}` : ""}
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-xs font-bold">
+                                    {ov.census_year}
+                                  </span>
+                                </div>
+                                <div className="font-bold text-sm text-stone-900">
+                                  {ov.municipality_name}
+                                  {ov.district_name ? ` (okr. ${ov.district_name})` : ""}
+                                </div>
+                                <div className="text-xs text-stone-700 flex flex-wrap items-center gap-2">
+                                  {effComm && (
+                                    <span>
+                                      {lang === "sk" ? "Komisár:" : "Commissioner:"}{" "}
+                                      <strong>{effComm}</strong>
+                                    </span>
+                                  )}
+                                  <span>
+                                    {lang === "sk"
+                                      ? "Zaznamenaných domov:"
+                                      : "Recorded houses:"}{" "}
+                                    <strong>{ov.overview_houses_count ?? 0}</strong>
+                                  </span>
+                                </div>
+                                {matchedDist && (
+                                  <div className="text-xs text-indigo-950 bg-indigo-100/70 border border-indigo-200 rounded-md px-2 py-1 mt-1">
+                                    {lang === "sk"
+                                      ? `Podľa obecného prehľadu: ${
+                                          matchedDist.houses_total ?? "—"
+                                        } domov (${matchedDist.houses_inhabited ?? "—"} obýv. / ${
+                                          matchedDist.houses_uninhabited ?? 0
+                                        } neobýv.) · ${
+                                          matchedDist.household_count ?? "—"
+                                        } byt. strán · `
+                                      : `Per municipal overview: ${
+                                          matchedDist.houses_total ?? "—"
+                                        } houses · ${
+                                          matchedDist.household_count ?? "—"
+                                        } units · `}
+                                    <strong>
+                                      {matchedDist.present_persons_count ?? "—"}{" "}
+                                      {lang === "sk" ? "osôb" : "people"}
+                                    </strong>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2 pt-2 border-t border-purple-200/70">
+                              <Link
+                                to={buildSheetDetailLink(ov.slovakiana_id)}
+                                className="px-3 py-1.5 min-h-[34px] rounded-lg bg-purple-800 hover:bg-purple-900 text-white font-semibold text-xs inline-flex items-center gap-1.5"
+                              >
+                                <Building2 className="w-3.5 h-3.5" />
+                                <span>
+                                  {lang === "sk"
+                                    ? "Otvoriť prehľad obvodu"
+                                    : "Open district overview"}
+                                </span>
+                              </Link>
+                              <button
+                                type="button"
+                                onClick={() => handleProcessSingleSheet(ov.slovakiana_id)}
+                                disabled={processingSheetId === ov.slovakiana_id}
+                                className="px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                              >
+                                {processingSheetId === ov.slovakiana_id ? (
+                                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5" />
+                                )}
+                                <span>
+                                  {lang === "sk"
+                                    ? "Prečítať OCR obvodu"
+                                    : "Read district OCR"}
+                                </span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                  ))}
+                  )}
               </div>
-            </div>
             )}
 
             {/* Main Table: Adresár domov a rodín v obci (`Dom č. 1 .. N`) */}

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { Suspense, lazy, useEffect, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import {
   Activity,
@@ -12,14 +12,15 @@ import {
   Upload,
 } from "lucide-react";
 import HomeDashboard from "./pages/HomeDashboard";
-import QuestionCenter from "./pages/QuestionCenter";
-import FamilySearchReview from "./pages/FamilySearchReview";
-import BulkUpload from "./pages/BulkUpload";
-import BooksOverview from "./pages/BooksOverview";
-import CensusHub from "./pages/CensusHub";
-import CensusSheetView from "./pages/CensusSheetView";
-import DebugWorkflow from "./pages/DebugWorkflow";
 import { useFeatureFlags } from "./featureFlags";
+
+const QuestionCenter = lazy(() => import("./pages/QuestionCenter"));
+const FamilySearchReview = lazy(() => import("./pages/FamilySearchReview"));
+const BulkUpload = lazy(() => import("./pages/BulkUpload"));
+const BooksOverview = lazy(() => import("./pages/BooksOverview"));
+const CensusHub = lazy(() => import("./pages/CensusHub"));
+const CensusSheetView = lazy(() => import("./pages/CensusSheetView"));
+const DebugWorkflow = lazy(() => import("./pages/DebugWorkflow"));
 
 export interface SystemStatus {
   pangolin_public_url: string;
@@ -318,6 +319,13 @@ export default function App() {
       )}
 
       <main className="flex-1 w-full max-w-none mx-auto px-4 lg:px-6 py-5 overflow-x-hidden">
+        <Suspense
+          fallback={
+            <div className="p-8 text-center text-sm font-medium text-stone-600">
+              {lang === "sk" ? "Načítavam…" : "Loading…"}
+            </div>
+          }
+        >
         <Routes>
           <Route
             path="/"
@@ -414,6 +422,7 @@ export default function App() {
             element={<BulkUpload lang={lang} refreshStatus={fetchStatus} />}
           />
         </Routes>
+        </Suspense>
       </main>
 
       <footer className="bg-stone-200 border-t border-stone-300 py-3 px-4 text-center text-stone-700 text-xs space-y-1.5">

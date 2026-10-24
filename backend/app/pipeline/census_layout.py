@@ -318,7 +318,7 @@ def _detect_census_row_boundaries(
     tan_a = float(np.tan(np.deg2rad(angle_deg)))
     xc = 0.5 * w
 
-    bg = float(np.percentile(strip, 78))
+    bg = float(np.percentile(strip[::4, ::4], 78)) if strip.size >= 64 else float(np.percentile(strip, 78))
     inv_u8 = np.clip(bg - strip.astype(np.float32), 0.0, 255.0).astype(np.uint8)
     # Dilate vertically by 3px before horizontal morphological opening so slightly tilted 1-2px lines survive
     inv_dil = cv2.dilate(inv_u8, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)))
@@ -503,7 +503,7 @@ def _detect_overview_subpage_lines(
     tan_a = float(np.tan(np.deg2rad(angle_deg)))
     xc = page_x0 + 0.5 * page_w
 
-    bg = float(np.percentile(strip, 78))
+    bg = float(np.percentile(strip[::4, ::4], 78)) if strip.size >= 64 else float(np.percentile(strip, 78))
     inv_u8 = np.clip(bg - strip.astype(np.float32), 0.0, 255.0).astype(np.uint8)
     inv_dil = cv2.dilate(inv_u8, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)))
     morph_w = max(45, (x1 - x0) // 30)

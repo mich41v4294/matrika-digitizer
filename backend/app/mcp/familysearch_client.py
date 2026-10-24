@@ -1392,7 +1392,7 @@ class FamilySearchMcpManager:
                     or fact.birth_place_raw
                     or place_std
                 )
-                spouse_given, spouse_surname = _split_spouse_name(fact, session)
+                spouse_given, spouse_surname = _split_spouse_name(fact, session, peers=facts)
 
                 search_res: dict[str, Any] | None = None
                 best: dict[str, Any] | None = None
@@ -1591,6 +1591,18 @@ def match_census_to_local_matrika(
         candidates_stmt = candidates_stmt.where(
             PersonFact.event_year >= census_fact.birth_year_est - 4,
             PersonFact.event_year <= census_fact.birth_year_est + 4,
+        )
+    skel_vals = [s for s in (sur_skel, maiden_skel) if s]
+    if skel_vals and given_cid:
+        candidates_stmt = candidates_stmt.where(
+            (PersonFact.surname_skeleton.in_(skel_vals))  # type: ignore[union-attr]
+            | (PersonFact.given_canonical_id == given_cid)
+            | (PersonFact.surname_skeleton.is_(None))  # type: ignore[union-attr]
+        )
+    elif skel_vals:
+        candidates_stmt = candidates_stmt.where(
+            (PersonFact.surname_skeleton.in_(skel_vals))  # type: ignore[union-attr]
+            | (PersonFact.surname_skeleton.is_(None))  # type: ignore[union-attr]
         )
     candidates = list(session.exec(candidates_stmt).all())
 

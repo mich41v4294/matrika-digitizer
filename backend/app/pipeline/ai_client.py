@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from functools import lru_cache
 import io
 import json
 import re
@@ -21,8 +22,9 @@ from backend.app.db.session import engine
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
-def encode_image_base64(image_path: Path, max_width: int = 2000) -> str:
-    with Image.open(image_path) as img:
+@lru_cache(maxsize=256)
+def _encode_image_base64_cached(path_str: str, mtime_ns: int, max_width: int) -> str:
+    with Image.open(path_str) as img:
         rgb = img.convert("RGB")
         if rgb.width > max_width:
             ratio = max_width / float(rgb.width)
@@ -30,6 +32,15 @@ def encode_image_base64(image_path: Path, max_width: int = 2000) -> str:
         buf = io.BytesIO()
         rgb.save(buf, format="JPEG", quality=86)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def encode_image_base64(image_path: Path, max_width: int = 2000) -> str:
+    resolved = Path(image_path).resolve()
+    try:
+        mtime_ns = resolved.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return _encode_image_base64_cached(str(resolved), mtime_ns, max_width)
 
 
 _JSON_KEY_ALIASES: dict[str, str] = {
@@ -156,8 +167,15 @@ def extract_json_object(raw_text: str, response_model: type[BaseModel] | None = 
         except Exception:
             pass
     # Scan for a JSON object starting with `{\s*"` (quoted JSON key) so bare `{` in prose (e.g. "starting { ending }") is ignored
+    decoder = json.JSONDecoder()
     brace_positions = [m.start() for m in re.finditer(r'\{\s*"', cleaned)]
     for start_idx in brace_positions:
+        try:
+            obj, _ = decoder.raw_decode(cleaned, start_idx)
+            if isinstance(obj, dict):
+                return normalize_json_keys(obj, response_model=response_model)
+        except Exception:
+            pass
         end_idx = cleaned.rfind("}")
         while end_idx > start_idx:
             candidate = cleaned[start_idx : end_idx + 1]
@@ -234,10 +252,19 @@ def split_thinking_and_content(
             stripped_fence = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
             stripped_fence = re.sub(r"\s*```$", "", stripped_fence).strip()
             # Find a real JSON object starting with `{\s*"` inside text
+            decoder = json.JSONDecoder()
             found_json_str: str | None = None
             found_span: tuple[int, int] | None = None
             for m in re.finditer(r'\{\s*"', stripped_fence):
                 s_idx = m.start()
+                try:
+                    parsed_cand, end_pos = decoder.raw_decode(stripped_fence, s_idx)
+                    if isinstance(parsed_cand, dict):
+                        found_json_str = stripped_fence[s_idx:end_pos]
+                        found_span = (s_idx, end_pos)
+                        break
+                except Exception:
+                    pass
                 e_idx = stripped_fence.rfind("}")
                 while e_idx > s_idx:
                     cand = stripped_fence[s_idx : e_idx + 1]

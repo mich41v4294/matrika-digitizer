@@ -636,6 +636,7 @@ def _warp_piecewise_angled_strip(
         h_r = (bot_model.eval_y(x1) - top_model.eval_y(x1)) + 2 * pad_y
         out_h = max(24, int(round(0.5 * (h_l + h_r))))
 
+    img_h, img_w = img.shape[:2]
     knots = [int(round(v)) for v in np.linspace(x0, x1, 5)]
     sub_strips: list[np.ndarray] = []
     for k in range(len(knots) - 1):
@@ -646,8 +647,22 @@ def _warp_piecewise_angled_strip(
         y_br = bot_model.eval_y(kx1) + pad_y
         y_bl = bot_model.eval_y(kx0) + pad_y
 
+        ry0 = max(0, int(np.floor(min(y_tl, y_tr, y_bl, y_br))) - 4)
+        ry1 = min(img_h, int(np.ceil(max(y_tl, y_tr, y_bl, y_br))) + 4)
+        rx0 = max(0, kx0 - 2)
+        rx1 = min(img_w, kx1 + 2)
+        roi = img[ry0:ry1, rx0:rx1]
+        if roi.size == 0:
+            roi = img
+            rx0, ry0 = 0, 0
+
         src_quad = np.array(
-            [[kx0, y_tl], [kx1, y_tr], [kx1, y_br], [kx0, y_bl]],
+            [
+                [kx0 - rx0, y_tl - ry0],
+                [kx1 - rx0, y_tr - ry0],
+                [kx1 - rx0, y_br - ry0],
+                [kx0 - rx0, y_bl - ry0],
+            ],
             dtype=np.float32,
         )
         dst_rect = np.array(
@@ -656,7 +671,7 @@ def _warp_piecewise_angled_strip(
         )
         mat = cv2.getPerspectiveTransform(src_quad, dst_rect)
         sub_warped = cv2.warpPerspective(
-            img,
+            roi,
             mat,
             (sw, out_h),
             flags=cv2.INTER_CUBIC,

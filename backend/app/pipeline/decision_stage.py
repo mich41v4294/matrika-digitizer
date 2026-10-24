@@ -572,6 +572,7 @@ def evaluate_census_row_deterministic(
     fact: PersonFact | None = None,
     *,
     log_trace: bool = False,
+    commit: bool = True,
 ) -> dict[str, Any]:
     """
     Fast (<5ms) deterministic evaluator for 1930/1940 Slovak Census rows.
@@ -712,7 +713,8 @@ def evaluate_census_row_deterministic(
         )
         session.add(trace)
 
-    session.commit()
+    if commit:
+        session.commit()
     return {
         "action": action,
         "confidence": confidence,

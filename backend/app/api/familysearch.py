@@ -282,7 +282,7 @@ def list_fs_matches(session: SessionDep, scan_id: int | None = None) -> dict[str
             "fact": fact.model_dump() if fact else None,
         })
 
-    progress = fs_mcp_manager.get_progress_state(session)
+    progress = fs_mcp_manager.get_progress_state(session, refresh_counts=False)
     counts = {
         "total": len(items),
         "matched": len(items),

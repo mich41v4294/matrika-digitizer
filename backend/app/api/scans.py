@@ -29,6 +29,33 @@ class ProcessScanRequest(BaseModel):
     only_undone: bool = True
 
 
+_RESOLVED_ROOTS_CACHE: tuple[
+    tuple[Path | None, Path | None, Path | None],
+    tuple[Path | None, Path | None, Path | None],
+] | None = None
+
+
+def _get_resolved_media_roots() -> tuple[Path | None, Path | None, Path | None]:
+    global _RESOLVED_ROOTS_CACHE
+    raw_c = getattr(settings, "census_data_dir", None)
+    raw_m = getattr(settings, "matrika_data_dir", None)
+    raw_u = getattr(settings, "upload_dir", None)
+    key = (
+        Path(raw_c) if raw_c else None,
+        Path(raw_m) if raw_m else None,
+        Path(raw_u) if raw_u else None,
+    )
+    if _RESOLVED_ROOTS_CACHE is not None and _RESOLVED_ROOTS_CACHE[0] == key:
+        return _RESOLVED_ROOTS_CACHE[1]
+    res = (
+        key[0].resolve() if key[0] else None,
+        key[1].resolve() if key[1] else None,
+        key[2].resolve() if key[2] else None,
+    )
+    _RESOLVED_ROOTS_CACHE = (key, res)
+    return res
+
+
 def resolve_scan_media_url(
     scan_or_path: ScanImage | str | None,
     filename: str | None = None,
@@ -45,25 +72,29 @@ def resolve_scan_media_url(
     if raw.startswith("/media/") or raw.startswith("http://") or raw.startswith("https://"):
         return raw
     p = Path(raw)
-    census_dir = getattr(settings, "census_data_dir", None)
-    if census_dir:
-        try:
-            rel_c = p.resolve().relative_to(Path(census_dir).resolve())
-            return f"/media/uploads/slovakiana/{rel_c.as_posix()}"
-        except (ValueError, OSError):
-            pass
-    matrika_dir = getattr(settings, "matrika_data_dir", None)
-    if matrika_dir:
-        try:
-            rel_m = p.resolve().relative_to(Path(matrika_dir).resolve())
-            return f"/media/uploads/matrika/{rel_m.as_posix()}"
-        except (ValueError, OSError):
-            pass
     try:
-        rel_u = p.resolve().relative_to(Path(settings.upload_dir).resolve())
-        return f"/media/uploads/{rel_u.as_posix()}"
-    except (ValueError, OSError):
-        pass
+        p_res = p.resolve()
+    except OSError:
+        p_res = p
+    census_root, matrika_root, upload_root = _get_resolved_media_roots()
+    if census_root:
+        try:
+            rel_c = p_res.relative_to(census_root)
+            return f"/media/uploads/slovakiana/{rel_c.as_posix()}"
+        except ValueError:
+            pass
+    if matrika_root:
+        try:
+            rel_m = p_res.relative_to(matrika_root)
+            return f"/media/uploads/matrika/{rel_m.as_posix()}"
+        except ValueError:
+            pass
+    if upload_root:
+        try:
+            rel_u = p_res.relative_to(upload_root)
+            return f"/media/uploads/{rel_u.as_posix()}"
+        except ValueError:
+            pass
     if "slovakiana/" in raw:
         idx = raw.find("slovakiana/")
         return f"/media/uploads/{raw[idx:]}"

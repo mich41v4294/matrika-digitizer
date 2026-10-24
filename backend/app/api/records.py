@@ -222,10 +222,10 @@ async def update_record(
     apply_person_fact_search_fields(fact)
 
     session.add(fact)
-    session.commit()
-    session.refresh(fact)
+    session.flush()
     index_person_fact(session, fact)
     session.commit()
+    session.refresh(fact)
 
     schedule_auto_fs_match(fact.id, trigger_auto_fs_match_for_fact)
 
@@ -251,21 +251,25 @@ def delete_record(fact_id: int, session: SessionDep) -> dict[str, Any]:
     return {"status": "deleted", "fact_id": fact_id}
 
 
+def _query_export_facts(session: SessionDep, only_new_to_fs: bool) -> list[PersonFact]:
+    stmt = select(PersonFact)
+    if only_new_to_fs:
+        matched_subq = (
+            select(FamilySearchMatch.person_fact_id)
+            .where(
+                FamilySearchMatch.fs_person_id.is_not(None),  # type: ignore[union-attr]
+                func.trim(FamilySearchMatch.fs_person_id) != "",
+                FamilySearchMatch.confidence_score > 0,
+            )
+            .distinct()
+        )
+        stmt = stmt.where(PersonFact.id.in_(matched_subq))  # type: ignore[union-attr]
+    return list(session.exec(stmt.order_by(PersonFact.id.asc())).all())
+
+
 @router.get("/export/csv", response_class=PlainTextResponse)
 def download_csv(session: SessionDep, only_new_to_fs: bool = False) -> PlainTextResponse:
-    facts = session.exec(select(PersonFact).order_by(PersonFact.id.asc())).all()
-    if only_new_to_fs:
-        new_ids = {
-            m.person_fact_id
-            for m in session.exec(
-                select(FamilySearchMatch).where(
-                    FamilySearchMatch.fs_person_id.is_not(None),  # type: ignore[union-attr]
-                    func.trim(FamilySearchMatch.fs_person_id) != "",
-                    FamilySearchMatch.confidence_score > 0,
-                )
-            ).all()
-        }
-        facts = [f for f in facts if f.id in new_ids]
+    facts = _query_export_facts(session, only_new_to_fs)
 
     sheet_ids = list({f.census_sheet_id for f in facts if f.census_sheet_id is not None})
     sheets_by_id = (
@@ -283,19 +287,7 @@ def download_csv(session: SessionDep, only_new_to_fs: bool = False) -> PlainText
 
 @router.get("/export/gedcom", response_class=PlainTextResponse)
 def download_gedcom(session: SessionDep, only_new_to_fs: bool = False) -> PlainTextResponse:
-    facts = session.exec(select(PersonFact).order_by(PersonFact.id.asc())).all()
-    if only_new_to_fs:
-        new_ids = {
-            m.person_fact_id
-            for m in session.exec(
-                select(FamilySearchMatch).where(
-                    FamilySearchMatch.fs_person_id.is_not(None),  # type: ignore[union-attr]
-                    func.trim(FamilySearchMatch.fs_person_id) != "",
-                    FamilySearchMatch.confidence_score > 0,
-                )
-            ).all()
-        }
-        facts = [f for f in facts if f.id in new_ids]
+    facts = _query_export_facts(session, only_new_to_fs)
 
     sheet_ids = list({f.census_sheet_id for f in facts if f.census_sheet_id is not None})
     sheets_by_id = (

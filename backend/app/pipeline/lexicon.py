@@ -2199,6 +2199,7 @@ def fuzzy_token_similarity(q_tok: str | None, cand_tok: str | None) -> float:
 
 
 _QUERY_STOP_TOKENS: set[str] = {"rod", "rodena", "r", "nee", "geb", "szul", "ml", "st", "okr", "okres"}
+_NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9áéíóöőúüűÁÉÍÓÖŐÚÜŰäëÄËčďľĺňŕřšťžČĎĽĹŇŔŘŠŤŽýÝôÔ]+")
 
 
 def fuzzy_name_match_score(
@@ -2215,10 +2216,7 @@ def fuzzy_name_match_score(
     if not query_text or not query_text.strip():
         return 1.0
 
-    raw_q_tokens = re.findall(
-        r"[A-Za-z0-9áéíóöőúüűÁÉÍÓÖŐÚÜŰäëÄËčďľĺňŕřšťžČĎĽĹŇŔŘŠŤŽýÝôÔ]+",
-        query_text.strip(),
-    )
+    raw_q_tokens = _NAME_TOKEN_RE.findall(query_text.strip())
     q_tokens = [t for t in raw_q_tokens if fold_text_diacritics(t) not in _QUERY_STOP_TOKENS]
     if not q_tokens:
         return 1.0
@@ -2232,10 +2230,7 @@ def fuzzy_name_match_score(
         if not s:
             continue
         full_folded_parts.append(fold_text_diacritics(s))
-        for tok in re.findall(
-            r"[A-Za-z0-9áéíóöőúüűÁÉÍÓÖŐÚÜŰäëÄËčďľĺňŕřšťžČĎĽĹŇŔŘŠŤŽýÝôÔ]+",
-            s,
-        ):
+        for tok in _NAME_TOKEN_RE.findall(s):
             if fold_text_diacritics(tok) not in _QUERY_STOP_TOKENS:
                 cand_tokens.append(tok)
 
@@ -2964,6 +2959,7 @@ _REGIONAL_PLACES_CACHE: dict[str, Any] | None = None
 _SLOVAKIANA_FACETS_LOADED = False
 _SLOVAKIANA_DISTRICTS: list[str] = []
 _SLOVAKIANA_MUNICIPALITIES: list[str] = []
+_SLOVAKIANA_MUNICIPALITIES_BY_FOLDED: dict[str, str] = {}
 
 # Canonical political districts in 1930/1940 Slovakia & neighboring lands
 CANONICAL_CENSUS_DISTRICTS: list[str] = [
@@ -3207,10 +3203,12 @@ def record_regional_places_cache(
             p.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
+        get_regional_municipality_gazetteer.cache_clear()
+        normalize_census_municipality.cache_clear()
 
 
 def _ensure_slovakiana_facets_loaded() -> None:
-    global _SLOVAKIANA_FACETS_LOADED, _SLOVAKIANA_DISTRICTS, _SLOVAKIANA_MUNICIPALITIES
+    global _SLOVAKIANA_FACETS_LOADED, _SLOVAKIANA_DISTRICTS, _SLOVAKIANA_MUNICIPALITIES, _SLOVAKIANA_MUNICIPALITIES_BY_FOLDED
     if _SLOVAKIANA_FACETS_LOADED:
         return
     _SLOVAKIANA_FACETS_LOADED = True
@@ -3234,11 +3232,15 @@ def _ensure_slovakiana_facets_loaded() -> None:
                             if nm and nm not in seen_m:
                                 seen_m.add(nm)
                                 _SLOVAKIANA_MUNICIPALITIES.append(nm)
+                                mf = fold_text_diacritics(nm)
+                                if mf and mf not in _SLOVAKIANA_MUNICIPALITIES_BY_FOLDED:
+                                    _SLOVAKIANA_MUNICIPALITIES_BY_FOLDED[mf] = nm
                 break
             except Exception:
                 pass
 
 
+@lru_cache(maxsize=256)
 def get_regional_municipality_gazetteer(
     sheet_municipality: str | None = None,
     sheet_district: str | None = None,
@@ -3379,6 +3381,7 @@ def normalize_census_country(
     return inferred_country or "Slovensko"
 
 
+@lru_cache(maxsize=1024)
 def normalize_census_district(
     raw_district: str | None,
     sheet_district: str | None = None,
@@ -3546,6 +3549,7 @@ def _expand_place_abbreviations_and_inversions(text: str) -> str:
     return s_exp
 
 
+@lru_cache(maxsize=1024)
 def normalize_census_municipality(
     raw_muni: str | None,
     sheet_municipality: str | None = None,
@@ -3600,10 +3604,12 @@ def normalize_census_municipality(
                 return cand, (c_info.get("district") or None), (c_info.get("country") or "Slovensko")
             return cand, None, "Slovensko"
 
+        if abs(len(exp_f) - len(cf)) > 5:
+            continue
         dist_cost = _paleographic_distance(exp_f, cf)
         max_l = max(len(exp_f), len(cf), 1)
         sim = max(0.0, 1.0 - (dist_cost / max_l))
-        seq = difflib.SequenceMatcher(None, exp_f, cf).ratio()
+        seq = difflib.SequenceMatcher(None, exp_f, cf).ratio() if sim >= 0.55 else 0.0
         score = max(sim, seq)
         if sheet_mf and cf == sheet_mf:
             score += 0.10
@@ -3620,12 +3626,11 @@ def normalize_census_municipality(
             return best_muni, (c_info.get("district") or None), (c_info.get("country") or "Slovensko")
         return best_muni, None, "Slovensko"
 
-    # Also check full Slovakiana 3,712-municipality list for exact or very close match
+    # Fast O(1) lookup against the full Slovakiana 3,712-municipality dictionary
     _ensure_slovakiana_facets_loaded()
-    for sm in _SLOVAKIANA_MUNICIPALITIES:
-        sm_f = fold_text_diacritics(sm)
-        if sm_f == exp_f:
-            return sm, None, "Slovensko"
+    matched_sm = _SLOVAKIANA_MUNICIPALITIES_BY_FOLDED.get(exp_f)
+    if matched_sm:
+        return matched_sm, None, "Slovensko"
 
     if v_sk:
         return v_sk, None, "Slovensko"

@@ -80,7 +80,6 @@ def _persist_layout_result(
     scan.status = "sliced"
     scan.error_message = None
     session.add(scan)
-    session.commit()
 
     # Update existing rows by row_index in-place (preserving row IDs) and remove orphaned child records
     existing_rows = session.exec(
@@ -99,7 +98,6 @@ def _persist_layout_result(
             for qi in session.exec(select(QuestionItem).where(QuestionItem.row_id == er.id)).all():
                 session.delete(qi)
             session.delete(er)
-    session.commit()
 
     created_rows: list[RecordRow] = []
     for r_info in layout_res.rows:
@@ -118,9 +116,6 @@ def _persist_layout_result(
         row.cell_crops_json = json.dumps(r_info.cell_crops, ensure_ascii=False)
         session.add(row)
         created_rows.append(row)
-    session.commit()
-    for r in created_rows:
-        session.refresh(r)
 
     trace = WorkflowTrace(
         scan_id=scan.id,
@@ -150,6 +145,8 @@ def _persist_layout_result(
     )
     session.add(trace)
     session.commit()
+    for r in created_rows:
+        session.refresh(r)
     return created_rows
 
 
@@ -354,7 +351,7 @@ async def process_single_scan_pipeline(
             if is_census:
                 for fact, row in extracted_facts:
                     session.refresh(fact)
-                    evaluate_census_row_deterministic(session, scan, row, fact, log_trace=False)
+                    evaluate_census_row_deterministic(session, scan, row, fact, log_trace=False, commit=False)
 
             scan.status = "extracted"
             session.add(scan)
@@ -626,7 +623,7 @@ async def process_batch_stage_queued(
                 if s_is_census:
                     for fact, r in scan_facts:
                         session.refresh(fact)
-                        evaluate_census_row_deterministic(session, s, r, fact, log_trace=False)
+                        evaluate_census_row_deterministic(session, s, r, fact, log_trace=False, commit=False)
                 s.status = "extracted"
                 session.add(s)
                 if s.census_sheet_id:

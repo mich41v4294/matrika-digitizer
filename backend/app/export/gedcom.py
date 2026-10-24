@@ -86,11 +86,18 @@ _GEDCOM_MONTHS: dict[str, str] = {
 }
 
 
+_GEDCOM_CLEAN_RE = re.compile(r"[\r\n\x00]+")
+_GEDCOM_YEAR4_RE = re.compile(r"\d{4}")
+_GEDCOM_DATE_NUM_RE = re.compile(r"\b(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})\b")
+_GEDCOM_DATE_TXT_RE = re.compile(r"\b(\d{1,2})\.?\s*([A-Za-záéíóúýčďľňšťžÁÉÍÓÚÝČĎĽŇŠŤŽ]+)(?:\s+(\d{4}))?")
+_GEDCOM_SOUR_KEY_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
 def _clean_gedcom_val(val: Any) -> str:
     """Strips CR/LF/NUL characters to prevent GEDCOM line/tag injection."""
     if val is None:
         return ""
-    return re.sub(r"[\r\n\x00]+", " ", str(val)).strip()
+    return _GEDCOM_CLEAN_RE.sub(" ", str(val)).strip()
 
 
 def _sanitize_csv_cell(val: Any) -> Any:
@@ -112,11 +119,11 @@ def _format_gedcom_date(raw_date: str | int | None, fallback_year: int | None = 
     s = _clean_gedcom_val(raw_date)
     if not s and fallback_year:
         return str(fallback_year)
-    if re.fullmatch(r"\d{4}", s):
+    if _GEDCOM_YEAR4_RE.fullmatch(s):
         return s
 
     # Match DD.MM.YYYY or DD. M. YYYY
-    m_num = re.search(r"\b(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})\b", s)
+    m_num = _GEDCOM_DATE_NUM_RE.search(s)
     if m_num:
         day = int(m_num.group(1))
         mon = _GEDCOM_MONTHS.get(str(int(m_num.group(2))))
@@ -125,7 +132,7 @@ def _format_gedcom_date(raw_date: str | int | None, fallback_year: int | None = 
             return f"{day} {mon} {yr}"
 
     # Match DD. MonthName [YYYY]
-    m_txt = re.search(r"\b(\d{1,2})\.?\s*([A-Za-záéíóúýčďľňšťžÁÉÍÓÚÝČĎĽŇŠŤŽ]+)(?:\s+(\d{4}))?", s)
+    m_txt = _GEDCOM_DATE_TXT_RE.search(s)
     if m_txt:
         day = int(m_txt.group(1))
         mon_key = m_txt.group(2).lower().rstrip(".")
@@ -321,7 +328,7 @@ def export_facts_to_gedcom(
         sour_id: str | None = None
         if f.record_type == "census":
             if sheet and sheet.slovakiana_key:
-                clean_key = re.sub(r"[^A-Za-z0-9_]", "_", sheet.slovakiana_key).upper()
+                clean_key = _GEDCOM_SOUR_KEY_RE.sub("_", sheet.slovakiana_key).upper()
                 sour_id = f"@S_{clean_key}@"
                 referenced_sources[sour_id] = sheet
             else:

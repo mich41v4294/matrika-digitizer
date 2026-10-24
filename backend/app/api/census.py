@@ -1184,8 +1184,6 @@ def list_census_sheets(
         hh = households_by_sheet.get(sid)
         sheet_hhs = all_households_by_sheet.get(sid, [])
         s_facts = facts_by_sheet.get(sid, [])
-        if not _census_thumbnail_url(s.slovakiana_key, census_root) and s.thumbnail_id:
-            missing_thumbs.append({"slovakiana_key": s.slovakiana_key, "thumbnail_id": s.thumbnail_id})
         ov_cnt = overview_counts_by_sheet.get(sid, 0)
         md_cnt = municipal_districts_counts_by_sheet.get(sid, 0)
         linked_sheets = linked_by_sheet_id.get(sid, [])
@@ -1213,6 +1211,8 @@ def list_census_sheets(
             overview_houses_count=ov_cnt,
             municipal_districts_count=md_cnt,
         )
+        if not str(s_payload.get("thumbnail_url") or "").startswith("/media/") and s.thumbnail_id:
+            missing_thumbs.append({"slovakiana_key": s.slovakiana_key, "thumbnail_id": s.thumbnail_id})
         if not s_payload.get("street_name"):
             fallback_st = (
                 (hh.street if hh and hh.street else None)
@@ -1344,21 +1344,38 @@ async def remote_search_slovakiana(
     await slovakiana_client.download_thumbnails_batch(items)
 
     saved_sheets: list[CensusSheet] = []
+    page_keys = [
+        str(it.get("slovakiana_key") or "")
+        for it in items
+        if it.get("slovakiana_key")
+    ]
+    existing_map: dict[str, CensusSheet] = (
+        {
+            s.slovakiana_key: s
+            for s in session.exec(
+                select(CensusSheet).where(CensusSheet.slovakiana_key.in_(page_keys))  # type: ignore[union-attr]
+            ).all()
+        }
+        if (req.save_to_catalog and page_keys)
+        else {}
+    )
     for parsed in items:
         if req.municipality_tag and not parsed.get("municipality_key"):
             parsed["municipality_key"] = req.municipality_tag
         if req.district_tag and not parsed.get("district_key"):
             parsed["district_key"] = req.district_tag
         if req.save_to_catalog and parsed.get("slovakiana_key"):
-            sheet = upsert_census_sheet_from_dict(session, parsed)
+            sheet = upsert_census_sheet_from_dict(session, parsed, existing_by_key=existing_map)
             saved_sheets.append(sheet)
 
-    if req.save_to_catalog:
+    if req.save_to_catalog and saved_sheets:
+        from backend.app.search.fts import bulk_index_census_sheets
+
+        session.flush()
+        bulk_index_census_sheets(session, saved_sheets)
         session.commit()
         for s in saved_sheets:
             session.refresh(s)
-            index_census_sheet(session, s)
-        session.commit()
 
     return {
         "total_remote": total_remote,
@@ -2038,14 +2055,22 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
     )
     ov_candidate_sheets: list[CensusSheet] | None = None
     if overview_houses_rows:
-        ov_candidate_sheets = list(
-            session.exec(
-                select(CensusSheet).where(
-                    CensusSheet.house_number.is_not(None),
-                    CensusSheet.sheet_type.notin_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
-                )
-            ).all()
+        ov_hn_ints = {ovh.house_number_int for ovh in overview_houses_rows if ovh.house_number_int is not None}
+        ov_hn_strs = {str(ovh.house_number).strip() for ovh in overview_houses_rows if ovh.house_number}
+        cand_stmt = select(CensusSheet).where(
+            CensusSheet.house_number.is_not(None),
+            CensusSheet.sheet_type.notin_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
         )
+        if ov_hn_ints and ov_hn_strs:
+            cand_stmt = cand_stmt.where(
+                (CensusSheet.house_number_int.in_(ov_hn_ints))  # type: ignore[union-attr]
+                | (CensusSheet.house_number.in_(ov_hn_strs))  # type: ignore[union-attr]
+            )
+        elif ov_hn_ints:
+            cand_stmt = cand_stmt.where(CensusSheet.house_number_int.in_(ov_hn_ints))  # type: ignore[union-attr]
+        elif ov_hn_strs:
+            cand_stmt = cand_stmt.where(CensusSheet.house_number.in_(ov_hn_strs))  # type: ignore[union-attr]
+        ov_candidate_sheets = list(session.exec(cand_stmt).all())
     overview_houses: list[dict[str, Any]] = []
     for ovh in overview_houses_rows:
         matched_row = rows_by_crop.get(ovh.stitched_crop_path or "")
@@ -2246,13 +2271,27 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             if not can_match_overview_house_to_sheet(ov_match, sheet, overview_sheet=ov_parent_check):
                 ov_match = None
         if not ov_match and sheet.municipality:
-            candidates = session.exec(
-                select(CensusOverviewHouse).where(
-                    CensusOverviewHouse.census_year == sheet.census_year,
+            ov_cand_stmt = select(CensusOverviewHouse).where(
+                CensusOverviewHouse.census_year == sheet.census_year,
+            )
+            if sheet.house_number_int is not None:
+                ov_cand_stmt = ov_cand_stmt.where(
+                    (CensusOverviewHouse.house_number_int == sheet.house_number_int)
+                    | (CensusOverviewHouse.house_number == str(sheet.house_number).strip())
                 )
-            ).all()
+            candidates = list(session.exec(ov_cand_stmt).all())
+            parent_sids = list({c.census_sheet_id for c in candidates if c.census_sheet_id})
+            parents_by_id = (
+                {
+                    ps.id: ps
+                    for ps in session.exec(select(CensusSheet).where(CensusSheet.id.in_(parent_sids))).all()  # type: ignore[union-attr]
+                    if ps.id is not None
+                }
+                if parent_sids
+                else {}
+            )
             for cand in candidates:
-                ov_parent_cand = session.get(CensusSheet, cand.census_sheet_id)
+                ov_parent_cand = parents_by_id.get(cand.census_sheet_id)
                 if can_match_overview_house_to_sheet(cand, sheet, overview_sheet=ov_parent_cand):
                     ov_match = cand
                     break
@@ -3300,14 +3339,22 @@ def list_overview_houses(
     paged = houses[offset : offset + limit]
     candidate_sheets: list[CensusSheet] | None = None
     if paged:
-        candidate_sheets = list(
-            session.exec(
-                select(CensusSheet).where(
-                    CensusSheet.house_number.is_not(None),
-                    CensusSheet.sheet_type.notin_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
-                )
-            ).all()
+        p_hn_ints = {h.house_number_int for h in paged if h.house_number_int is not None}
+        p_hn_strs = {str(h.house_number).strip() for h in paged if h.house_number}
+        cand_stmt = select(CensusSheet).where(
+            CensusSheet.house_number.is_not(None),
+            CensusSheet.sheet_type.notin_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
         )
+        if p_hn_ints and p_hn_strs:
+            cand_stmt = cand_stmt.where(
+                (CensusSheet.house_number_int.in_(p_hn_ints))  # type: ignore[union-attr]
+                | (CensusSheet.house_number.in_(p_hn_strs))  # type: ignore[union-attr]
+            )
+        elif p_hn_ints:
+            cand_stmt = cand_stmt.where(CensusSheet.house_number_int.in_(p_hn_ints))  # type: ignore[union-attr]
+        elif p_hn_strs:
+            cand_stmt = cand_stmt.where(CensusSheet.house_number.in_(p_hn_strs))  # type: ignore[union-attr]
+        candidate_sheets = list(session.exec(cand_stmt).all())
     return {
         "total": total,
         "overview_houses": [

@@ -96,18 +96,19 @@ def _ensure_sqlite_columns() -> None:
         # Ensure default sheet_type on existing rows
         conn.execute(text("UPDATE censussheet SET sheet_type = 'household' WHERE sheet_type IS NULL OR sheet_type = ''"))
         conn.execute(text("UPDATE censushousehold SET dwelling_unit = 'I' WHERE dwelling_unit IS NULL OR dwelling_unit = ''"))
-        conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_familysearchmatch_fs_person_id "
-                "ON familysearchmatch (fs_person_id)"
-            )
-        )
-        conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ix_censusmunicipaloverviewdistrict_sheet_row "
-                "ON censusmunicipaloverviewdistrict (census_sheet_id, row_index)"
-            )
-        )
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS ix_familysearchmatch_fs_person_id ON familysearchmatch (fs_person_id)",
+            "CREATE INDEX IF NOT EXISTS ix_familysearchmatch_status_fact ON familysearchmatch (match_status, person_fact_id)",
+            "CREATE INDEX IF NOT EXISTS ix_recordrow_scan_row ON recordrow (scan_id, row_index)",
+            "CREATE INDEX IF NOT EXISTS ix_personfact_sheet_id ON personfact (census_sheet_id, id)",
+            "CREATE INDEX IF NOT EXISTS ix_personfact_type_id ON personfact (record_type, id)",
+            "CREATE INDEX IF NOT EXISTS ix_censussheet_year_status_id ON censussheet (census_year, download_status, id)",
+            "CREATE INDEX IF NOT EXISTS ix_censusoverviewhouse_sheet_row ON censusoverviewhouse (census_sheet_id, row_index)",
+            "CREATE INDEX IF NOT EXISTS ix_censusmunicipaloverviewdistrict_sheet_row ON censusmunicipaloverviewdistrict (census_sheet_id, row_index)",
+            "CREATE INDEX IF NOT EXISTS ix_workflowtrace_scan_id ON workflowtrace (scan_id, id)",
+            "CREATE INDEX IF NOT EXISTS ix_questionitem_status_id ON questionitem (status, id)",
+        ):
+            conn.execute(text(idx_sql))
         # Remove any stale unmatched FamilySearchMatch rows (fs_person_id IS NULL or empty)
         try:
             conn.execute(

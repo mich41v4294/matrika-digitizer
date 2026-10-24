@@ -5,13 +5,26 @@
  * never discard or miss OCR-corrupted names returned by the backend.
  */
 
+const FOLD_CACHE = new Map<string, string>();
+const ORTH_CACHE = new Map<string, string>();
+const EDIT_SIM_CACHE = new Map<string, number>();
+const TOKEN_SIM_CACHE = new Map<string, number>();
+const MAX_CACHE_SIZE = 16384;
+
 export function foldText(text: string | null | undefined): string {
   if (!text) return "";
-  return text
+  const hit = FOLD_CACHE.get(text);
+  if (hit !== undefined) return hit;
+  const out = text
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .trim();
+  if (FOLD_CACHE.size >= MAX_CACHE_SIZE) {
+    FOLD_CACHE.clear();
+  }
+  FOLD_CACHE.set(text, out);
+  return out;
 }
 
 export function stripFemSuffix(word: string): string {
@@ -123,8 +136,13 @@ GIVEN_NAME_GROUPS.forEach((grp, idx) => {
 
 export function orthographicFold(token: string | null | undefined): string {
   if (!token) return "";
+  const hit = ORTH_CACHE.get(token);
+  if (hit !== undefined) return hit;
   let s = foldText(token).replace(/[^a-z0-9]/g, "");
-  if (!s) return "";
+  if (!s) {
+    ORTH_CACHE.set(token, "");
+    return "";
+  }
   const replacements: Array<[string, string]> = [
     ["sch", "s"],
     ["cz", "c"],
@@ -150,6 +168,10 @@ export function orthographicFold(token: string | null | undefined): string {
     s = s.split(src).join(dst);
   }
   s = s.replace(/([a-z])\1+/g, "$1");
+  if (ORTH_CACHE.size >= MAX_CACHE_SIZE) {
+    ORTH_CACHE.clear();
+  }
+  ORTH_CACHE.set(token, s);
   return s;
 }
 
@@ -253,9 +275,16 @@ export function weightedEditSimilarity(left: string, right: string): number {
   if (!aRaw || !bRaw) return 0;
   if (aRaw === bRaw) return 1.0;
 
+  const cacheKey = aRaw < bRaw ? `${aRaw}|${bRaw}` : `${bRaw}|${aRaw}`;
+  const hit = EDIT_SIM_CACHE.get(cacheKey);
+  if (hit !== undefined) return hit;
+
   const aOrth = orthographicFold(left);
   const bOrth = orthographicFold(right);
-  if (aOrth && aOrth === bOrth) return 0.97;
+  if (aOrth && aOrth === bOrth) {
+    EDIT_SIM_CACHE.set(cacheKey, 0.97);
+    return 0.97;
+  }
 
   const simRaw = Math.max(
     0,
@@ -265,7 +294,12 @@ export function weightedEditSimilarity(left: string, right: string): number {
     0,
     1 - ocrDpDistance(aOrth, bOrth) / Math.max(aOrth.length, bOrth.length, 1)
   );
-  return Math.max(simRaw, simOrth);
+  const out = Math.max(simRaw, simOrth);
+  if (EDIT_SIM_CACHE.size >= MAX_CACHE_SIZE) {
+    EDIT_SIM_CACHE.clear();
+  }
+  EDIT_SIM_CACHE.set(cacheKey, out);
+  return out;
 }
 
 function surnameCoreStem(token: string): string {
@@ -286,10 +320,17 @@ export function fuzzyTokenSimilarity(qTok: string, candTok: string): number {
 
   if (/^\d+$/.test(qf) || /^\d+$/.test(cf)) return 0;
 
+  const tokKey = `${qf}>${cf}`;
+  const hit = TOKEN_SIM_CACHE.get(tokKey);
+  if (hit !== undefined) return hit;
+
   let best = 0;
   const qGrp = GIVEN_TO_GROUP.get(qf);
   const cGrp = GIVEN_TO_GROUP.get(cf);
-  if (qGrp !== undefined && qGrp === cGrp) return 0.96;
+  if (qGrp !== undefined && qGrp === cGrp) {
+    TOKEN_SIM_CACHE.set(tokKey, 0.96);
+    return 0.96;
+  }
   if (qGrp !== undefined) {
     for (const eq of GIVEN_NAME_GROUPS[qGrp]) {
       const sim = weightedEditSimilarity(eq, cf);
@@ -305,10 +346,16 @@ export function fuzzyTokenSimilarity(qTok: string, candTok: string): number {
   const qStem = surnameCoreStem(qf);
   const cStem = surnameCoreStem(cf);
   if (qStem && cStem) {
-    if (qStem === cStem) return 0.96;
+    if (qStem === cStem) {
+      TOKEN_SIM_CACHE.set(tokKey, 0.96);
+      return 0.96;
+    }
     const qOrth = orthographicFold(qStem);
     const cOrth = orthographicFold(cStem);
-    if (qOrth && qOrth === cOrth) return 0.95;
+    if (qOrth && qOrth === cOrth) {
+      TOKEN_SIM_CACHE.set(tokKey, 0.95);
+      return 0.95;
+    }
 
     best = Math.max(
       best,
@@ -322,6 +369,10 @@ export function fuzzyTokenSimilarity(qTok: string, candTok: string): number {
     }
   }
 
+  if (TOKEN_SIM_CACHE.size >= MAX_CACHE_SIZE) {
+    TOKEN_SIM_CACHE.clear();
+  }
+  TOKEN_SIM_CACHE.set(tokKey, best);
   return best;
 }
 

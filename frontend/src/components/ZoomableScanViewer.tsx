@@ -564,11 +564,16 @@ export function HoverZoomRowCrop({
   };
 
   const handleMouseMoveStrip = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (zoomScale <= 1) return;
     const rect = e.currentTarget.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
     const rx = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const ry = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
-    setPanRatio({ x: rx, y: ry });
+    setPanRatio((prev) =>
+      Math.abs(prev.x - rx) < 0.005 && Math.abs(prev.y - ry) < 0.005
+        ? prev
+        : { x: rx, y: ry }
+    );
   };
 
   return (
@@ -756,6 +761,8 @@ export function HoverZoomRowCrop({
               <img
                 src={cropUrl}
                 alt={rowLabel || (lang === "sk" ? "Výrez riadku" : "Row crop")}
+                loading="lazy"
+                decoding="async"
                 onError={() => setCropImgFailed(true)}
                 className="w-full h-auto block rounded opacity-95"
               />
@@ -770,6 +777,8 @@ export function HoverZoomRowCrop({
               <img
                 src={cropUrl}
                 alt={rowLabel || (lang === "sk" ? "Výrez riadku" : "Row crop")}
+                loading="lazy"
+                decoding="async"
                 style={sharedHorizTransformStyle}
                 onError={() => setCropImgFailed(true)}
                 className="w-full h-auto block transition-transform duration-150 ease-out"

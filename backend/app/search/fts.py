@@ -261,18 +261,58 @@ def bulk_index_census_sheets(session: Session, sheets: list[CensusSheet]) -> Non
     session.connection().execute(insert_stmt, rows_data)
 
 
+def bulk_index_person_facts(
+    session: Session,
+    facts: list[PersonFact],
+    ocr_by_row_id: dict[int, str] | None = None,
+) -> None:
+    """Fast batch upsert of PersonFact records into FTS5."""
+    valid_facts = [f for f in facts if f.id is not None]
+    if not valid_facts:
+        return
+    ids = [str(f.id) for f in valid_facts]
+    for start in range(0, len(ids), 450):
+        chunk_ids = ids[start : start + 450]
+        placeholders = ", ".join(f":id_{i}" for i in range(len(chunk_ids)))
+        params = {f"id_{i}": eid for i, eid in enumerate(chunk_ids)}
+        session.exec(
+            text(
+                f"DELETE FROM search_index_fts WHERE entity_type = 'person_fact' AND entity_id IN ({placeholders})"
+            ).bindparams(**params)
+        )
+    ocr_map = ocr_by_row_id or {}
+    rows_data: list[dict[str, Any]] = []
+    for fact in valid_facts:
+        apply_person_fact_search_fields(fact)
+        session.add(fact)
+        rows_data.append(_build_person_fts_row(fact, ocr_text=ocr_map.get(fact.row_id)))
+    insert_stmt = text(
+        """
+        INSERT INTO search_index_fts (
+            entity_type, entity_id, names_text, surnames_phonetic,
+            places_text, house_and_sheet, occupation_and_religion, notes_and_ocr
+        ) VALUES (
+            :entity_type, :entity_id, :names_text, :surnames_phonetic,
+            :places_text, :house_and_sheet, :occupation_and_religion, :notes_and_ocr
+        )
+        """
+    )
+    session.connection().execute(insert_stmt, rows_data)
+
+
 def rebuild_all_fts(session: Session) -> dict[str, int]:
     """Rebuilds the entire FTS5 search index from PersonFact and CensusSheet tables."""
     session.exec(text("DELETE FROM search_index_fts"))
-    facts = session.exec(select(PersonFact)).all()
-    rows_map = {r.id: r for r in session.exec(select(RecordRow)).all() if r.id is not None}
-    for f in facts:
-        r = rows_map.get(f.row_id)
-        index_person_fact(session, f, ocr_text=r.raw_ocr_combined if r else None)
+    facts = list(session.exec(select(PersonFact)).all())
+    ocr_by_row_id = {
+        r.id: r.raw_ocr_combined
+        for r in session.exec(select(RecordRow)).all()
+        if r.id is not None and r.raw_ocr_combined
+    }
+    bulk_index_person_facts(session, facts, ocr_by_row_id=ocr_by_row_id)
 
-    sheets = session.exec(select(CensusSheet)).all()
-    for s in sheets:
-        index_census_sheet(session, s)
+    sheets = list(session.exec(select(CensusSheet)).all())
+    bulk_index_census_sheets(session, sheets)
 
     session.commit()
     return {"indexed_person_facts": len(facts), "indexed_census_sheets": len(sheets)}
@@ -411,26 +451,52 @@ def search_unified(
     if street and street.strip():
         from sqlalchemy import or_
 
-        for cs_row in session.exec(select(CensusSheet).where(CensusSheet.street_raw.is_not(None))).all():  # type: ignore[union-attr]
+        st_fold = fold_text_diacritics(street.strip())
+        st_clean, _ = normalize_street_query(street)
+        probe_toks = [t for t in (st_clean or st_fold).split() if len(t) >= 3]
+        probe_prefix = probe_toks[0][:4] if probe_toks else ""
+
+        cs_st_stmt = select(CensusSheet).where(CensusSheet.street_raw.is_not(None))  # type: ignore[union-attr]
+        hh_st_stmt = select(CensusHousehold).where(CensusHousehold.street.is_not(None))  # type: ignore[union-attr]
+        ovh_st_stmt = select(CensusOverviewHouse).where(CensusOverviewHouse.settlement_name.is_not(None))  # type: ignore[union-attr]
+        if municipality and municipality.strip():
+            m_f = fold_text_diacritics(municipality)
+            cs_st_stmt = cs_st_stmt.where(
+                (CensusSheet.municipality_folded.contains(m_f))  # type: ignore[union-attr]
+                | (CensusSheet.municipality.ilike(f"%{municipality.strip()}%"))  # type: ignore[union-attr]
+            )
+            ovh_st_stmt = ovh_st_stmt.where(
+                CensusOverviewHouse.municipality.ilike(f"%{municipality.strip()}%")  # type: ignore[union-attr]
+            )
+        if probe_prefix:
+            cs_st_stmt = cs_st_stmt.where(
+                CensusSheet.street_raw.ilike(f"%{probe_prefix}%")  # type: ignore[union-attr]
+                | CensusSheet.street_raw.ilike(f"%{street.strip()[:4]}%")  # type: ignore[union-attr]
+            )
+            hh_st_stmt = hh_st_stmt.where(
+                CensusHousehold.street.ilike(f"%{probe_prefix}%")  # type: ignore[union-attr]
+                | CensusHousehold.street.ilike(f"%{street.strip()[:4]}%")  # type: ignore[union-attr]
+            )
+            ovh_st_stmt = ovh_st_stmt.where(
+                CensusOverviewHouse.settlement_name.ilike(f"%{probe_prefix}%")  # type: ignore[union-attr]
+                | CensusOverviewHouse.settlement_name.ilike(f"%{street.strip()[:4]}%")  # type: ignore[union-attr]
+            )
+
+        for cs_row in session.exec(cs_st_stmt).all():
             if cs_row.id and text_matches_street([cs_row.street_raw], street):
                 st_matching_sheet_ids.add(cs_row.id)
-        for hh_row in session.exec(select(CensusHousehold).where(CensusHousehold.street.is_not(None))).all():  # type: ignore[union-attr]
+        for hh_row in session.exec(hh_st_stmt).all():
             if text_matches_street([hh_row.street], street):
                 if hh_row.id:
                     st_matching_hh_ids.add(hh_row.id)
                 if hh_row.census_sheet_id:
                     st_matching_sheet_ids.add(hh_row.census_sheet_id)
-        for ovh_row in session.exec(
-            select(CensusOverviewHouse).where(CensusOverviewHouse.settlement_name.is_not(None))  # type: ignore[union-attr]
-        ).all():
+        for ovh_row in session.exec(ovh_st_stmt).all():
             if text_matches_street([ovh_row.settlement_name], street):
                 if ovh_row.census_sheet_id:
                     st_matching_sheet_ids.add(ovh_row.census_sheet_id)
                 if ovh_row.matched_sheet_id:
                     st_matching_sheet_ids.add(ovh_row.matched_sheet_id)
-
-        st_fold = fold_text_diacritics(street.strip())
-        st_clean, _ = normalize_street_query(street)
         like_pat = f"%{st_clean or st_fold}%"
         raw_like_pat = f"%{street.strip()}%"
         street_clauses = [

@@ -182,12 +182,22 @@ def request_job_pause(job_id: int) -> None:
     _ACTIVE_JOB_FLAGS[job_id] = False
 
 
-def upsert_census_sheet_from_dict(session: Session, data: dict[str, Any]) -> CensusSheet:
+def upsert_census_sheet_from_dict(
+    session: Session,
+    data: dict[str, Any],
+    existing_by_key: dict[str, CensusSheet] | None = None,
+) -> CensusSheet:
     """Upserts a CensusSheet row from parsed Slovakiana search or detail metadata."""
     key = data["slovakiana_key"]
-    sheet = session.exec(select(CensusSheet).where(CensusSheet.slovakiana_key == key)).first()
+    sheet = (
+        existing_by_key.get(key)
+        if existing_by_key is not None
+        else session.exec(select(CensusSheet).where(CensusSheet.slovakiana_key == key)).first()
+    )
     if not sheet:
         sheet = CensusSheet(slovakiana_key=key)
+        if existing_by_key is not None:
+            existing_by_key[key] = sheet
 
     for field in (
         "digital_object_id",
@@ -301,13 +311,28 @@ async def run_catalog_harvest_job(
                     break
                 if finalize_job:
                     job.total_items = total_remote
+                page_keys = [
+                    str(it.get("slovakiana_key") or "")
+                    for it in items
+                    if it.get("slovakiana_key")
+                ]
+                existing_map: dict[str, CensusSheet] = (
+                    {
+                        s.slovakiana_key: s
+                        for s in session.exec(
+                            select(CensusSheet).where(CensusSheet.slovakiana_key.in_(page_keys))  # type: ignore[union-attr]
+                        ).all()
+                    }
+                    if page_keys
+                    else {}
+                )
                 upserted_sheets: list[CensusSheet] = []
                 for item in items:
                     if len(muni_keys) == 1 and not item.get("municipality_key"):
                         item["municipality_key"] = muni_keys[0]
                     if len(dist_keys) == 1 and not item.get("district_key"):
                         item["district_key"] = dist_keys[0]
-                    sh = upsert_census_sheet_from_dict(session, item)
+                    sh = upsert_census_sheet_from_dict(session, item, existing_by_key=existing_map)
                     upserted_sheets.append(sh)
                 session.flush()
                 bulk_index_census_sheets(session, upserted_sheets)

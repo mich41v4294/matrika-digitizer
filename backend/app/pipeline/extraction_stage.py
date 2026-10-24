@@ -585,10 +585,10 @@ async def run_extraction_for_row(
     apply_person_fact_search_fields(fact)
 
     session.add(fact)
-    session.commit()
-    session.refresh(fact)
+    session.flush()
     index_person_fact(session, fact)
     session.commit()
+    session.refresh(fact)
     return fact
 
 
@@ -1873,10 +1873,10 @@ async def run_census_extraction_for_row(
     apply_person_fact_search_fields(fact)
 
     session.add(fact)
-    session.commit()
-    session.refresh(fact)
+    session.flush()
     index_person_fact(session, fact)
     session.commit()
+    session.refresh(fact)
     return fact
 
 

@@ -1512,6 +1512,46 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     [detail, featureFlags.census_multi_byt]
   );
 
+  const fuzzyMatchedMemberIds = useMemo(() => {
+    const out = new Set<number>();
+    if (!highlightPersonQuery || !detail?.members) return out;
+    for (const m of detail.members) {
+      const f = m.fact;
+      if (
+        matchesPersonNameQuery(
+          [
+            f.given_name_raw,
+            f.given_name_sk,
+            f.surname_raw,
+            f.surname_normalized,
+            f.mother_maiden_surname,
+            f.observationes_raw,
+          ],
+          highlightPersonQuery
+        )
+      ) {
+        out.add(f.id);
+      }
+    }
+    return out;
+  }, [detail?.members, highlightPersonQuery]);
+
+  const fuzzyMatchedHouseIds = useMemo(() => {
+    const out = new Set<number>();
+    if (!highlightPersonQuery || !detail?.overview_houses) return out;
+    for (const h of detail.overview_houses) {
+      if (
+        matchesPersonNameQuery(
+          [h.owner_name, h.matched_head_name, h.remarks],
+          highlightPersonQuery
+        )
+      ) {
+        out.add(h.id);
+      }
+    }
+    return out;
+  }, [detail?.overview_houses, highlightPersonQuery]);
+
   if (loading) {
     return (
       <div className="p-8 text-center text-stone-600">
@@ -3469,12 +3509,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                   {overview_houses.map((h) => {
                     const isSelected = selectedHouse?.id === h.id;
                     const isEditing = editingHouseId === h.id;
-                    const isFuzzyQueryMatch =
-                      Boolean(highlightPersonQuery) &&
-                      matchesPersonNameQuery(
-                        [h.owner_name, h.matched_head_name, h.remarks],
-                        highlightPersonQuery
-                      );
+                    const isFuzzyQueryMatch = fuzzyMatchedHouseIds.has(h.id);
                     const linkedTarget = h.matched_slovakiana_key || h.matched_sheet_id;
                     return (
                       <React.Fragment key={h.id}>
@@ -4023,19 +4058,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                   const f = m.fact;
                   const isEditing = editingMemberId === f.id;
                   const isSelected = selectedMemberId === f.id;
-                  const isFuzzyQueryMatch =
-                    Boolean(highlightPersonQuery) &&
-                    matchesPersonNameQuery(
-                      [
-                        f.given_name_raw,
-                        f.given_name_sk,
-                        f.surname_raw,
-                        f.surname_normalized,
-                        f.mother_maiden_surname,
-                        f.observationes_raw,
-                      ],
-                      highlightPersonQuery
-                    );
+                  const isFuzzyQueryMatch = fuzzyMatchedMemberIds.has(f.id);
                   const bp = formatStructuredBirthPlace(f);
                   const homeJur = formatHomeJurisdiction(f.home_jurisdiction);
                   const hasOccupation = Boolean(

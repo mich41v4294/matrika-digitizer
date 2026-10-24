@@ -664,22 +664,31 @@ export default function BooksOverview({
       ? selectedScanDetail?.overlay_url || selectedScanDetail?.original_url || null
       : selectedScanDetail?.original_url || null;
 
-  const rowsById = new Map<number, ScanRowDetail>();
-  if (selectedScanDetail?.rows) {
-    for (const r of selectedScanDetail.rows) {
-      rowsById.set(r.id, r);
+  const rowsById = useMemo(() => {
+    const m = new Map<number, ScanRowDetail>();
+    if (selectedScanDetail?.rows) {
+      for (const r of selectedScanDetail.rows) {
+        m.set(r.id, r);
+      }
     }
-  }
+    return m;
+  }, [selectedScanDetail?.rows]);
 
-  const scansById = new Map<number, ScanSummary>();
-  for (const s of scans) {
-    scansById.set(s.id, s);
-  }
+  const scansById = useMemo(() => {
+    const m = new Map<number, ScanSummary>();
+    for (const s of scans) {
+      m.set(s.id, s);
+    }
+    return m;
+  }, [scans]);
 
-  const batchesById = new Map<number, BatchSummary>();
-  for (const b of batches) {
-    batchesById.set(b.id, b);
-  }
+  const batchesById = useMemo(() => {
+    const m = new Map<number, BatchSummary>();
+    for (const b of batches) {
+      m.set(b.id, b);
+    }
+    return m;
+  }, [batches]);
 
   const totalRecordPages = Math.max(1, Math.ceil(records.length / RECORDS_PER_PAGE));
   const safeRecordsPage = Math.min(recordsPage, totalRecordPages);

@@ -3383,13 +3383,53 @@ def get_municipalities_summary(
     if district and district.strip():
         sheets = [s for s in sheets if _sheet_matches_district(s, district, municipality_specified=False)]
     ov_count_by_muni_key: dict[str, int] = {}
-    ov_grp_stmt = select(CensusOverviewHouse.municipality, func.count(CensusOverviewHouse.id))
+    ov_persons_by_muni_key: dict[str, int] = {}
+    ov_grp_stmt = select(
+        CensusOverviewHouse.municipality,
+        func.count(CensusOverviewHouse.id),
+        func.coalesce(func.sum(CensusOverviewHouse.present_persons_count), 0),
+    )
     if census_year:
         ov_grp_stmt = ov_grp_stmt.where(CensusOverviewHouse.census_year == census_year)
     ov_grp_stmt = ov_grp_stmt.group_by(CensusOverviewHouse.municipality)
-    for raw_ov_muni, cnt in session.exec(ov_grp_stmt).all():
+    for raw_ov_muni, cnt, p_sum in session.exec(ov_grp_stmt).all():
         m_key = canonical_municipality_key(raw_ov_muni) or "neznama obec"
-        ov_count_by_muni_key[m_key] = ov_count_by_muni_key.get(m_key, 0) + int(cnt)
+        ov_count_by_muni_key[m_key] = ov_count_by_muni_key.get(m_key, 0) + int(cnt or 0)
+        ov_persons_by_muni_key[m_key] = ov_persons_by_muni_key.get(m_key, 0) + int(p_sum or 0)
+
+    mov_stmt = select(CensusMunicipalOverviewDistrict)
+    if census_year:
+        mov_stmt = mov_stmt.where(CensusMunicipalOverviewDistrict.census_year == census_year)
+    mov_rows_by_sheet: dict[int, list[CensusMunicipalOverviewDistrict]] = {}
+    for md in session.exec(mov_stmt).all():
+        if md.census_sheet_id:
+            mov_rows_by_sheet.setdefault(int(md.census_sheet_id), []).append(md)
+
+    mov_houses_by_muni_key: dict[str, int] = {}
+    mov_persons_by_muni_key: dict[str, int] = {}
+    for md_list in mov_rows_by_sheet.values():
+        if not md_list:
+            continue
+        raw_muni = md_list[0].municipality
+        m_key = canonical_municipality_key(raw_muni) or "neznama obec"
+        sum_rows = [d for d in md_list if d.is_summary_row]
+        dist_rows = [d for d in md_list if not d.is_summary_row]
+        sh_houses = (
+            next((int(d.houses_total) for d in sum_rows if d.houses_total is not None), None)
+            if sum_rows
+            else None
+        )
+        if sh_houses is None:
+            sh_houses = sum(int(d.houses_total or 0) for d in dist_rows)
+        sh_persons = (
+            next((int(d.present_persons_count) for d in sum_rows if d.present_persons_count is not None), None)
+            if sum_rows
+            else None
+        )
+        if sh_persons is None:
+            sh_persons = sum(int(d.present_persons_count or 0) for d in dist_rows)
+        mov_houses_by_muni_key[m_key] = mov_houses_by_muni_key.get(m_key, 0) + int(sh_houses or 0)
+        mov_persons_by_muni_key[m_key] = mov_persons_by_muni_key.get(m_key, 0) + int(sh_persons or 0)
 
     person_counts_by_sheet: dict[int, int] = {}
     for row_sid, cnt in session.exec(
@@ -3408,6 +3448,11 @@ def get_municipalities_summary(
         key = (m_canon, canonical_municipality_key(d_name))
         entry = by_muni.get(key)
         if not entry:
+            ov_houses = ov_count_by_muni_key.get(m_canon) or mov_houses_by_muni_key.get(m_canon, 0)
+            ov_persons = max(
+                mov_persons_by_muni_key.get(m_canon, 0),
+                ov_persons_by_muni_key.get(m_canon, 0),
+            )
             entry = {
                 "municipality": m_display,
                 "municipality_key": s.municipality_key,
@@ -3417,8 +3462,10 @@ def get_municipalities_summary(
                 "downloaded_sheets": 0,
                 "ocr_done_sheets": 0,
                 "overview_sheets_count": 0,
-                "overview_houses_count": ov_count_by_muni_key.get(m_canon, 0),
+                "overview_houses_count": ov_houses,
+                "overview_persons_count": ov_persons,
                 "extracted_persons_count": 0,
+                "persons_count": ov_persons,
                 "years": set(),
             }
             by_muni[key] = entry
@@ -3437,6 +3484,10 @@ def get_municipalities_summary(
             entry["overview_sheets_count"] += 1
         if s.id:
             entry["extracted_persons_count"] += person_counts_by_sheet.get(s.id, 0)
+            entry["persons_count"] = max(
+                entry["extracted_persons_count"],
+                entry["overview_persons_count"],
+            )
 
     municipalities_list: list[dict[str, Any]] = []
     for entry in by_muni.values():

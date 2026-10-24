@@ -61,7 +61,9 @@ interface MunicipalitySummaryItem {
   ocr_done_sheets: number;
   overview_sheets_count: number;
   overview_houses_count: number;
+  overview_persons_count?: number;
   extracted_persons_count: number;
+  persons_count?: number;
   years: number[];
   slovakiana_count?: number;
   slovakiana_tag_key?: string;
@@ -908,7 +910,9 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
           ocr_done_sheets: 0,
           overview_sheets_count: 0,
           overview_houses_count: 0,
+          overview_persons_count: 0,
           extracted_persons_count: 0,
+          persons_count: 0,
           years: selectedYearFilter ? [Number(selectedYearFilter)] : [1930],
           slovakiana_count: c.count,
           slovakiana_tag_key: tag,
@@ -1854,24 +1858,23 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   </button>
                 </div>
 
-                {/* Counts pills: local sheets / OCR-done / overview houses / Slovakiana */}
+                {/* Counts pills: overview houses / persons count / OCR-done over total village sheets */}
                 <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                  <span className="px-2 py-0.5 rounded bg-stone-100 text-stone-800 font-semibold">
-                    {lang === "sk" ? "V DB:" : "In DB:"} {m.total_sheets}
-                  </span>
-                  {m.ocr_done_sheets > 0 && (
-                    <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-semibold">
-                      OCR: {m.ocr_done_sheets}
-                    </span>
-                  )}
                   {m.overview_houses_count > 0 && (
                     <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-900 font-semibold">
                       {lang === "sk" ? "Domy:" : "Houses:"} {m.overview_houses_count}
                     </span>
                   )}
-                  {m.slovakiana_count != null && (
+                  {(m.persons_count ?? m.extracted_persons_count) > 0 && (
+                    <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-semibold">
+                      {lang === "sk" ? "Počet osôb:" : "Persons:"}{" "}
+                      {m.persons_count ?? m.extracted_persons_count}
+                    </span>
+                  )}
+                  {(m.slovakiana_count != null || m.total_sheets > 0) && (
                     <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-semibold">
-                      {lang === "sk" ? "Archív:" : "Archive:"} {m.slovakiana_count}
+                      {lang === "sk" ? "Spolu hárkov:" : "Total sheets:"}{" "}
+                      {m.ocr_done_sheets}/{m.slovakiana_count ?? m.total_sheets}
                     </span>
                   )}
                 </div>

@@ -501,14 +501,39 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
 
     // D. Filter by street in CensusHub (/scitacie-harky) and Unified Search (/hladanie)
     await page.goto("/scitacie-harky?obec=Obec+Testov%C3%A1", { waitUntil: "networkidle" });
+    // Verify year switch only allows 1930 or 1940 (never both/Všetky), defaulting to 1930
+    const yearSwitch = page.getByTestId("census-year-switch");
+    await expect(yearSwitch.locator("button")).toHaveCount(2);
+    await expect(page.getByTestId("census-year-btn-1930")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("census-year-btn-1940")).toHaveAttribute("aria-pressed", "false");
+
     const censusStreetInput = page.getByLabel("Filtrovať podľa ulice alebo osady");
     await expect(censusStreetInput).toBeVisible();
     await censusStreetInput.fill("Hlavná");
     await expect(page.locator("body")).toContainText("Dom č. 15");
     await expect(page.locator("body")).toContainText("Hlavná");
 
-    // Clicking "Znova spustiť AI OCR & párovanie" on a sheet shows live progress bar card
+    // Switch year to 1940 in CensusHub -> seamlessly stays on Obec Testová and shows 1940 sheet cair-test003 for Dom č. 15
+    await page.getByTestId("census-year-btn-1940").click();
+    await expect(page.getByTestId("census-year-btn-1940")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("body")).toContainText("Obec Testová");
+    await expect(page.locator("body")).toContainText("cair-test003");
+    // Switch back to 1930
+    await page.getByTestId("census-year-btn-1930").click();
+    await expect(page.getByTestId("census-year-btn-1930")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("body")).toContainText("cair-test001");
+
+    // E. Seamless year switch on CensusSheetView (1930 <-> 1940 for same house Dom č. 15 in Obec Testová)
     await page.goto("/scitacie-harky/cair-test001", { waitUntil: "networkidle" });
+    await expect(page.getByTestId("sheet-year-btn-1930")).toHaveAttribute("aria-pressed", "true");
+    await page.getByTestId("sheet-year-btn-1940").click();
+    await expect(page.locator("body")).toContainText("cair-test003");
+    await expect(page.getByTestId("sheet-year-btn-1940")).toHaveAttribute("aria-pressed", "true");
+    await page.getByTestId("sheet-year-btn-1930").click();
+    await expect(page.locator("body")).toContainText("cair-test001");
+    await expect(page.getByTestId("sheet-year-btn-1930")).toHaveAttribute("aria-pressed", "true");
+
+    // F. Clicking "Znova spustiť AI OCR & párovanie" on a sheet shows live progress bar card
     await page.route("**/api/census/sheets/*/download-and-process*", async (route) => {
       await new Promise((r) => setTimeout(r, 350));
       await route.fulfill({

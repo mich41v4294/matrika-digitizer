@@ -86,7 +86,8 @@ def _find_matching_census_sheets(
     sheets deterministically (overview sheets first, already-downloaded sheets next,
     then by census_year, house_number_int, and id).
     """
-    years = filters.get("years") or [1930, 1940]
+    raw_years = filters.get("years") or [1930]
+    years = [int(raw_years[0]) if raw_years and int(raw_years[0]) == 1940 else 1930]
     include_blackened = bool(filters.get("include_blackened", True))
     category_keys = [
         str(k).strip() for k in (filters.get("category_keys") or []) if str(k).strip()
@@ -255,7 +256,8 @@ async def run_catalog_harvest_job(
         if not job:
             return {"error": f"Job {job_id} not found"}
         filters = json.loads(job.filter_json or "{}")
-        years = filters.get("years") or [1930, 1940]
+        raw_years = filters.get("years") or [1930]
+        years = [int(raw_years[0]) if raw_years and int(raw_years[0]) == 1940 else 1930]
         category_keys = [
             str(k).strip() for k in (filters.get("category_keys") or []) if str(k).strip()
         ]

@@ -331,6 +331,24 @@ def seed_isolated_database() -> None:
             draw_grid=False,
         )
 
+    # Census Sheet cair-test003 (1940 Household sheet for Obec Testová, dom č. 15)
+    c3_front = census_dir / "cair-test003" / "cair-test003_v.jpg"
+    _write_synthetic_jpeg(
+        c3_front,
+        1800,
+        1250,
+        "Scitaci harok cair-test003 (1940) - Predna strana (_v)",
+        "Obec Testova, dom c. 15, okres Trnava - Domacnost Jan Kovac (1940)",
+    )
+    _write_synthetic_jpeg(
+        census_dir / "thumbnails" / "cair-test003.jpg",
+        320,
+        240,
+        "cair-test003",
+        "Dom c. 15 (1940)",
+        draw_grid=False,
+    )
+
     with Session(engine) as session:
         # 3. Seed Matrika Batch, ScanImage, RecordRows, PersonFacts
         batch = Batch(
@@ -676,7 +694,43 @@ def seed_isolated_database() -> None:
             commissioner_name="Jozef Kráľ",
             download_status="extracted",
         )
-        session.add_all([sheet1, sheet2])
+        sheet3 = CensusSheet(
+            slovakiana_key="cair-test003",
+            digital_object_id="doid-test003",
+            urn_nbn="urn:nbn:sk:sna-cair-test003",
+            census_year=1940,
+            district="Trnava",
+            district_key="769",
+            district_folded="trnava",
+            municipality="Obec Testová",
+            municipality_key="76901",
+            municipality_folded="obec testova",
+            street_raw="Hlavná",
+            house_number="15",
+            house_number_int=15,
+            box_number="0201",
+            sheet_number="0015",
+            title_raw="Sčítací hárok 201/15, Hlavná 15, Obec Testová (Trnava)",
+            is_blackened=True,
+            has_images=True,
+            image_urls_json=json.dumps(
+                [
+                    {
+                        "index": 0,
+                        "page_side": "front",
+                        "width": 1800,
+                        "height": 1250,
+                        "jpeg_url": "/media/uploads/slovakiana/cair-test003/cair-test003_v.jpg",
+                        "thumbnail_url": "/media/uploads/slovakiana/thumbnails/cair-test003.jpg",
+                    }
+                ]
+            ),
+            household_owner="Ján Kováč",
+            sheet_type="household",
+            obvod_number="I",
+            download_status="cataloged",
+        )
+        session.add_all([sheet1, sheet2, sheet3])
         session.flush()
 
         scan2.census_sheet_id = sheet1.id

@@ -464,10 +464,10 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     };
   }, []);
 
-  // Left Sidebar filters (`Okresy a obce`) initialized from URL
-  const [selectedYearFilter, setSelectedYearFilter] = useState<"" | "1930" | "1940">(() => {
+  // Left Sidebar filters (`Okresy a obce`) initialized from URL — always a single year (1930 by default)
+  const [selectedYearFilter, setSelectedYearFilter] = useState<"1930" | "1940">(() => {
     const yr = searchParams.get("rok") || searchParams.get("year") || "";
-    return yr === "1930" || yr === "1940" ? yr : "";
+    return yr === "1940" ? "1940" : "1930";
   });
   const [selectedDistrictTag, setSelectedDistrictTag] = useState<string>(
     () => searchParams.get("okres_tag") || ""
@@ -612,12 +612,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [processingSheetId, setProcessingSheetId] = useState<string | null>(null);
 
-  const selectedYearTag =
-    selectedYearFilter === "1930"
-      ? "10001"
-      : selectedYearFilter === "1940"
-      ? "10003"
-      : "";
+  const selectedYearTag = selectedYearFilter === "1940" ? "10003" : "10001";
 
   const loadFacets = async (districtTag?: string, yearTag?: string) => {
     try {
@@ -1463,7 +1458,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   const hasAnyActiveFilter = Boolean(
     selectedMunicipality ||
       selectedDistrictName ||
-      selectedYearFilter ||
+      selectedYearFilter !== "1930" ||
       streetFilter.trim() ||
       personNameFilter.trim() ||
       birthYearFilter.trim() ||
@@ -1477,7 +1472,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     setSelectedMunicipalityTag("");
     setSelectedDistrictName("");
     setSelectedDistrictTag("");
-    setSelectedYearFilter("");
+    setSelectedYearFilter("1930");
     setLocationQuickFilter("");
     setStreetFilter("");
     setPersonNameFilter("");
@@ -1485,6 +1480,54 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     setBirthPlaceFilter("");
     setWorkspaceSearch("");
     setCardSubFilter("all");
+  };
+
+  const handleSwitchYear = (nextYear: "1930" | "1940") => {
+    if (nextYear === selectedYearFilter) return;
+    const targetYrNum = Number(nextYear);
+    const trimmedQ = workspaceSearch.trim();
+    if (trimmedQ && /^cair-[a-z0-9_-]+$/i.test(trimmedQ)) {
+      const qLower = trimmedQ.toLowerCase();
+      const matchedSheetRow = sheets.find(
+        (r) => r.sheet.slovakiana_id.toLowerCase() === qLower
+      );
+      const matchedHouseEntry = (muniOverview?.houses_directory || []).find(
+        (h) => (h.slovakiana_key || "").toLowerCase() === qLower
+      );
+      const linked =
+        (matchedSheetRow?.sheet.linked_house_sheets || []).find(
+          (l) => l.census_year === targetYrNum
+        ) ||
+        (matchedHouseEntry?.linked_house_sheets || []).find(
+          (l) => l.census_year === targetYrNum
+        );
+      if (linked) {
+        const linkedRef = linked.cair_id || linked.slovakiana_key || "";
+        if (linkedRef) {
+          setWorkspaceSearch(linkedRef);
+        }
+        if (!selectedMunicipality && linked.municipality) {
+          setSelectedMunicipality(linked.municipality);
+        }
+      } else if (matchedSheetRow || matchedHouseEntry) {
+        const hn =
+          matchedSheetRow?.sheet.house_number_conscription ||
+          matchedSheetRow?.sheet.house_number_raw ||
+          matchedHouseEntry?.house_number ||
+          "";
+        const muni =
+          matchedSheetRow?.sheet.municipality_name ||
+          matchedHouseEntry?.municipality ||
+          "";
+        if (muni && !selectedMunicipality) {
+          setSelectedMunicipality(muni);
+        }
+        if (hn) {
+          setWorkspaceSearch(hn);
+        }
+      }
+    }
+    setSelectedYearFilter(nextYear);
   };
 
   const hasActivePersonFilter = Boolean(
@@ -1661,11 +1704,15 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
           </a>
         </div>
 
-        {/* Year Filter Pills: Všetky | 1930 | 1940 */}
-        <div className="grid grid-cols-3 gap-1 bg-stone-100 p-1 rounded-lg border border-stone-200 text-xs">
+        {/* Year Switch: 1930 | 1940 (always single year, 1930 by default) */}
+        <div
+          data-testid="census-year-switch"
+          role="group"
+          aria-label={lang === "sk" ? "Rok sčítania" : "Census year"}
+          className="grid grid-cols-2 gap-1 bg-stone-100 p-1 rounded-lg border border-stone-200 text-xs"
+        >
           {(
             [
-              { label: lang === "sk" ? "Všetky" : "All", value: "" },
               { label: "1930", value: "1930" },
               { label: "1940", value: "1940" },
             ] as const
@@ -1673,9 +1720,11 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
             const active = selectedYearFilter === yr.value;
             return (
               <button
-                key={yr.value || "all"}
+                key={yr.value}
                 type="button"
-                onClick={() => setSelectedYearFilter(yr.value)}
+                data-testid={`census-year-btn-${yr.value}`}
+                aria-pressed={active}
+                onClick={() => handleSwitchYear(yr.value)}
                 className={`py-1.5 min-h-[32px] rounded-md font-bold transition cursor-pointer ${
                   active
                     ? "bg-stone-900 text-amber-300 shadow-xs"
@@ -1791,7 +1840,9 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   : "bg-stone-200 text-stone-800"
               }`}
             >
-              {stats?.total_cataloged_sheets ?? totalSheets}
+              {selectedYearFilter === "1940"
+                ? stats?.sheets_1940 ?? totalSheets
+                : stats?.sheets_1930 ?? totalSheets}
             </span>
           </button>
 
@@ -1905,11 +1956,43 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                     ? "Všetky obce v databáze"
                     : "All Municipalities in Database"}
                 </h1>
-                {selectedYearFilter && (
-                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-xs font-bold">
-                    Rok {selectedYearFilter}
-                  </span>
-                )}
+                <div
+                  data-testid="workspace-year-switch"
+                  role="group"
+                  aria-label={
+                    lang === "sk" ? "Prepnúť rok sčítania" : "Switch census year"
+                  }
+                  className="inline-flex items-center rounded-lg bg-stone-100 p-0.5 border border-stone-300 text-xs"
+                >
+                  {(["1930", "1940"] as const).map((yr) => {
+                    const active = selectedYearFilter === yr;
+                    return (
+                      <button
+                        key={yr}
+                        type="button"
+                        data-testid={`workspace-year-btn-${yr}`}
+                        aria-pressed={active}
+                        onClick={() => handleSwitchYear(yr)}
+                        title={
+                          selectedMunicipality
+                            ? lang === "sk"
+                              ? `Prepnúť obec ${selectedMunicipality} na rok ${yr}`
+                              : `Switch ${selectedMunicipality} to year ${yr}`
+                            : lang === "sk"
+                            ? `Prepnúť na sčítanie ${yr}`
+                            : `Switch to ${yr} census`
+                        }
+                        className={`px-2.5 py-1 min-h-[28px] rounded-md font-bold transition cursor-pointer ${
+                          active
+                            ? "bg-stone-900 text-amber-300 shadow-2xs"
+                            : "text-stone-700 hover:bg-stone-200/80"
+                        }`}
+                      >
+                        {lang === "sk" ? `Rok ${yr}` : `Year ${yr}`}
+                      </button>
+                    );
+                  })}
+                </div>
                 {Boolean(selectedMunicipality) && slovakianaMunicipalityUrl && (
                   <a
                     href={slovakianaMunicipalityUrl}

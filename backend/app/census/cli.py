@@ -35,7 +35,7 @@ async def _main_async() -> None:
     sub.add_parser("facets", help="Fetch and cache Slovakiana years, districts, and municipalities")
 
     p_harvest = sub.add_parser("harvest-catalog", help="Run Tier-1 catalog harvester into SQLite + FTS5")
-    p_harvest.add_argument("--years", type=int, nargs="+", default=[1930, 1940])
+    p_harvest.add_argument("--years", type=int, nargs="+", default=[1930])
     p_harvest.add_argument("--category-keys", nargs="*", default=[])
     p_harvest.add_argument("--search", type=str, default="")
     p_harvest.add_argument("--max-pages", type=int, default=None)
@@ -43,7 +43,7 @@ async def _main_async() -> None:
     p_harvest.add_argument("--only-unblackened", action="store_true")
 
     p_dl = sub.add_parser("download-scans", help="Run Tier-2 scan downloader & optional OCR pipeline")
-    p_dl.add_argument("--years", type=int, nargs="+", default=[1930, 1940])
+    p_dl.add_argument("--years", type=int, nargs="+", default=[1930])
     p_dl.add_argument("--category-keys", nargs="*", default=[])
     p_dl.add_argument("--search", type=str, default="")
     p_dl.add_argument("--limit", type=int, default=20)

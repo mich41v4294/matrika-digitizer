@@ -428,6 +428,114 @@ class TestCensusVillageHouseMatching(unittest.TestCase):
             self.assertEqual(len(unified_street["catalog_sheets"]), 1)
             self.assertEqual(unified_street["catalog_sheets"][0].slovakiana_key, "cair-test007")
 
+    def test_single_year_selection_default_1930_and_seamless_year_switch(self) -> None:
+        import asyncio
+        from backend.app.api.census import (
+            get_municipalities_summary,
+            switch_census_sheet_year,
+        )
+
+        with Session(self.engine) as session:
+            s_1930 = CensusSheet(
+                slovakiana_key="cair-sw1930",
+                census_year=1930,
+                district="Galanta",
+                municipality="Horný Čepeň",
+                municipality_folded="horny cepen",
+                municipality_key="10232",
+                street_raw="Škovránková",
+                house_number="15",
+                house_number_int=15,
+                sheet_number="0015",
+                household_owner="Ján Kováč",
+                sheet_type="household",
+                download_status="extracted",
+            )
+            s_1940 = CensusSheet(
+                slovakiana_key="cair-sw1940",
+                census_year=1940,
+                district="Trnava",
+                municipality="Horný Čepeň",
+                municipality_folded="horny cepen",
+                municipality_key="10232",
+                street_raw="Škovránková",
+                house_number="15",
+                house_number_int=15,
+                sheet_number="0115",
+                household_owner="Ján Kováč",
+                sheet_type="household",
+                download_status="cataloged",
+            )
+            session.add_all([s_1930, s_1940])
+            session.commit()
+            session.refresh(s_1930)
+            session.refresh(s_1940)
+
+            # 1. Default year is strictly 1930 when census_year is omitted
+            default_sheets = list_census_sheets(
+                background_tasks=BackgroundTasks(),
+                municipality="Horný Čepeň",
+                session=session,
+            )
+            self.assertEqual(default_sheets["total"], 1)
+            self.assertEqual(default_sheets["sheets"][0]["sheet"]["slovakiana_id"], "cair-sw1930")
+            self.assertEqual(default_sheets["sheets"][0]["sheet"]["census_year"], 1930)
+
+            default_ov = get_municipality_overview(
+                municipality="Horný Čepeň",
+                session=session,
+            )
+            self.assertEqual(default_ov["census_year"], 1930)
+            self.assertEqual(default_ov["total_houses"], 1)
+            self.assertEqual(default_ov["houses_directory"][0]["slovakiana_key"], "cair-sw1930")
+
+            # 2. Switching to 1940 shows only 1940 for the same village & house (even across district reorganization)
+            sheets_1940 = list_census_sheets(
+                background_tasks=BackgroundTasks(),
+                municipality="Horný Čepeň",
+                district="Galanta",
+                census_year=1940,
+                session=session,
+            )
+            self.assertEqual(sheets_1940["total"], 1)
+            self.assertEqual(sheets_1940["sheets"][0]["sheet"]["slovakiana_id"], "cair-sw1940")
+            self.assertEqual(sheets_1940["sheets"][0]["sheet"]["census_year"], 1940)
+
+            ov_1940 = get_municipality_overview(
+                municipality="Horný Čepeň",
+                district="Galanta",
+                census_year=1940,
+                session=session,
+            )
+            self.assertEqual(ov_1940["census_year"], 1940)
+            self.assertEqual(ov_1940["total_houses"], 1)
+            self.assertEqual(ov_1940["houses_directory"][0]["slovakiana_key"], "cair-sw1940")
+
+            # 3. Municipalities summary only counts the active year while preserving the village entry
+            sum_1930 = get_municipalities_summary(session=session, census_year=1930)
+            self.assertEqual(sum_1930["census_year"], 1930)
+            self.assertEqual(sum_1930["municipalities"][0]["total_sheets"], 1)
+            sum_1940 = get_municipalities_summary(session=session, census_year=1940)
+            self.assertEqual(sum_1940["census_year"], 1940)
+            self.assertEqual(sum_1940["municipalities"][0]["total_sheets"], 1)
+
+            # 4. Seamless house transfer via switch_census_sheet_year (1930 <-> 1940)
+            sw_to_1940 = asyncio.run(
+                switch_census_sheet_year("cair-sw1930", session=session, target_year=1940)
+            )
+            self.assertEqual(sw_to_1940["target_type"], "sheet")
+            self.assertEqual(sw_to_1940["slovakiana_key"], "cair-sw1940")
+            self.assertEqual(sw_to_1940["census_year"], 1940)
+            self.assertEqual(sw_to_1940["house_number"], "15")
+
+            sw_to_1930 = asyncio.run(
+                switch_census_sheet_year("cair-sw1940", session=session, target_year=1930)
+            )
+            self.assertEqual(sw_to_1930["target_type"], "sheet")
+            self.assertEqual(sw_to_1930["slovakiana_key"], "cair-sw1930")
+            self.assertEqual(sw_to_1930["census_year"], 1930)
+            self.assertEqual(sw_to_1930["house_number"], "15")
+
 
 if __name__ == "__main__":
     unittest.main()

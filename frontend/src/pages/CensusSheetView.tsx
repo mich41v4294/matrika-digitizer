@@ -945,6 +945,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [switchingType, setSwitchingType] = useState(false);
+  const [switchingYear, setSwitchingYear] = useState(false);
   const [sheetProgress, setSheetProgress] = useState<{
     active: boolean;
     completedJustNow: boolean;
@@ -1077,6 +1078,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             }
             return data.members[0].fact.id;
           });
+        } else {
+          setSelectedMemberId(null);
         }
         if (data.overview_houses && data.overview_houses.length > 0) {
           setSelectedHouseId((prev) => {
@@ -1094,6 +1097,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             }
             return data.overview_houses![0].id;
           });
+        } else {
+          setSelectedHouseId(null);
         }
         if (data.municipal_overview_districts && data.municipal_overview_districts.length > 0) {
           setSelectedDistrictRowId((prev) => {
@@ -1102,6 +1107,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             }
             return data.municipal_overview_districts![0].id;
           });
+        } else {
+          setSelectedDistrictRowId(null);
         }
       }
     } finally {
@@ -1110,6 +1117,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   };
 
   useEffect(() => {
+    const urlRow = Number(searchParams.get("row"));
+    const urlEditRow = Number(searchParams.get("editRow"));
+    const urlHouse = Number(searchParams.get("house"));
+    setSelectedMemberId(Number.isFinite(urlRow) && urlRow > 0 ? urlRow : null);
+    setEditingMemberId(Number.isFinite(urlEditRow) && urlEditRow > 0 ? urlEditRow : null);
+    setSelectedHouseId(Number.isFinite(urlHouse) && urlHouse > 0 ? urlHouse : null);
+    setEditingHouseId(null);
+    setSelectedDistrictRowId(null);
+    setEditingDistrictRowId(null);
     setSheetProgress((prev) => ({
       ...prev,
       active: false,
@@ -1235,6 +1251,97 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       clearInterval(poller);
     };
   }, [processing, switchingType]);
+
+  const handleSwitchSheetYear = async (targetYear: 1930 | 1940) => {
+    if (!detail || detail.sheet.census_year === targetYear || switchingYear) return;
+    const currentSheet = detail.sheet;
+    const isOv =
+      currentSheet.sheet_type === "overview" ||
+      currentSheet.sheet_type === "municipal_overview";
+
+    // Fast path for household sheets when linked_house_sheets already has the target year sheet
+    if (!isOv) {
+      const directLinked = (
+        detail.linked_house_sheets ||
+        currentSheet.linked_house_sheets ||
+        []
+      ).find((l) => l.census_year === targetYear);
+      if (directLinked) {
+        const ref =
+          directLinked.cair_id ||
+          directLinked.slovakiana_key ||
+          String(directLinked.id);
+        const sp = new URLSearchParams();
+        if (highlightPersonQuery) sp.set("meno", highlightPersonQuery);
+        navigate(`/scitacie-harky/${ref}${sp.toString() ? `?${sp.toString()}` : ""}`);
+        return;
+      }
+    }
+
+    setSwitchingYear(true);
+    try {
+      const sheetRef = currentSheet.slovakiana_id || String(currentSheet.id);
+      const params = new URLSearchParams({ target_year: String(targetYear) });
+      const activeHouseObj =
+        (detail.overview_houses || []).find((h) => h.id === selectedHouseId) ||
+        detail.overview_houses?.[0] ||
+        null;
+      if (isOv && activeHouseObj?.house_number) {
+        params.set("house_number", String(activeHouseObj.house_number));
+      } else if (
+        !isOv &&
+        (currentSheet.house_number_conscription || currentSheet.house_number_raw)
+      ) {
+        params.set(
+          "house_number",
+          String(
+            currentSheet.house_number_conscription || currentSheet.house_number_raw
+          )
+        );
+      }
+      const res = await fetch(
+        `/api/census/sheets/${encodeURIComponent(sheetRef)}/switch-year?${params.toString()}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (
+          (data.target_type === "sheet" || data.target_type === "overview_house") &&
+          (data.slovakiana_key || data.sheet_id)
+        ) {
+          const ref = data.slovakiana_key || String(data.sheet_id);
+          const sp = new URLSearchParams();
+          if (data.house_id) sp.set("house", String(data.house_id));
+          if (highlightPersonQuery) sp.set("meno", highlightPersonQuery);
+          navigate(`/scitacie-harky/${ref}${sp.toString() ? `?${sp.toString()}` : ""}`);
+          return;
+        }
+      }
+    } catch {
+      // Fallback below
+    } finally {
+      setSwitchingYear(false);
+    }
+
+    // Fallback: navigate to the same village (and house number if applicable) in targetYear
+    const sp = new URLSearchParams();
+    if (currentSheet.municipality_name) {
+      sp.set("obec", normalizePlaceSpelling(currentSheet.municipality_name));
+    }
+    if (currentSheet.district_name) {
+      sp.set("okres", currentSheet.district_name);
+    }
+    sp.set("rok", String(targetYear));
+    const hn = !isOv
+      ? currentSheet.house_number_conscription || currentSheet.house_number_raw
+      : null;
+    if (hn) {
+      sp.set("q", String(hn));
+    }
+    if (highlightPersonQuery) {
+      sp.set("meno", highlightPersonQuery);
+    }
+    navigate(`/scitacie-harky?${sp.toString()}`);
+  };
 
   const handleDownloadAndProcess = async () => {
     if (!sheetId) return;
@@ -2097,8 +2204,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                       sheet.district_name
                         ? `&okres=${encodeURIComponent(sheet.district_name)}`
                         : ""
-                    }`
-                  : "/scitacie-harky"
+                    }&rok=${sheet.census_year === 1940 ? "1940" : "1930"}`
+                  : `/scitacie-harky?rok=${sheet.census_year === 1940 ? "1940" : "1930"}`
               }
               className="p-2 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-800"
               title={
@@ -2162,6 +2269,64 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                       }`
                     : ""}
                 </h2>
+
+                {/* Interactive Year Switch (1930 | 1940) to seamlessly transfer to same house/village in new year */}
+                <div
+                  data-testid="sheet-year-switch"
+                  role="group"
+                  aria-label={
+                    lang === "sk" ? "Prepnúť rok sčítania" : "Switch census year"
+                  }
+                  className="inline-flex items-center rounded-lg bg-stone-100 p-0.5 border border-stone-300 text-xs"
+                >
+                  {([1930, 1940] as const).map((yr) => {
+                    const active = (sheet.census_year === 1940 ? 1940 : 1930) === yr;
+                    return (
+                      <button
+                        key={yr}
+                        type="button"
+                        data-testid={`sheet-year-btn-${yr}`}
+                        aria-pressed={active}
+                        disabled={switchingYear}
+                        onClick={() => handleSwitchSheetYear(yr)}
+                        title={
+                          active
+                            ? `${lang === "sk" ? "Aktuálny rok sčítania" : "Current census year"}: ${yr}`
+                            : lang === "sk"
+                            ? `Prepnúť na rok ${yr} (${normalizePlaceSpelling(
+                                sheet.municipality_name
+                              )}${
+                                !isOverviewSheet &&
+                                !isMunicipalOverviewSheet &&
+                                (sheet.house_number_conscription || sheet.house_number_raw)
+                                  ? `, dom č. ${
+                                      sheet.house_number_conscription || sheet.house_number_raw
+                                    }`
+                                  : ""
+                              })`
+                            : `Switch to year ${yr} (${normalizePlaceSpelling(
+                                sheet.municipality_name
+                              )}${
+                                !isOverviewSheet &&
+                                !isMunicipalOverviewSheet &&
+                                (sheet.house_number_conscription || sheet.house_number_raw)
+                                  ? `, house #${
+                                      sheet.house_number_conscription || sheet.house_number_raw
+                                    }`
+                                  : ""
+                              })`
+                        }
+                        className={`px-2.5 py-1 min-h-[28px] rounded-md font-bold transition cursor-pointer disabled:opacity-50 ${
+                          active
+                            ? "bg-stone-900 text-amber-300 shadow-2xs"
+                            : "text-stone-700 hover:bg-stone-200/80"
+                        }`}
+                      >
+                        {yr}
+                      </button>
+                    );
+                  })}
+                </div>
 
                 <span
                   className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
@@ -2751,7 +2916,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {!isOverviewSheet && (household || bytGroups.length > 0) && (
+            {!isOverviewSheet && !isMunicipalOverviewSheet && (household || bytGroups.length > 0) && (
               <div className="text-xs sm:text-sm font-semibold text-stone-800 flex items-center gap-1.5">
                 <Users className="w-4 h-4 text-amber-600" />
                 {hasMultipleByty ? (

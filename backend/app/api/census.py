@@ -16,6 +16,7 @@ from backend.app.api.scans import resolve_scan_media_url
 from backend.app.census.slovakiana_client import (
     TAG_KEY_TO_YEAR,
     WCM_BASE_URL,
+    YEAR_TO_TAG_KEY,
     slovakiana_client,
 )
 from backend.app.config import settings
@@ -538,7 +539,8 @@ def _serialize_household(hh: CensusHousehold | None) -> dict[str, Any] | None:
 class StartCensusJobRequest(BaseModel):
     name: str | None = None
     job_type: str = "catalog_harvest"  # "catalog_harvest" | "download_and_pipeline"
-    census_year_tag: str | None = None  # "10001" (1930) | "10003" (1940) | None (both)
+    census_year_tag: str | None = "10001"  # "10001" (1930) | "10003" (1940) — always single year (1930 default)
+    census_year: int | None = None
     district_tag: str | None = None
     municipality_tag: str | None = None
     municipality: str | None = None
@@ -552,12 +554,30 @@ class StartCensusJobRequest(BaseModel):
 
 class RemoteSearchRequest(BaseModel):
     query_text: str | None = None
-    year_tag: str | None = None
+    year_tag: str | None = "10001"
+    census_year: int | None = None
     district_tag: str | None = None
     municipality_tag: str | None = None
     page: int = 1
     page_size: int = 20
     save_to_catalog: bool = True
+
+
+def _resolve_single_census_year(
+    census_year: int | str | None = None,
+    year_tag: str | None = None,
+) -> int:
+    """
+    Resolves census year to a single year (1930 or 1940), defaulting to 1930.
+    Never allows selecting both years at once.
+    """
+    if year_tag and str(year_tag).strip() in TAG_KEY_TO_YEAR:
+        yr = TAG_KEY_TO_YEAR[str(year_tag).strip()]
+        return 1940 if yr == 1940 else 1930
+    if census_year is not None and str(census_year).strip().isdigit():
+        yr = int(str(census_year).strip())
+        return 1940 if yr == 1940 else 1930
+    return 1930
 
 
 class CreateCensusPersonRequest(BaseModel):
@@ -644,16 +664,19 @@ async def get_census_facets(
     """
     Fetches live Slovakiana facets (years 1930/1940, districts, and municipalities).
     When `district_tag` is provided, queries Slovakiana for the exact municipalities in that district.
+    Always resolves to a single year (1930 by default).
     """
     try:
-        only_unblackened = year_tag == "10001"
+        eff_year = _resolve_single_census_year(year_tag=year_tag)
+        eff_year_tag = YEAR_TO_TAG_KEY[eff_year]
+        only_unblackened = eff_year == 1930
         facets = await slovakiana_client.fetch_facets(only_unblackened=only_unblackened)
         years = facets.get("years") or []
         districts = facets.get("districts") or []
         if district_tag and district_tag.strip():
             cities = await slovakiana_client.fetch_cities_for_district(
                 district_tag=district_tag.strip(),
-                year_tag=year_tag.strip() if year_tag else None,
+                year_tag=eff_year_tag,
                 only_unblackened=only_unblackened,
             )
         else:
@@ -792,7 +815,8 @@ async def start_census_job(
     background_tasks: BackgroundTasks,
     session: SessionDep,
 ) -> dict[str, Any]:
-    years = [TAG_KEY_TO_YEAR[req.census_year_tag]] if req.census_year_tag in TAG_KEY_TO_YEAR else [1930, 1940]
+    resolved_year = _resolve_single_census_year(req.census_year, req.census_year_tag)
+    years = [resolved_year]
     cat_keys = [k for k in (req.district_tag, req.municipality_tag) if k]
     job_name = req.name or (
         f"Katalóg Slovakiana ({req.municipality or req.query_text or req.municipality_tag or req.district_tag or 'všetky'})"
@@ -881,7 +905,7 @@ def list_census_sheets(
     session: SessionDep,
     background_tasks: BackgroundTasks = BackgroundTasks(),
     q: str | None = None,
-    census_year: int | None = None,
+    census_year: int | None = 1930,
     municipality: str | None = None,
     district: str | None = None,
     street: str | None = None,
@@ -897,9 +921,12 @@ def list_census_sheets(
 ) -> dict[str, Any]:
     effective_person_name = person_name or person_query or owner_query
     person_name = effective_person_name
-    stmt = select(CensusSheet).order_by(CensusSheet.id.desc())
-    if census_year:
-        stmt = stmt.where(CensusSheet.census_year == census_year)
+    resolved_year = _resolve_single_census_year(census_year)
+    stmt = (
+        select(CensusSheet)
+        .where(CensusSheet.census_year == resolved_year)
+        .order_by(CensusSheet.id.desc())
+    )
     status_filter = pipeline_status or download_status
     if status_filter:
         if status_filter == "idle":
@@ -928,11 +955,13 @@ def list_census_sheets(
             all_matching = exact_muni
 
     if district and district.strip():
-        all_matching = [
+        dist_matching = [
             s
             for s in all_matching
             if _sheet_matches_district(s, district, municipality_specified=has_muni)
         ]
+        if dist_matching or not has_muni:
+            all_matching = dist_matching
 
     available_streets_set: set[str] = {
         s.street_raw.strip()
@@ -1341,8 +1370,10 @@ async def remote_search_slovakiana(
     """
     Searches live `wcm.slovakiana.sk/censussheet/search`, downloads local thumbnails
     for all returned hits, and indexes them into our local SQLite + FTS5 catalog.
+    Always searches a single census year (1930 by default).
     """
-    years = [TAG_KEY_TO_YEAR[req.year_tag]] if req.year_tag in TAG_KEY_TO_YEAR else None
+    resolved_year = _resolve_single_census_year(req.census_year, req.year_tag)
+    years = [resolved_year]
     cat_keys = [k for k in (req.district_tag, req.municipality_tag) if k]
 
     data = await slovakiana_client.search_sheets(
@@ -2795,6 +2826,210 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
     }
 
 
+@router.get("/sheets/{sheet_ref}/switch-year")
+async def switch_census_sheet_year(
+    sheet_ref: str,
+    session: SessionDep,
+    target_year: int = 1930,
+    house_number: str | None = None,
+) -> dict[str, Any]:
+    """
+    Resolves the cross-year target (1930 <-> 1940) for a given census sheet so the user
+    can seamlessly transfer to the same house/village in the newly selected year.
+    """
+    sheet = await _resolve_census_sheet(session, sheet_ref)
+    eff_target_year = _resolve_single_census_year(target_year)
+    canonical_muni = canonical_municipality_display(sheet.municipality) or sheet.municipality
+    target_muni = canonical_municipality_key(sheet.municipality)
+    eff_type = sheet.sheet_type or "household"
+
+    if sheet.census_year == eff_target_year:
+        return {
+            "target_type": "sheet",
+            "slovakiana_key": sheet.slovakiana_key,
+            "sheet_id": sheet.id,
+            "house_id": None,
+            "census_year": eff_target_year,
+            "municipality": canonical_muni,
+            "district": sheet.district,
+            "house_number": house_number or sheet.house_number,
+        }
+
+    req_hn_raw = house_number or (sheet.house_number if eff_type == "household" else None)
+    req_hn = normalize_house_number(req_hn_raw)
+
+    # 1. If viewing a household sheet, find the same house in the same village in eff_target_year
+    if eff_type == "household" and target_muni and req_hn:
+        cross_hh = [
+            o
+            for o in _find_matching_village_house_sheets(session, sheet)
+            if o.census_year == eff_target_year
+        ]
+        if not cross_hh:
+            cands = list(
+                session.exec(
+                    select(CensusSheet).where(
+                        CensusSheet.census_year == eff_target_year,
+                        CensusSheet.house_number.is_not(None),
+                    )
+                ).all()
+            )
+            for c in cands:
+                if (c.sheet_type or "household") in ("overview", "municipal_overview"):
+                    continue
+                if canonical_municipality_key(c.municipality) != target_muni:
+                    continue
+                if normalize_house_number(c.house_number) != req_hn:
+                    continue
+                if not is_compatible_settlement(sheet.street_raw, c.street_raw, sheet.municipality):
+                    continue
+                cross_hh.append(c)
+
+        if cross_hh:
+            cross_hh.sort(
+                key=lambda o: (
+                    0 if o.download_status in ("extracted", "matched", "ocr_done") else 1,
+                    o.sheet_number or "9999",
+                    o.id or 0,
+                )
+            )
+            best = cross_hh[0]
+            return {
+                "target_type": "sheet",
+                "slovakiana_key": best.slovakiana_key,
+                "sheet_id": best.id,
+                "house_id": None,
+                "census_year": eff_target_year,
+                "municipality": canonical_municipality_display(best.municipality) or canonical_muni,
+                "district": best.district or sheet.district,
+                "house_number": best.house_number or req_hn_raw,
+            }
+
+        # Check if the house is recorded in a target_year District Overview sheet
+        ovh_cands = list(
+            session.exec(
+                select(CensusOverviewHouse).where(
+                    CensusOverviewHouse.census_year == eff_target_year
+                )
+            ).all()
+        )
+        for ovh in ovh_cands:
+            if canonical_municipality_key(ovh.municipality) != target_muni:
+                continue
+            if normalize_house_number(ovh.house_number) != req_hn:
+                continue
+            if ovh.matched_sheet_id:
+                ms = session.get(CensusSheet, ovh.matched_sheet_id)
+                if (
+                    ms
+                    and ms.census_year == eff_target_year
+                    and canonical_municipality_key(ms.municipality) == target_muni
+                ):
+                    return {
+                        "target_type": "sheet",
+                        "slovakiana_key": ms.slovakiana_key,
+                        "sheet_id": ms.id,
+                        "house_id": None,
+                        "census_year": eff_target_year,
+                        "municipality": canonical_municipality_display(ms.municipality) or canonical_muni,
+                        "district": ms.district or sheet.district,
+                        "house_number": ms.house_number or ovh.house_number,
+                    }
+            ov_parent = session.get(CensusSheet, ovh.census_sheet_id) if ovh.census_sheet_id else None
+            if ov_parent and ov_parent.census_year == eff_target_year:
+                return {
+                    "target_type": "overview_house",
+                    "slovakiana_key": ov_parent.slovakiana_key,
+                    "sheet_id": ov_parent.id,
+                    "house_id": ovh.id,
+                    "census_year": eff_target_year,
+                    "municipality": canonical_muni,
+                    "district": ov_parent.district or sheet.district,
+                    "house_number": ovh.house_number,
+                }
+
+    # 2. If viewing an overview or municipal_overview sheet, find corresponding overview sheet in eff_target_year
+    if eff_type in ("overview", "municipal_overview") and target_muni:
+        year_sheets = [
+            s
+            for s in session.exec(
+                select(CensusSheet).where(CensusSheet.census_year == eff_target_year)
+            ).all()
+            if canonical_municipality_key(s.municipality) == target_muni
+        ]
+        target_ov_sheets = [
+            s
+            for s in year_sheets
+            if (s.sheet_type or "household") in ("overview", "municipal_overview")
+        ]
+        if target_ov_sheets:
+            target_ov_sheets.sort(
+                key=lambda s: (
+                    0 if (s.sheet_type or "household") == eff_type else 1,
+                    0
+                    if (
+                        sheet.obvod_number
+                        and s.obvod_number
+                        and s.obvod_number.strip().upper() == sheet.obvod_number.strip().upper()
+                    )
+                    else 1,
+                    s.sheet_number or "9999",
+                    s.id or 0,
+                )
+            )
+            best_ov = target_ov_sheets[0]
+            matched_house_id: int | None = None
+            if req_hn and best_ov.id is not None:
+                ov_houses = list(
+                    session.exec(
+                        select(CensusOverviewHouse).where(
+                            CensusOverviewHouse.census_sheet_id == best_ov.id
+                        )
+                    ).all()
+                )
+                for ovh in ov_houses:
+                    if normalize_house_number(ovh.house_number) == req_hn:
+                        matched_house_id = ovh.id
+                        break
+            return {
+                "target_type": "sheet",
+                "slovakiana_key": best_ov.slovakiana_key,
+                "sheet_id": best_ov.id,
+                "house_id": matched_house_id,
+                "census_year": eff_target_year,
+                "municipality": canonical_municipality_display(best_ov.municipality) or canonical_muni,
+                "district": best_ov.district or sheet.district,
+                "house_number": req_hn_raw,
+            }
+
+    # 3. Fallback: transfer to the same village (and house number if applicable) in eff_target_year
+    target_dist = sheet.district
+    if target_muni:
+        any_year_sheet = next(
+            (
+                s
+                for s in session.exec(
+                    select(CensusSheet).where(CensusSheet.census_year == eff_target_year)
+                ).all()
+                if canonical_municipality_key(s.municipality) == target_muni and s.district
+            ),
+            None,
+        )
+        if any_year_sheet and any_year_sheet.district:
+            target_dist = any_year_sheet.district
+
+    return {
+        "target_type": "municipality",
+        "slovakiana_key": None,
+        "sheet_id": None,
+        "house_id": None,
+        "census_year": eff_target_year,
+        "municipality": canonical_muni,
+        "district": target_dist,
+        "house_number": req_hn_raw if eff_type == "household" else None,
+    }
+
+
 @router.post("/sheets/{sheet_ref}/download-and-process")
 async def trigger_sheet_download_and_process(
     sheet_ref: str,
@@ -3277,7 +3512,7 @@ def delete_overview_house(house_id: int, session: SessionDep) -> dict[str, Any]:
 def get_municipality_overview(
     session: SessionDep,
     municipality: str | None = None,
-    census_year: int | None = None,
+    census_year: int | None = 1930,
     district: str | None = None,
     street: str | None = None,
     person_name: str | None = None,
@@ -3290,12 +3525,11 @@ def get_municipality_overview(
     """
     Returns a unified village/house directory (`Dom č. 1 .. N`) merging `Prehľad sčítacieho obvodu`
     (`CensusOverviewHouse`) rows and household `CensusSheet`s (`sheet_type == 'household'`)
-    for the requested municipality.
+    for the requested municipality in a single census year (1930 by default).
     """
     person_name = person_name or person_query or owner_query
-    stmt = select(CensusSheet)
-    if census_year:
-        stmt = stmt.where(CensusSheet.census_year == census_year)
+    resolved_census_year = _resolve_single_census_year(census_year)
+    stmt = select(CensusSheet).where(CensusSheet.census_year == resolved_census_year)
 
     sheets = list(session.exec(stmt.order_by(CensusSheet.id.asc())).all())
     has_muni = bool(municipality and municipality.strip())
@@ -3312,11 +3546,13 @@ def get_municipality_overview(
             sheets = exact_muni
 
     if district and district.strip():
-        sheets = [
+        dist_sheets = [
             s
             for s in sheets
             if _sheet_matches_district(s, district, municipality_specified=has_muni)
         ]
+        if dist_sheets or not has_muni:
+            sheets = dist_sheets
 
     sheet_ids = [s.id for s in sheets if s.id is not None]
     sheets_by_id: dict[int, CensusSheet] = {s.id: s for s in sheets if s.id is not None}
@@ -3513,8 +3749,7 @@ def get_municipality_overview(
         )
     elif municipality and municipality.strip():
         ov_stmt = ov_stmt.where(CensusOverviewHouse.municipality.ilike(f"%{municipality.strip()}%"))
-    if census_year:
-        ov_stmt = ov_stmt.where(CensusOverviewHouse.census_year == census_year)
+    ov_stmt = ov_stmt.where(CensusOverviewHouse.census_year == resolved_census_year)
 
     ov_houses = list(session.exec(ov_stmt.order_by(CensusOverviewHouse.census_sheet_id.asc(), CensusOverviewHouse.row_index.asc())).all())
     if municipality and municipality.strip():
@@ -3933,7 +4168,21 @@ def get_municipality_overview(
     raw_muni = (sheets[0].municipality if sheets else None) or municipality
     resolved_muni = canonical_municipality_display(raw_muni) or raw_muni
     resolved_dist = (sheets[0].district if sheets else None) or district
-    resolved_year = (sheets[0].census_year if sheets else None) or census_year or 1930
+    if not resolved_dist and has_muni and municipality:
+        target_canon_fallback = canonical_municipality_key(municipality)
+        fallback_sheet = next(
+            (
+                s
+                for s in session.exec(select(CensusSheet)).all()
+                if canonical_municipality_key(s.municipality) == target_canon_fallback and s.district
+            ),
+            None,
+        )
+        if fallback_sheet:
+            resolved_dist = fallback_sheet.district
+            if not raw_muni and fallback_sheet.municipality:
+                resolved_muni = canonical_municipality_display(fallback_sheet.municipality) or fallback_sheet.municipality
+    resolved_year = resolved_census_year
 
     return {
         "municipality": resolved_muni,
@@ -3954,7 +4203,7 @@ municipality_overview = get_municipality_overview
 def list_overview_houses(
     session: SessionDep,
     municipality: str | None = None,
-    census_year: int | None = None,
+    census_year: int | None = 1930,
     district: str | None = None,
     street: str | None = None,
     person_name: str | None = None,
@@ -3964,9 +4213,12 @@ def list_overview_houses(
     limit: int = 200,
     offset: int = 0,
 ) -> dict[str, Any]:
-    stmt = select(CensusOverviewHouse).order_by(CensusOverviewHouse.row_index.asc())
-    if census_year:
-        stmt = stmt.where(CensusOverviewHouse.census_year == census_year)
+    resolved_year = _resolve_single_census_year(census_year)
+    stmt = (
+        select(CensusOverviewHouse)
+        .where(CensusOverviewHouse.census_year == resolved_year)
+        .order_by(CensusOverviewHouse.row_index.asc())
+    )
     houses = list(session.exec(stmt).all())
     if municipality and municipality.strip():
         target_canon = canonical_municipality_key(municipality)
@@ -4026,39 +4278,40 @@ def list_overview_houses(
 @router.get("/municipalities-summary")
 def get_municipalities_summary(
     session: SessionDep,
-    census_year: int | None = None,
+    census_year: int | None = 1930,
     district: str | None = None,
 ) -> dict[str, Any]:
     """
     Returns a summary of municipalities in the local DB (total sheets, OCR-done sheets,
     overview sheets count, extracted persons count, and overview houses count) to power
     the Left Sidebar in CensusHub.tsx.
+    Always computes counts for a single census year (`census_year`, 1930 by default) while
+    preserving all known local municipalities so switching between 1930 and 1940 seamlessly
+    transfers the selected municipality.
     """
-    stmt = select(CensusSheet)
-    if census_year:
-        stmt = stmt.where(CensusSheet.census_year == census_year)
-
-    sheets = list(session.exec(stmt).all())
+    resolved_year = _resolve_single_census_year(census_year)
+    all_sheets = list(session.exec(select(CensusSheet)).all())
     if district and district.strip():
-        sheets = [s for s in sheets if _sheet_matches_district(s, district, municipality_specified=False)]
+        all_sheets = [s for s in all_sheets if _sheet_matches_district(s, district, municipality_specified=False)]
     ov_count_by_muni_key: dict[str, int] = {}
     ov_persons_by_muni_key: dict[str, int] = {}
-    ov_grp_stmt = select(
-        CensusOverviewHouse.municipality,
-        func.count(CensusOverviewHouse.id),
-        func.coalesce(func.sum(CensusOverviewHouse.present_persons_count), 0),
+    ov_grp_stmt = (
+        select(
+            CensusOverviewHouse.municipality,
+            func.count(CensusOverviewHouse.id),
+            func.coalesce(func.sum(CensusOverviewHouse.present_persons_count), 0),
+        )
+        .where(CensusOverviewHouse.census_year == resolved_year)
+        .group_by(CensusOverviewHouse.municipality)
     )
-    if census_year:
-        ov_grp_stmt = ov_grp_stmt.where(CensusOverviewHouse.census_year == census_year)
-    ov_grp_stmt = ov_grp_stmt.group_by(CensusOverviewHouse.municipality)
     for raw_ov_muni, cnt, p_sum in session.exec(ov_grp_stmt).all():
         m_key = canonical_municipality_key(raw_ov_muni) or "neznama obec"
         ov_count_by_muni_key[m_key] = ov_count_by_muni_key.get(m_key, 0) + int(cnt or 0)
         ov_persons_by_muni_key[m_key] = ov_persons_by_muni_key.get(m_key, 0) + int(p_sum or 0)
 
-    mov_stmt = select(CensusMunicipalOverviewDistrict)
-    if census_year:
-        mov_stmt = mov_stmt.where(CensusMunicipalOverviewDistrict.census_year == census_year)
+    mov_stmt = select(CensusMunicipalOverviewDistrict).where(
+        CensusMunicipalOverviewDistrict.census_year == resolved_year
+    )
     mov_rows_by_sheet: dict[int, list[CensusMunicipalOverviewDistrict]] = {}
     for md in session.exec(mov_stmt).all():
         if md.census_sheet_id:
@@ -4099,13 +4352,12 @@ def get_municipalities_summary(
         if row_sid:
             person_counts_by_sheet[row_sid] = int(cnt)
 
-    by_muni: dict[tuple[str, str], dict[str, Any]] = {}
-    for s in sheets:
+    by_muni: dict[str, dict[str, Any]] = {}
+    for s in all_sheets:
         m_display = canonical_municipality_display(s.municipality) or s.municipality or "Neznáma obec"
         m_canon = canonical_municipality_key(m_display) or "neznama obec"
         d_name = s.district or ""
-        key = (m_canon, canonical_municipality_key(d_name))
-        entry = by_muni.get(key)
+        entry = by_muni.get(m_canon)
         if not entry:
             ov_houses = ov_count_by_muni_key.get(m_canon) or mov_houses_by_muni_key.get(m_canon, 0)
             ov_persons = max(
@@ -4125,16 +4377,29 @@ def get_municipalities_summary(
                 "overview_persons_count": ov_persons,
                 "extracted_persons_count": 0,
                 "persons_count": ov_persons,
-                "years": set(),
+                "years": [resolved_year],
             }
-            by_muni[key] = entry
-        elif not entry.get("municipality_key") and s.municipality_key:
-            entry["municipality_key"] = s.municipality_key
-        if not entry.get("district_key") and s.district_key:
-            entry["district_key"] = s.district_key
+            by_muni[m_canon] = entry
+        else:
+            if s.census_year == resolved_year:
+                if d_name:
+                    entry["district"] = d_name
+                if s.district_key:
+                    entry["district_key"] = s.district_key
+                if s.municipality_key:
+                    entry["municipality_key"] = s.municipality_key
+            else:
+                if not entry.get("district") and d_name:
+                    entry["district"] = d_name
+                if not entry.get("district_key") and s.district_key:
+                    entry["district_key"] = s.district_key
+                if not entry.get("municipality_key") and s.municipality_key:
+                    entry["municipality_key"] = s.municipality_key
+
+        if s.census_year != resolved_year:
+            continue
 
         entry["total_sheets"] += 1
-        entry["years"].add(s.census_year)
         if s.download_status in ("downloaded", "sliced", "ocr_done", "extracted", "matched"):
             entry["downloaded_sheets"] += 1
         if s.download_status in ("ocr_done", "extracted", "matched"):
@@ -4148,16 +4413,14 @@ def get_municipalities_summary(
                 entry["overview_persons_count"],
             )
 
-    municipalities_list: list[dict[str, Any]] = []
-    for entry in by_muni.values():
-        entry["years"] = sorted(list(entry["years"]))
-        municipalities_list.append(entry)
+    municipalities_list: list[dict[str, Any]] = list(by_muni.values())
 
     municipalities_list.sort(
         key=lambda x: (-x["ocr_done_sheets"], -x["total_sheets"], x["municipality"])
     )
 
     return {
+        "census_year": resolved_year,
         "municipalities": municipalities_list,
         "total_municipalities": len(municipalities_list),
     }

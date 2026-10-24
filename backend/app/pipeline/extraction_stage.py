@@ -4363,6 +4363,7 @@ async def extract_census_overview_sheet(
     `extract_census_municipal_overview_sheet`.
     """
     from pathlib import Path
+    from backend.app.api.ws import ws_manager
     from backend.app.db.models import WorkflowTrace
     from backend.app.pipeline.ocr_stage import html_table_to_pipe_text, media_rel_to_path
 
@@ -4445,6 +4446,18 @@ async def extract_census_overview_sheet(
     raw_ocr_items: list[tuple[int, int, int, ScanImage, Any, RecordRow, str]] = []
 
     for scan_order, (scan_obj, page_side) in enumerate(scans_to_process):
+        await ws_manager.broadcast(
+            "state",
+            {
+                "active_stage": "layout",
+                "active_model": "opencv:census_overview_slicer",
+                "current_scan_id": scan_obj.id,
+                "current_row_id": None,
+                "progress_pct": 12 + int(8 * scan_order / max(1, len(scans_to_process))),
+                "message_sk": f"Rozdeľujem riadky prehľadu obvodu ({scan_obj.filename}, strana {scan_order + 1}/{len(scans_to_process)})...",
+                "message_en": f"Slicing district overview rows ({scan_obj.filename}, page {scan_order + 1}/{len(scans_to_process)})...",
+            },
+        )
         layout_res = await asyncio.to_thread(
             slice_census_overview_sheet,
             Path(scan_obj.original_path),
@@ -4546,8 +4559,27 @@ async def extract_census_overview_sheet(
                 session.add(sheet)
                 session.commit()
 
-        for r_info in layout_res.rows:
+        for row_idx_in_scan, r_info in enumerate(layout_res.rows, start=1):
             r_rec = scan_record_rows[r_info.row_index]
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "active_stage": "ocr",
+                    "active_model": settings.model_ocr,
+                    "current_scan_id": scan_obj.id,
+                    "current_row_id": r_rec.id,
+                    "progress_pct": 22
+                    + int(
+                        48
+                        * (
+                            (scan_order + (row_idx_in_scan / max(1, len(layout_res.rows))))
+                            / max(1, len(scans_to_process))
+                        )
+                    ),
+                    "message_sk": f"OCR čítanie riadku {row_idx_in_scan}/{len(layout_res.rows)} prehľadu obvodu (strana {scan_order + 1}/{len(scans_to_process)})...",
+                    "message_en": f"GLM-OCR district overview row {row_idx_in_scan}/{len(layout_res.rows)} (page {scan_order + 1}/{len(scans_to_process)})...",
+                },
+            )
             l_path = media_rel_to_path(r_info.left_crop_rel)
             r_path = media_rel_to_path(r_info.right_crop_rel)
             combined_ocr = ""
@@ -4658,9 +4690,22 @@ async def extract_census_overview_sheet(
     prev_house: CensusOverviewHouse | None = None
     seq_house_num = 0
 
-    for booklet_page, _scan_order, _scan_row_idx, scan_obj, r_info, r_rec, combined_ocr in raw_ocr_items:
+    for item_idx, (booklet_page, _scan_order, _scan_row_idx, scan_obj, r_info, r_rec, combined_ocr) in enumerate(raw_ocr_items, start=1):
         if not combined_ocr or len(re.sub(r"[^A-Za-z0-9Á-ž]", "", combined_ocr)) < 2:
             continue
+
+        await ws_manager.broadcast(
+            "state",
+            {
+                "active_stage": "extract",
+                "active_model": settings.model_extract,
+                "current_scan_id": scan_obj.id,
+                "current_row_id": r_rec.id,
+                "progress_pct": 72 + int(24 * item_idx / max(1, len(raw_ocr_items))),
+                "message_sk": f"Extrakcia a párovanie domu {item_idx}/{len(raw_ocr_items)} z prehľadu obvodu ({sheet.municipality or ''})...",
+                "message_en": f"Extracting & matching house {item_idx}/{len(raw_ocr_items)} from district overview ({sheet.municipality or ''})...",
+            },
+        )
 
         low_comb = combined_ocr.lower()
         if any(
@@ -4826,6 +4871,18 @@ async def extract_census_overview_sheet(
     session.commit()
     for ov_house in created_houses:
         session.refresh(ov_house)
+    await ws_manager.broadcast(
+        "state",
+        {
+            "active_stage": "idle",
+            "active_model": None,
+            "current_scan_id": sheet.front_scan_id,
+            "current_row_id": None,
+            "progress_pct": 100,
+            "message_sk": f"Hotovo! Extrahovaných {len(created_houses)} domov z prehľadu obvodu ({sheet.municipality or ''}).",
+            "message_en": f"Completed! Extracted {len(created_houses)} houses from district overview ({sheet.municipality or ''}).",
+        },
+    )
     return created_houses
 
 
@@ -5405,6 +5462,7 @@ async def _extract_census_municipal_overview_sheet_locked(
     back_scan: ScanImage | None = None,
 ) -> list[CensusMunicipalOverviewDistrict]:
     from pathlib import Path
+    from backend.app.api.ws import ws_manager
     from backend.app.db.models import WorkflowTrace
     from backend.app.pipeline.ocr_stage import html_table_to_pipe_text, media_rel_to_path
 
@@ -5479,6 +5537,18 @@ async def _extract_census_municipal_overview_sheet_locked(
     raw_ocr_items: list[tuple[int, int, int, ScanImage, Any, RecordRow, str]] = []
 
     for scan_order, (scan_obj, page_side) in enumerate(scans_to_process):
+        await ws_manager.broadcast(
+            "state",
+            {
+                "active_stage": "layout",
+                "active_model": "opencv:census_overview_slicer",
+                "current_scan_id": scan_obj.id,
+                "current_row_id": None,
+                "progress_pct": 12 + int(8 * scan_order / max(1, len(scans_to_process))),
+                "message_sk": f"Rozdeľujem riadky obecného prehľadu ({scan_obj.filename}, strana {scan_order + 1}/{len(scans_to_process)})...",
+                "message_en": f"Slicing municipal overview rows ({scan_obj.filename}, page {scan_order + 1}/{len(scans_to_process)})...",
+            },
+        )
         layout_res = await asyncio.to_thread(
             slice_census_overview_sheet,
             Path(scan_obj.original_path),
@@ -5583,8 +5653,27 @@ async def _extract_census_municipal_overview_sheet_locked(
                 session.add(sheet)
                 session.commit()
 
-        for r_info in layout_res.rows:
+        for row_idx_in_scan, r_info in enumerate(layout_res.rows, start=1):
             r_rec = scan_record_rows[r_info.row_index]
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "active_stage": "ocr",
+                    "active_model": settings.model_ocr,
+                    "current_scan_id": scan_obj.id,
+                    "current_row_id": r_rec.id,
+                    "progress_pct": 22
+                    + int(
+                        48
+                        * (
+                            (scan_order + (row_idx_in_scan / max(1, len(layout_res.rows))))
+                            / max(1, len(scans_to_process))
+                        )
+                    ),
+                    "message_sk": f"OCR čítanie riadku {row_idx_in_scan}/{len(layout_res.rows)} obecného prehľadu (strana {scan_order + 1}/{len(scans_to_process)})...",
+                    "message_en": f"GLM-OCR municipal overview row {row_idx_in_scan}/{len(layout_res.rows)} (page {scan_order + 1}/{len(scans_to_process)})...",
+                },
+            )
             l_path = media_rel_to_path(r_info.left_crop_rel)
             r_path = media_rel_to_path(r_info.right_crop_rel)
             combined_ocr = ""
@@ -5658,9 +5747,22 @@ async def _extract_census_municipal_overview_sheet_locked(
     seq_district_idx = 0
     kept_row_ids: set[int] = set()
 
-    for booklet_page, _scan_order, _scan_row_idx, scan_obj, r_info, r_rec, combined_ocr in raw_ocr_items:
+    for item_idx, (booklet_page, _scan_order, _scan_row_idx, scan_obj, r_info, r_rec, combined_ocr) in enumerate(raw_ocr_items, start=1):
         if not combined_ocr or len(re.sub(r"[^A-Za-z0-9Á-ž]", "", combined_ocr)) < 2:
             continue
+
+        await ws_manager.broadcast(
+            "state",
+            {
+                "active_stage": "extract",
+                "active_model": settings.model_extract,
+                "current_scan_id": scan_obj.id,
+                "current_row_id": r_rec.id,
+                "progress_pct": 72 + int(22 * item_idx / max(1, len(raw_ocr_items))),
+                "message_sk": f"Extrakcia sčítacieho obvodu {item_idx}/{len(raw_ocr_items)} z obecného prehľadu ({sheet.municipality or ''})...",
+                "message_en": f"Extracting census district {item_idx}/{len(raw_ocr_items)} from municipal overview ({sheet.municipality or ''})...",
+            },
+        )
 
         heur = _heuristic_parse_municipal_overview_row(
             combined_ocr,
@@ -5803,6 +5905,18 @@ async def _extract_census_municipal_overview_sheet_locked(
     session.commit()
     for dr in created_rows:
         session.refresh(dr)
+    await ws_manager.broadcast(
+        "state",
+        {
+            "active_stage": "idle",
+            "active_model": None,
+            "current_scan_id": sheet.front_scan_id,
+            "current_row_id": None,
+            "progress_pct": 100,
+            "message_sk": f"Hotovo! Extrahovaných {len(district_only_rows)} obvodov z obecného prehľadu ({sheet.municipality or ''}).",
+            "message_en": f"Completed! Extracted {len(district_only_rows)} districts from municipal overview ({sheet.municipality or ''}).",
+        },
+    )
     return created_rows
 
 

@@ -1365,6 +1365,10 @@ class FamilySearchMcpManager:
             should_query_records = self._should_query_mcp_records(fs_env)
 
             matched_count = 0
+            valid_idx = 0
+            total_valid = max(1, len(valid_sheet_facts))
+            from backend.app.api.ws import ws_manager
+
             for fact in facts:
                 if _is_nameless_fact(fact):
                     if fact.id is not None:
@@ -1375,8 +1379,21 @@ class FamilySearchMcpManager:
                             session.delete(sm)
                     continue
 
+                valid_idx += 1
                 person_label = _format_fact_person_label(fact)
                 await self.step_progress(current_person=person_label)
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "mcp_match",
+                        "active_model": "familysearch-mcp",
+                        "current_scan_id": fact.scan_id or sheet.front_scan_id,
+                        "current_row_id": fact.row_id,
+                        "progress_pct": 88 + int(11 * valid_idx / total_valid),
+                        "message_sk": f"Párujem s matrikou a FamilySearch ({valid_idx}/{total_valid}): {person_label}...",
+                        "message_en": f"Matching with parish records & FamilySearch ({valid_idx}/{total_valid}): {person_label}...",
+                    },
+                )
 
                 fact.fs_place_standardized = place_std
                 session.add(fact)

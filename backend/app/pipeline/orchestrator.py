@@ -205,6 +205,7 @@ async def process_single_scan_pipeline(
     max_rows: int | None = None,
     run_mcp: bool = True,
     watchlist_filter: str | None = None,
+    finalize_idle: bool = True,
 ) -> dict[str, Any]:
     """
     Runs the stage-batched pipeline on a single scan:
@@ -363,6 +364,18 @@ async def process_single_scan_pipeline(
                 if scan.detected_type == "census" and scan.census_sheet_id:
                     sheet = session.get(CensusSheet, scan.census_sheet_id)
                     if sheet:
+                        await ws_manager.broadcast(
+                            "state",
+                            {
+                                "active_stage": "mcp_match",
+                                "active_model": "familysearch-mcp",
+                                "current_scan_id": scan.id,
+                                "current_row_id": None,
+                                "progress_pct": 88,
+                                "message_sk": f"Párujem osoby z hárku s matrikou a FamilySearch ({sheet.municipality or scan.filename})...",
+                                "message_en": f"Matching sheet persons with parish records & FamilySearch ({sheet.municipality or scan.filename})...",
+                            },
+                        )
                         matched_count = await fs_mcp_manager.match_census_sheet(session, sheet)
                 else:
                     for idx, (fact, row) in enumerate(extracted_facts, start=1):
@@ -388,18 +401,19 @@ async def process_single_scan_pipeline(
             session.add(scan)
             session.commit()
 
-            await ws_manager.broadcast(
-                "state",
-                {
-                    "active_stage": "idle",
-                    "active_model": None,
-                    "current_scan_id": scan.id,
-                    "current_row_id": None,
-                    "progress_pct": 100,
-                    "message_sk": f"Hotovo! Spracovaných {len(target_rows)} riadkov zo skenu {scan.filename}.",
-                    "message_en": f"Completed {len(target_rows)} rows for {scan.filename}.",
-                },
-            )
+            if finalize_idle:
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "idle",
+                        "active_model": None,
+                        "current_scan_id": scan.id,
+                        "current_row_id": None,
+                        "progress_pct": 100,
+                        "message_sk": f"Hotovo! Spracovaných {len(target_rows)} riadkov zo skenu {scan.filename}.",
+                        "message_en": f"Completed {len(target_rows)} rows for {scan.filename}.",
+                    },
+                )
 
             return {
                 "scan_id": scan.id,
@@ -749,7 +763,31 @@ async def process_census_sheet_pipeline(
         enable_overview = bool(settings.get_feature_flags().get("census_overview_sheets", True))
         if sheet and front_scan:
             if not front_scan.header_crop_path:
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "layout",
+                        "active_model": "opencv:census_sheet_slicer",
+                        "current_scan_id": front_scan.id,
+                        "current_row_id": None,
+                        "progress_pct": 12,
+                        "message_sk": f"Rozdeľujem riadky a záhlavie sčítacieho hárku ({front_scan.filename})...",
+                        "message_en": f"Slicing census sheet header and rows ({front_scan.filename})...",
+                    },
+                )
                 await run_layout_for_scan_async(session, front_scan)
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "active_stage": "ocr",
+                    "active_model": settings.model_ocr,
+                    "current_scan_id": front_scan.id,
+                    "current_row_id": None,
+                    "progress_pct": 18,
+                    "message_sk": f"Čítam záhlavie sčítacieho hárku pomocou {settings.model_ocr} ({front_scan.filename})...",
+                    "message_en": f"Reading census sheet header via {settings.model_ocr} ({front_scan.filename})...",
+                },
+            )
             await run_ocr_for_scan_header(session, front_scan)
             session.refresh(sheet)
             if enable_overview and (
@@ -783,7 +821,8 @@ async def process_census_sheet_pipeline(
     res_front = await process_single_scan_pipeline(
         front_scan_id,
         max_rows=max_rows,
-        run_mcp=run_mcp,
+        run_mcp=False,
+        finalize_idle=False,
     )
     total_rows_processed = int(res_front.get("rows_processed", 0))
 
@@ -799,13 +838,26 @@ async def process_census_sheet_pipeline(
                 and back_scan.original_path
                 and Path(back_scan.original_path).exists()
             ):
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "layout",
+                        "active_model": "opencv:census_sheet_slicer",
+                        "current_scan_id": back_scan.id,
+                        "current_row_id": None,
+                        "progress_pct": 85,
+                        "message_sk": f"Kontrolujem zadnú stranu sčítacieho hárku ({back_scan.filename})...",
+                        "message_en": f"Checking back side of census sheet ({back_scan.filename})...",
+                    },
+                )
                 back_rows = await run_layout_for_scan_async(session, back_scan)
                 should_process_back = len(back_rows) > 0
         if should_process_back:
             res_back = await process_single_scan_pipeline(
                 back_scan_id,
                 max_rows=max_rows,
-                run_mcp=run_mcp,
+                run_mcp=False,
+                finalize_idle=False,
             )
             total_rows_processed += int(res_back.get("rows_processed", 0))
 
@@ -838,12 +890,54 @@ async def process_census_sheet_pipeline(
                     "overview_houses_count": len(houses),
                     "download_status": sheet.download_status,
                 }
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "active_stage": "extract",
+                    "active_model": settings.model_extract,
+                    "current_scan_id": sheet.front_scan_id,
+                    "current_row_id": None,
+                    "progress_pct": 88,
+                    "message_sk": f"Zjednocujem vzťahy v domácnosti ({sheet.municipality or ''} č. {sheet.house_number or sheet.sheet_number or ''})...",
+                    "message_en": f"Reconciling household relationships ({sheet.municipality or ''})...",
+                },
+            )
             household = reconcile_census_household_relationships(session, sheet.id)
             if run_mcp:
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "mcp_match",
+                        "active_model": "familysearch-mcp",
+                        "current_scan_id": sheet.front_scan_id,
+                        "current_row_id": None,
+                        "progress_pct": 90,
+                        "message_sk": f"Párujem osoby z hárku s matrikou a FamilySearch ({sheet.municipality or ''})...",
+                        "message_en": f"Matching sheet persons with parish records & FamilySearch ({sheet.municipality or ''})...",
+                    },
+                )
                 await fs_mcp_manager.match_census_sheet(session, sheet)
             sheet.download_status = "matched" if run_mcp else "extracted"
             session.add(sheet)
+            for sid in (sheet.front_scan_id, sheet.back_scan_id):
+                if sid:
+                    sc = session.get(ScanImage, sid)
+                    if sc and sc.status in ("extracted", "ocr_done", "sliced"):
+                        sc.status = "matched" if run_mcp else "extracted"
+                        session.add(sc)
             session.commit()
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "active_stage": "idle",
+                    "active_model": None,
+                    "current_scan_id": sheet.front_scan_id,
+                    "current_row_id": None,
+                    "progress_pct": 100,
+                    "message_sk": f"Hotovo! Spracovaných {total_rows_processed} riadkov hárku ({sheet.municipality or ''} č. {sheet.house_number or sheet.sheet_number or ''}).",
+                    "message_en": f"Completed {total_rows_processed} rows for census sheet ({sheet.municipality or ''}).",
+                },
+            )
             return {
                 "census_sheet_id": sheet.id,
                 "slovakiana_key": sheet.slovakiana_key,

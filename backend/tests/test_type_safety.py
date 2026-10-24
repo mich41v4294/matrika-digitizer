@@ -242,6 +242,7 @@ class TestLLMTypeSafety(unittest.TestCase):
         r_health = client.get("/api/health")
         self.assertEqual(r_health.status_code, 200)
         self.assertEqual(r_health.json()["status"], "ok")
+        self.assertTrue(bool(r_health.json().get("build_commit")))
 
         # 2. Unknown /api/* route must return 404, not SPA index.html
         r_missing_api = client.get("/api/does-not-exist")

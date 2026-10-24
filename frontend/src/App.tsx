@@ -24,6 +24,7 @@ const DebugWorkflow = lazy(() => import("./pages/DebugWorkflow"));
 
 export interface SystemStatus {
   pangolin_public_url: string;
+  build_commit?: string;
   ai_server: {
     online: boolean;
     base_url: string;
@@ -184,6 +185,13 @@ export default function App() {
     status.pipeline_state.active_stage !== "idle";
   const aiOnline = Boolean(status?.ai_server?.online);
   const debugActive = location.pathname.startsWith("/debug");
+  const buildCommitHash =
+    (typeof __BUILD_COMMIT_HASH__ !== "undefined" &&
+    __BUILD_COMMIT_HASH__ &&
+    __BUILD_COMMIT_HASH__ !== "dev"
+      ? __BUILD_COMMIT_HASH__
+      : status?.build_commit ||
+        (typeof __BUILD_COMMIT_HASH__ !== "undefined" ? __BUILD_COMMIT_HASH__ : "")) || "dev";
 
   return (
     <div className="min-h-screen flex flex-col bg-stone-100 text-stone-900 overflow-x-hidden">
@@ -426,10 +434,27 @@ export default function App() {
       </main>
 
       <footer className="bg-stone-200 border-t border-stone-300 py-3 px-4 text-center text-stone-700 text-xs space-y-1.5">
-        <div className="font-medium text-stone-800">
-          {lang === "sk"
-            ? "Čítanie slovenských, maďarských a latinských cirkevných matrík a sčítacích hárkov 1930/1940 · FamilySearch · lokálna AI"
-            : "Slovak / Hungarian / Latin church register & 1930/1940 census sheet OCR · FamilySearch · local AI"}
+        <div className="font-medium text-stone-800 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+          <span>
+            {lang === "sk"
+              ? "Čítanie slovenských, maďarských a latinských cirkevných matrík a sčítacích hárkov 1930/1940 · FamilySearch · lokálna AI"
+              : "Slovak / Hungarian / Latin church register & 1930/1940 census sheet OCR · FamilySearch · local AI"}
+          </span>
+          <span className="text-stone-400 hidden sm:inline">·</span>
+          <span
+            data-testid="build-commit-hash"
+            title={
+              lang === "sk"
+                ? `Verzia zostavenia (git commit): ${buildCommitHash}`
+                : `Build commit hash: ${buildCommitHash}`
+            }
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-stone-300/80 text-stone-700 font-mono text-[11px]"
+          >
+            <span className="font-sans text-stone-600">
+              {lang === "sk" ? "Zostavenie:" : "Build:"}
+            </span>{" "}
+            <code className="font-semibold text-stone-900">{buildCommitHash}</code>
+          </span>
         </div>
         <div className="text-xs text-stone-700 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
           <span>

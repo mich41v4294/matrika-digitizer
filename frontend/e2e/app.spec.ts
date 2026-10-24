@@ -169,13 +169,16 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
         await page.goto(r.path, { waitUntil: "networkidle" });
         await expect(page.locator("body")).toContainText(r.expectedTextSk);
 
-        // Verify global footer Slovakiana CC BY-NC-ND 4.0 attribution on every route
+        // Verify global footer Slovakiana CC BY-NC-ND 4.0 attribution and build commit hash on every route
         const footer = page.locator("footer");
         await expect(footer).toContainText("Slovenský národný archív (SNA)");
         await expect(footer).toContainText("CC BY-NC-ND 4.0");
         await expect(
           footer.locator('a[href="https://creativecommons.org/licenses/by-nc-nd/4.0/"]')
         ).toBeVisible();
+        const commitBadge = footer.getByTestId("build-commit-hash");
+        await expect(commitBadge).toBeVisible();
+        await expect(commitBadge).toContainText(/Zostavenie:\s+[0-9a-f]{7,40}|Zostavenie:\s+dev/i);
 
         if (r.path === "/scitacie-harky") {
           // Verify CensusHub CC BY-NC-ND 4.0 banner & Municipality Overview tab
@@ -235,6 +238,9 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(page.locator("header")).toContainText("Matrika & Census Digitizer");
     await expect(page.locator("body")).toContainText("What would you like to do?");
     await expect(page.locator("body")).toContainText("Census Sheets (1930 / 1940)");
+    await expect(page.locator("footer").getByTestId("build-commit-hash")).toContainText(
+      /Build:\s+[0-9a-f]{7,40}|Build:\s+dev/i
+    );
 
     // Check EN on /scitacie-harky
     await page.goto("/scitacie-harky", { waitUntil: "networkidle" });

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from functools import lru_cache
+import os
+from pathlib import Path
+import re
+import subprocess
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -13,7 +18,7 @@ from sqlmodel import Session, select
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from backend.app.api import census, debug, familysearch, questions, records, scans, uploads, ws
-from backend.app.config import settings
+from backend.app.config import BASE_REPO_DIR, settings
 from backend.app.db.models import (
     CensusSheet,
     FamilySearchMatch,
@@ -108,9 +113,95 @@ app.include_router(debug.router)
 app.include_router(ws.router)
 
 
+def _resolve_git_commit_from_dir(start_dir: Path) -> str | None:
+    current = start_dir.resolve()
+    for _ in range(4):
+        dot_git = current / ".git"
+        if dot_git.exists():
+            try:
+                git_dir = dot_git
+                common_dir = dot_git
+                if dot_git.is_file():
+                    content = dot_git.read_text(encoding="utf-8").strip()
+                    if content.startswith("gitdir:"):
+                        rel_git = content[len("gitdir:") :].strip()
+                        git_dir = (current / rel_git).resolve()
+                        common_dir = git_dir
+                        commondir_file = git_dir / "commondir"
+                        if commondir_file.is_file():
+                            rel_common = commondir_file.read_text(encoding="utf-8").strip()
+                            if rel_common:
+                                common_dir = (git_dir / rel_common).resolve()
+                head_file = git_dir / "HEAD"
+                if head_file.is_file():
+                    head = head_file.read_text(encoding="utf-8").strip()
+                    if not head.startswith("ref:"):
+                        return head[:7] if head else None
+                    ref_path = head[len("ref:") :].strip()
+                    for base in (git_dir, common_dir):
+                        loose_ref = base / ref_path
+                        if loose_ref.is_file():
+                            sha = loose_ref.read_text(encoding="utf-8").strip()
+                            if sha:
+                                return sha[:7]
+                    for base in (common_dir, git_dir):
+                        packed_refs = base / "packed-refs"
+                        if packed_refs.is_file():
+                            for line in packed_refs.read_text(encoding="utf-8").splitlines():
+                                stripped = line.strip()
+                                if (
+                                    not stripped
+                                    or stripped.startswith("#")
+                                    or stripped.startswith("^")
+                                ):
+                                    continue
+                                parts = stripped.split()
+                                if len(parts) >= 2 and parts[1] == ref_path and parts[0]:
+                                    return parts[0][:7]
+            except OSError:
+                pass
+        if current.parent == current:
+            break
+        current = current.parent
+    return None
+
+
+@lru_cache(maxsize=1)
+def get_build_commit_hash() -> str:
+    for key in (
+        "BUILD_COMMIT_HASH",
+        "VITE_COMMIT_HASH",
+        "GIT_COMMIT",
+        "COMMIT_SHA",
+        "GITHUB_SHA",
+    ):
+        val = (os.environ.get(key) or "").strip()
+        if val and val not in ("dev", "unknown"):
+            return val[:7] if re.fullmatch(r"[0-9a-fA-F]{8,40}", val) else val
+
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            cwd=str(BASE_REPO_DIR),
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        ).strip()
+        if out:
+            return out
+    except Exception:
+        pass
+
+    return _resolve_git_commit_from_dir(BASE_REPO_DIR) or "dev"
+
+
 @app.get("/api/health")
 def health_check() -> dict[str, str]:
-    return {"status": "ok", "pangolin_url": settings.pangolin_public_url}
+    return {
+        "status": "ok",
+        "pangolin_url": settings.pangolin_public_url,
+        "build_commit": get_build_commit_hash(),
+    }
 
 
 @app.get("/api/status")
@@ -151,6 +242,7 @@ async def system_status() -> dict[str, Any]:
 
     return {
         "pangolin_public_url": settings.pangolin_public_url,
+        "build_commit": get_build_commit_hash(),
         "ai_server": ai_info,
         "familysearch": {
             "has_token": bool(fs_env.get("FS_ACCESS_TOKEN")),

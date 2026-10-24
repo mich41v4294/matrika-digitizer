@@ -2,13 +2,22 @@
 
 FROM node:22-alpine AS frontend
 WORKDIR /frontend
+ARG VITE_COMMIT_HASH=""
+ARG GIT_COMMIT=""
+ENV VITE_COMMIT_HASH=${VITE_COMMIT_HASH} \
+    GIT_COMMIT=${GIT_COMMIT}
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --no-audit --fund=false
+COPY .git* ./.git/
 COPY frontend/ ./
 RUN npm run build
 
 FROM python:3.12-slim-bookworm
 WORKDIR /app
+ARG VITE_COMMIT_HASH=""
+ARG GIT_COMMIT=""
+ENV VITE_COMMIT_HASH=${VITE_COMMIT_HASH} \
+    GIT_COMMIT=${GIT_COMMIT}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
@@ -29,6 +38,7 @@ COPY backend /app/backend
 RUN uv pip install --system --no-cache --no-deps /app/backend
 
 COPY --from=frontend /frontend/dist /app/frontend/dist
+COPY .git* /app/.git/
 
 RUN mkdir -p /app/data /app/samples
 

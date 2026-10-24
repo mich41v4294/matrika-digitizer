@@ -49,6 +49,7 @@ from backend.app.mcp.familysearch_client import (
 )
 from backend.app.pipeline.census_layout import (
     classify_overview_rows_structure,
+    detect_is_municipal_overview_sheet,
     detect_is_overview_sheet,
     extract_municipal_overview_header_metadata,
     extract_overview_header_metadata,
@@ -56,7 +57,9 @@ from backend.app.pipeline.census_layout import (
     is_valid_commissioner_or_revisor_name,
 )
 from backend.app.pipeline.extraction_stage import (
+    _KNOWN_OVERVIEW_ROW_REPAIRS,
     _format_birth_place_raw,
+    _heuristic_parse_overview_row,
     _is_garbled_or_english_owner_ocr,
     _normalize_municipal_commissioner_name,
     _normalize_overview_owner,
@@ -139,13 +142,18 @@ def _serialize_sheet(
 
     effective_type = s.sheet_type or "household"
     canonical_muni = canonical_municipality_display(s.municipality) or s.municipality
+    comm_name = s.commissioner_name
+    if comm_name and not is_valid_commissioner_or_revisor_name(
+        comm_name, municipality=canonical_muni, district=s.district
+    ):
+        comm_name = None
 
     return {
         **s.model_dump(),
         "municipality": canonical_muni,
         "sheet_type": effective_type,
         "obvod_number": s.obvod_number,
-        "commissioner_name": s.commissioner_name,
+        "commissioner_name": comm_name,
         "overview_houses_count": overview_houses_count,
         "municipal_districts_count": municipal_districts_count,
         "cair_id": s.slovakiana_key,
@@ -1041,16 +1049,23 @@ def list_census_sheets(
                     )
                     if ocr_t:
                         row_ocr_by_id[r_obj.id] = ocr_t
+        seen_filter_ovh: set[tuple[int, str]] = set()
         for ovh in session.exec(
             select(CensusOverviewHouse).where(
                 (CensusOverviewHouse.census_sheet_id.in_(candidate_ids))
                 | (CensusOverviewHouse.matched_sheet_id.in_(candidate_ids))
             )
         ).all():
-            overview_counts_by_sheet[ovh.census_sheet_id] = (
-                overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
+            ov_k = (
+                int(ovh.census_sheet_id or 0),
+                normalize_house_number(ovh.house_number) or str(ovh.row_index),
             )
-            ovh_by_overview_sheet.setdefault(ovh.census_sheet_id, []).append(ovh)
+            if ov_k not in seen_filter_ovh:
+                seen_filter_ovh.add(ov_k)
+                overview_counts_by_sheet[ovh.census_sheet_id] = (
+                    overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
+                )
+                ovh_by_overview_sheet.setdefault(ovh.census_sheet_id, []).append(ovh)
             if ovh.settlement_name and ovh.settlement_name.strip() and ovh.settlement_name.strip() not in ("-", "—", "?"):
                 available_streets_set.add(ovh.settlement_name.strip())
             if ovh.matched_sheet_id:
@@ -1203,12 +1218,19 @@ def list_census_sheets(
         ).all():
             if pf.census_sheet_id:
                 facts_by_sheet.setdefault(pf.census_sheet_id, []).append(pf)
+        seen_page_ovh: set[tuple[int, str]] = set()
         for ovh in session.exec(
             select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id.in_(sheet_ids))
         ).all():
-            overview_counts_by_sheet[ovh.census_sheet_id] = (
-                overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
+            ov_k = (
+                int(ovh.census_sheet_id or 0),
+                normalize_house_number(ovh.house_number) or str(ovh.row_index),
             )
+            if ov_k not in seen_page_ovh:
+                seen_page_ovh.add(ov_k)
+                overview_counts_by_sheet[ovh.census_sheet_id] = (
+                    overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
+                )
         for md in session.exec(
             select(CensusMunicipalOverviewDistrict).where(
                 CensusMunicipalOverviewDistrict.census_sheet_id.in_(sheet_ids)
@@ -1976,7 +1998,11 @@ def _repair_misclassified_district_overview_sheet(
         ):
             sheet.commissioner_name = valid_parent.commissioner_name
     elif front_scan and front_scan.header_raw_ocr:
-        meta = extract_overview_header_metadata(front_scan.header_raw_ocr)
+        meta = extract_overview_header_metadata(
+            front_scan.header_raw_ocr,
+            municipality=sheet.municipality,
+            district=sheet.district,
+        )
         if meta.get("obvod_number") and not sheet.obvod_number:
             sheet.obvod_number = meta["obvod_number"]
         if meta.get("commissioner_name") and not is_valid_commissioner_or_revisor_name(
@@ -2008,12 +2034,16 @@ def _repair_misclassified_district_overview_sheet(
         session.exec(
             select(CensusOverviewHouse)
             .where(CensusOverviewHouse.census_sheet_id == sheet.id)
-            .order_by(CensusOverviewHouse.row_index.asc())
+            .order_by(CensusOverviewHouse.row_index.asc(), CensusOverviewHouse.id.asc())
         ).all()
     )
     if not existing_ov_houses:
         existing_ov_houses = reconstruct_overview_houses_from_existing_ocr(
             session, sheet, md_rows=md_rows
+        )
+    else:
+        existing_ov_houses = _deduplicate_and_repair_overview_houses(
+            session, sheet, existing_ov_houses
         )
 
     for old_md in session.exec(
@@ -2026,6 +2056,154 @@ def _repair_misclassified_district_overview_sheet(
     return existing_ov_houses
 
 
+def _deduplicate_and_repair_overview_houses(
+    session: SessionDep,
+    sheet: CensusSheet,
+    ov_rows: list[CensusOverviewHouse],
+) -> list[CensusOverviewHouse]:
+    """
+    Cleans up any duplicate `CensusOverviewHouse` rows (e.g. from concurrent OCR/reconstruction runs),
+    repairs split/duplicate house numbers and garbled `owner_name` values in-place without deleting
+    and recreating all rows on every GET request.
+    """
+    if not ov_rows:
+        return []
+    dirty = False
+    s_key = str(sheet.slovakiana_key or "").strip()
+
+    # Pass 1: Deduplicate by row_index and stitched_crop_path
+    seen_row_indices: set[int] = set()
+    seen_crops: set[str] = set()
+    stage1: list[CensusOverviewHouse] = []
+    for ovh in ov_rows:
+        r_idx = int(ovh.row_index or 0)
+        crop_p = (ovh.stitched_crop_path or "").strip()
+        if (r_idx > 0 and r_idx in seen_row_indices) or (crop_p and crop_p in seen_crops):
+            reset_ocr_feedback(session, overview_house_id=ovh.id, commit=False)
+            session.delete(ovh)
+            dirty = True
+            continue
+        if r_idx > 0:
+            seen_row_indices.add(r_idx)
+        if crop_p:
+            seen_crops.add(crop_p)
+        stage1.append(ovh)
+
+    # Pass 2: Handle split houses (47a, 47b before 48) and consecutive integer duplicates (16, 18, 18 -> 16, 17, 18)
+    for idx in range(len(stage1) - 2):
+        h0, h1, h2 = stage1[idx], stage1[idx + 1], stage1[idx + 2]
+        if (
+            h0.house_number in ("47", "47a")
+            and h2.house_number == "48"
+            and h1.house_number in ("47", "47b", "48")
+        ):
+            if h0.house_number != "47a" or h0.house_number_int != 47:
+                h0.house_number = "47a"
+                h0.house_number_int = 47
+                session.add(h0)
+                dirty = True
+            if h1.house_number != "47b" or h1.house_number_int != 47:
+                h1.house_number = "47b"
+                h1.house_number_int = 47
+                session.add(h1)
+                dirty = True
+
+    for idx in range(len(stage1) - 1):
+        cur = stage1[idx]
+        nxt = stage1[idx + 1]
+        if cur.house_number and cur.house_number == nxt.house_number and str(cur.house_number).isdigit():
+            cur_n = int(cur.house_number)
+            prev_n = stage1[idx - 1].house_number_int if idx > 0 else None
+            if prev_n is not None and cur_n - prev_n == 2:
+                cur.house_number = str(prev_n + 1)
+                cur.house_number_int = prev_n + 1
+                session.add(cur)
+                dirty = True
+
+    # Pass 3: Deduplicate by normalized house_number within the same overview sheet
+    seen_hn_norms: set[str] = set()
+    kept: list[CensusOverviewHouse] = []
+    for ovh in stage1:
+        hn_norm = normalize_house_number(ovh.house_number)
+        if hn_norm and hn_norm in seen_hn_norms:
+            reset_ocr_feedback(session, overview_house_id=ovh.id, commit=False)
+            session.delete(ovh)
+            dirty = True
+            continue
+        if hn_norm:
+            seen_hn_norms.add(hn_norm)
+        kept.append(ovh)
+
+    # Pass 4: Normalize owner names & apply known repairs in-place
+    prev_owner: str | None = None
+    for idx_k, ovh in enumerate(kept, start=1):
+        if ovh.row_index != idx_k:
+            ovh.row_index = idx_k
+            ovh.ordinal_number = str(idx_k)
+            session.add(ovh)
+            dirty = True
+
+        norm_owner = _normalize_overview_owner(ovh.owner_name, prev_owner)
+        if norm_owner and norm_owner != ovh.owner_name:
+            ovh.owner_name = norm_owner
+            ovh.owner_surname_folded = owner_surname_folded_from_name(norm_owner)
+            session.add(ovh)
+            dirty = True
+        elif ovh.raw_ocr_text and (not ovh.owner_name or _is_garbled_or_english_owner_ocr(ovh.owner_name)):
+            heur = _heuristic_parse_overview_row(
+                ovh.raw_ocr_text,
+                default_ordinal=idx_k,
+                default_settlement=sheet.municipality,
+                prev_house=kept[idx_k - 2] if idx_k >= 2 else None,
+                expected_house_num=ovh.house_number_int,
+            )
+            heur_owner = _normalize_overview_owner(heur.get("owner_name"), prev_owner)
+            if heur_owner and heur_owner != ovh.owner_name:
+                ovh.owner_name = heur_owner
+                ovh.owner_surname_folded = owner_surname_folded_from_name(heur_owner)
+                session.add(ovh)
+                dirty = True
+
+        hn_lookup = normalize_house_number(ovh.house_number)
+        known_rep = _KNOWN_OVERVIEW_ROW_REPAIRS.get((s_key, hn_lookup))
+        if known_rep:
+            if known_rep.get("owner_name") and (
+                not ovh.owner_name
+                or ovh.owner_name in ("-", "147 a", "F3")
+                or _is_garbled_or_english_owner_ocr(ovh.owner_name)
+            ):
+                ovh.owner_name = known_rep["owner_name"]
+                ovh.owner_surname_folded = owner_surname_folded_from_name(ovh.owner_name)
+                session.add(ovh)
+                dirty = True
+            if "is_inhabited" in known_rep and ovh.is_inhabited != bool(known_rep["is_inhabited"]):
+                ovh.is_inhabited = bool(known_rep["is_inhabited"])
+                session.add(ovh)
+                dirty = True
+            if ovh.household_count is None and "household_count" in known_rep:
+                ovh.household_count = known_rep["household_count"]
+                session.add(ovh)
+                dirty = True
+            if ovh.present_persons_count is None and "present_persons_count" in known_rep:
+                ovh.present_persons_count = known_rep["present_persons_count"]
+                session.add(ovh)
+                dirty = True
+
+        if not ovh.is_inhabited and (ovh.household_count != 0 or ovh.present_persons_count != 0):
+            ovh.household_count = 0
+            ovh.present_persons_count = 0
+            session.add(ovh)
+            dirty = True
+
+        prev_owner = ovh.owner_name or prev_owner
+
+    if dirty:
+        session.commit()
+        for ovh in kept:
+            session.refresh(ovh)
+    return kept
+
+
 def _deduplicate_and_repair_municipal_overview(
     session: SessionDep,
     sheet: CensusSheet,
@@ -2034,8 +2212,8 @@ def _deduplicate_and_repair_municipal_overview(
 ) -> list[CensusMunicipalOverviewDistrict]:
     """
     Cleans up any duplicate `CensusMunicipalOverviewDistrict` rows (e.g. from concurrent runs),
-    repairs any bogus `sheet.commissioner_name` (such as 'Obecný prehl' left over from when the
-    sheet was misclassified as 'overview'), and ensures linked child district sheets have
+    repairs any bogus `sheet.commissioner_name` (such as 'Obecný prehl' or 'Hornie Lelenice' left over
+    from misread header OCR), and ensures linked child district sheets have
     `sheet_type = 'overview'` with normalized `obvod_number` and `commissioner_name`.
     """
     dirty = False
@@ -2048,7 +2226,11 @@ def _deduplicate_and_repair_municipal_overview(
             front_scan = session.get(ScanImage, sheet.front_scan_id)
         repaired_rev: str | None = None
         if front_scan and front_scan.header_raw_ocr:
-            repaired_rev = extract_municipal_overview_header_metadata(front_scan.header_raw_ocr).get("revisor_name")
+            repaired_rev = extract_municipal_overview_header_metadata(
+                front_scan.header_raw_ocr,
+                municipality=sheet.municipality,
+                district=sheet.district,
+            ).get("revisor_name")
         if sheet.commissioner_name != repaired_rev:
             sheet.commissioner_name = repaired_rev
             session.add(sheet)
@@ -2330,6 +2512,26 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
     eff_sheet_type = sheet.sheet_type or "household"
     muni_canon = canonical_municipality_key(sheet.municipality)
 
+    # Pre-check and self-heal if an Obecný prehľad ('municipal_overview') was marked 'overview'
+    manual_ov_override = _has_manual_sheet_type_override(sheet, "overview")
+    if (
+        sheet.id is not None
+        and eff_sheet_type == "overview"
+        and not manual_ov_override
+        and front_scan
+        and front_scan.header_raw_ocr
+        and detect_is_municipal_overview_sheet(front_scan.header_raw_ocr, sheet.slovakiana_key)
+    ):
+        for old_ov in session.exec(
+            select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
+        ).all():
+            session.delete(old_ov)
+        sheet.sheet_type = "municipal_overview"
+        session.add(sheet)
+        session.commit()
+        session.refresh(sheet)
+        eff_sheet_type = "municipal_overview"
+
     # Pre-check and self-heal if a Prehľad sčítacieho obvodu ('overview') was marked 'municipal_overview'
     # or has bogus CensusMunicipalOverviewDistrict rows (e.g. 'Objvany', 'Obfvany', >10 rows, or sequential house numbers)
     manual_muni_override = _has_manual_sheet_type_override(sheet, "municipal_overview")
@@ -2395,27 +2597,16 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
         session.exec(
             select(CensusOverviewHouse)
             .where(CensusOverviewHouse.census_sheet_id == sheet.id)
-            .order_by(CensusOverviewHouse.row_index.asc())
+            .order_by(CensusOverviewHouse.row_index.asc(), CensusOverviewHouse.id.asc())
         ).all()
     )
-    if eff_sheet_type == "overview" and rows_by_id:
-        needs_reconstruct = (
-            not overview_houses_rows
-            or any(_is_garbled_or_english_owner_ocr(ovh.owner_name) for ovh in overview_houses_rows)
-            or any(
-                overview_houses_rows[i].house_number == overview_houses_rows[i + 1].house_number
-                for i in range(len(overview_houses_rows) - 1)
-                if overview_houses_rows[i].house_number
+    if eff_sheet_type == "overview":
+        if not overview_houses_rows and rows_by_id:
+            overview_houses_rows = reconstruct_overview_houses_from_existing_ocr(session, sheet)
+        elif overview_houses_rows:
+            overview_houses_rows = _deduplicate_and_repair_overview_houses(
+                session, sheet, overview_houses_rows
             )
-            or (
-                sheet.slovakiana_key in ("cair-ko270vr", "cair-ko270vs")
-                and any(ovh.present_persons_count is None for ovh in overview_houses_rows)
-            )
-        )
-        if needs_reconstruct:
-            reconstructed = reconstruct_overview_houses_from_existing_ocr(session, sheet)
-            if reconstructed:
-                overview_houses_rows = reconstructed
 
     ov_candidate_sheets: list[CensusSheet] | None = None
     if overview_houses_rows:
@@ -2529,15 +2720,29 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
         ov_house_counts: dict[int, int] = {}
         joined_ovh_rows: list[CensusOverviewHouse] = []
         if ov_sids:
-            joined_ovh_rows = list(
+            raw_joined_ovh = list(
                 session.exec(
                     select(CensusOverviewHouse)
                     .where(CensusOverviewHouse.census_sheet_id.in_(ov_sids))  # type: ignore[union-attr]
-                    .order_by(CensusOverviewHouse.census_sheet_id.asc(), CensusOverviewHouse.row_index.asc())
+                    .order_by(
+                        CensusOverviewHouse.census_sheet_id.asc(),
+                        CensusOverviewHouse.row_index.asc(),
+                        CensusOverviewHouse.id.asc(),
+                    )
                 ).all()
             )
-            for jh in joined_ovh_rows:
-                ov_house_counts[jh.census_sheet_id] = ov_house_counts.get(jh.census_sheet_id, 0) + 1
+            by_ov_sid: dict[int, list[CensusOverviewHouse]] = {}
+            for jh in raw_joined_ovh:
+                by_ov_sid.setdefault(jh.census_sheet_id, []).append(jh)
+            for ov_sid in ov_sids:
+                ov_s_obj = ov_sheets_by_id.get(ov_sid)
+                s_rows = by_ov_sid.get(ov_sid, [])
+                if ov_s_obj is not None and s_rows:
+                    s_rows = _deduplicate_and_repair_overview_houses(session, ov_s_obj, s_rows)
+                elif ov_s_obj is not None and not s_rows:
+                    s_rows = reconstruct_overview_houses_from_existing_ocr(session, ov_s_obj)
+                ov_house_counts[ov_sid] = len(s_rows)
+                joined_ovh_rows.extend(s_rows)
 
         for md in md_rows:
             matched_row = rows_by_crop.get(md.stitched_crop_path or "")
@@ -2579,7 +2784,15 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             elif j_hn_strs:
                 j_cand_stmt = j_cand_stmt.where(CensusSheet.house_number.in_(j_hn_strs))  # type: ignore[union-attr]
             j_cand_sheets = list(session.exec(j_cand_stmt).all())
+            seen_joined_keys: set[tuple[int, str]] = set()
             for jh in joined_ovh_rows:
+                j_key = (
+                    int(jh.census_sheet_id or 0),
+                    normalize_house_number(jh.house_number) or str(jh.row_index),
+                )
+                if j_key in seen_joined_keys:
+                    continue
+                seen_joined_keys.add(j_key)
                 parent_ov = ov_sheets_by_id.get(jh.census_sheet_id)
                 joined_overview_houses.append(
                     _serialize_overview_house(
@@ -3643,14 +3856,32 @@ def get_municipality_overview(
         ).all():
             muni_ov_districts_map.setdefault(md.census_sheet_id, []).append(md)
 
-    # First pass: deduplicate & repair genuine Obecný prehľad sheets (excluding sheets whose md_rows are bogus house rows)
+    # First pass: self-heal any Obecný prehľad sheet that was marked 'overview', then deduplicate & repair genuine Obecný prehľad sheets
     has_real_muni_overview_for_year: set[int] = set()
     linked_child_ov_ids: set[int] = set()
     bogus_muni_ov_sheet_ids: set[int] = set()
     for s in sheets:
+        if (
+            s.id is not None
+            and (s.sheet_type or "household") == "overview"
+            and not _has_manual_sheet_type_override(s, "overview")
+            and s.front_scan_id
+        ):
+            f_sc = session.get(ScanImage, s.front_scan_id)
+            if f_sc and f_sc.header_raw_ocr and detect_is_municipal_overview_sheet(f_sc.header_raw_ocr, s.slovakiana_key):
+                s.sheet_type = "municipal_overview"
+                session.add(s)
+                session.commit()
+                session.refresh(s)
+                ov_counts_map.pop(s.id, None)
+                rebuilt_mds = reconstruct_municipal_overview_districts_from_existing_ocr(session, s)
+                if rebuilt_mds:
+                    muni_ov_districts_map[s.id] = rebuilt_mds
+
+    for s in sheets:
         if s.id is not None and (s.sheet_type or "household") == "municipal_overview":
             raw_mds = muni_ov_districts_map.get(s.id, [])
-            if not raw_mds and _has_manual_sheet_type_override(s, "municipal_overview"):
+            if not raw_mds:
                 raw_mds = reconstruct_municipal_overview_districts_from_existing_ocr(session, s)
                 if raw_mds:
                     muni_ov_districts_map[s.id] = raw_mds
@@ -3786,41 +4017,28 @@ def get_municipality_overview(
                 if m_folded in fold_text_diacritics(ovh.municipality or "")
             ]
 
-    # Self-heal any overview sheet whose CensusOverviewHouse rows still contain garbled/English OCR owner names
-    # or duplicate consecutive house numbers
+    # Self-heal any overview sheet whose CensusOverviewHouse rows contain duplicates or garbled OCR owner names in-place
     ov_by_sheet: dict[int, list[CensusOverviewHouse]] = {}
     for ovh in ov_houses:
         ov_by_sheet.setdefault(ovh.census_sheet_id, []).append(ovh)
-    rebuilt_any_ov = False
     for ov_sid, s_ov_rows in list(ov_by_sheet.items()):
         ov_s = ov_sheets_by_id_map.get(ov_sid) or session.get(CensusSheet, ov_sid)
-        has_garbled = any(_is_garbled_or_english_owner_ocr(r.owner_name) for r in s_ov_rows)
-        has_dup_hn = any(
-            s_ov_rows[i].house_number and s_ov_rows[i].house_number == s_ov_rows[i + 1].house_number
-            for i in range(len(s_ov_rows) - 1)
-        )
-        has_missing_known_counts = bool(
-            ov_s
-            and ov_s.slovakiana_key in ("cair-ko270vr", "cair-ko270vs")
-            and any(r.present_persons_count is None for r in s_ov_rows)
-        )
-        if has_garbled or has_dup_hn or has_missing_known_counts:
-            if ov_s is not None:
-                rebuilt = reconstruct_overview_houses_from_existing_ocr(session, ov_s)
-                if rebuilt:
-                    ov_by_sheet[ov_sid] = rebuilt
-                    ov_counts_map[ov_sid] = len(rebuilt)
-                    rebuilt_any_ov = True
-                else:
-                    for r in s_ov_rows:
-                        norm_o = _normalize_overview_owner(r.owner_name)
-                        if norm_o and norm_o != r.owner_name:
-                            r.owner_name = norm_o
-                            session.add(r)
-                            rebuilt_any_ov = True
-    if rebuilt_any_ov:
-        session.commit()
-        ov_houses = [r for s_rows in ov_by_sheet.values() for r in s_rows]
+        if ov_s is not None and s_ov_rows:
+            cleaned_ov = _deduplicate_and_repair_overview_houses(session, ov_s, s_ov_rows)
+            ov_by_sheet[ov_sid] = cleaned_ov
+            ov_counts_map[ov_sid] = len(cleaned_ov)
+    ov_houses = [r for s_rows in ov_by_sheet.values() for r in s_rows]
+    for ov_ser in overview_sheets:
+        sid_val = ov_ser.get("id")
+        if isinstance(sid_val, int) and sid_val in ov_counts_map:
+            ov_ser["overview_houses_count"] = ov_counts_map[sid_val]
+    for ms_ser in municipal_overview_sheets:
+        for d_ser in ms_ser.get("municipal_overview_districts") or []:
+            m_ov_sid = d_ser.get("matched_overview_sheet_id")
+            if isinstance(m_ov_sid, int) and m_ov_sid in ov_counts_map:
+                d_ser["matched_overview_houses_count"] = ov_counts_map[m_ov_sid]
+                if isinstance(d_ser.get("matched_overview_sheet"), dict):
+                    d_ser["matched_overview_sheet"]["overview_houses_count"] = ov_counts_map[m_ov_sid]
 
     has_st = bool(street and street.strip())
     has_pn = bool(person_name and person_name.strip())
@@ -3953,11 +4171,16 @@ def get_municipality_overview(
     houses_directory: list[dict[str, Any]] = []
     covered_sheet_ids: set[int] = set()
     covered_hn_keys: set[str] = set()
+    seen_ov_house_keys: set[tuple[int, str]] = set()
     linked_by_sheet_id = _batch_find_linked_house_sheets(session, sheets)
 
     for ovh in ov_houses:
         hn_str = str(ovh.house_number or "").strip()
         hn_key = normalize_house_number(hn_str)
+        ov_dedup_key = (int(ovh.census_sheet_id or 0), hn_key or str(ovh.row_index))
+        if ov_dedup_key in seen_ov_house_keys:
+            continue
+        seen_ov_house_keys.add(ov_dedup_key)
         ov_parent = sheets_by_id.get(ovh.census_sheet_id) or session.get(CensusSheet, ovh.census_sheet_id)
         ov_muni_raw = ovh.municipality or (ov_parent.municipality if ov_parent else None)
         ov_muni_key = canonical_municipality_key(ov_muni_raw)
@@ -4234,9 +4457,21 @@ def list_overview_houses(
     stmt = (
         select(CensusOverviewHouse)
         .where(CensusOverviewHouse.census_year == resolved_year)
-        .order_by(CensusOverviewHouse.row_index.asc())
+        .order_by(
+            CensusOverviewHouse.census_sheet_id.asc(),
+            CensusOverviewHouse.row_index.asc(),
+            CensusOverviewHouse.id.asc(),
+        )
     )
-    houses = list(session.exec(stmt).all())
+    raw_houses = list(session.exec(stmt).all())
+    seen_ovh_keys: set[tuple[int, str]] = set()
+    houses: list[CensusOverviewHouse] = []
+    for h in raw_houses:
+        hk = (int(h.census_sheet_id or 0), normalize_house_number(h.house_number) or str(h.row_index))
+        if hk in seen_ovh_keys:
+            continue
+        seen_ovh_keys.add(hk)
+        houses.append(h)
     if municipality and municipality.strip():
         target_canon = canonical_municipality_key(municipality)
         m_fold = fold_text_diacritics(municipality.strip())
@@ -4312,19 +4547,30 @@ def get_municipalities_summary(
         all_sheets = [s for s in all_sheets if _sheet_matches_district(s, district, municipality_specified=False)]
     ov_count_by_muni_key: dict[str, int] = {}
     ov_persons_by_muni_key: dict[str, int] = {}
-    ov_grp_stmt = (
+    seen_summary_ovh: set[tuple[int, str]] = set()
+    ov_rows_stmt = (
         select(
+            CensusOverviewHouse.census_sheet_id,
+            CensusOverviewHouse.row_index,
+            CensusOverviewHouse.house_number,
             CensusOverviewHouse.municipality,
-            func.count(CensusOverviewHouse.id),
-            func.coalesce(func.sum(CensusOverviewHouse.present_persons_count), 0),
+            CensusOverviewHouse.present_persons_count,
         )
         .where(CensusOverviewHouse.census_year == resolved_year)
-        .group_by(CensusOverviewHouse.municipality)
+        .order_by(
+            CensusOverviewHouse.census_sheet_id.asc(),
+            CensusOverviewHouse.row_index.asc(),
+            CensusOverviewHouse.id.asc(),
+        )
     )
-    for raw_ov_muni, cnt, p_sum in session.exec(ov_grp_stmt).all():
+    for ov_sid, r_idx, hn_val, raw_ov_muni, pp_val in session.exec(ov_rows_stmt).all():
+        dedup_k = (int(ov_sid or 0), normalize_house_number(hn_val) or str(r_idx))
+        if dedup_k in seen_summary_ovh:
+            continue
+        seen_summary_ovh.add(dedup_k)
         m_key = canonical_municipality_key(raw_ov_muni) or "neznama obec"
-        ov_count_by_muni_key[m_key] = ov_count_by_muni_key.get(m_key, 0) + int(cnt or 0)
-        ov_persons_by_muni_key[m_key] = ov_persons_by_muni_key.get(m_key, 0) + int(p_sum or 0)
+        ov_count_by_muni_key[m_key] = ov_count_by_muni_key.get(m_key, 0) + 1
+        ov_persons_by_muni_key[m_key] = ov_persons_by_muni_key.get(m_key, 0) + int(pp_val or 0)
 
     mov_stmt = select(CensusMunicipalOverviewDistrict).where(
         CensusMunicipalOverviewDistrict.census_year == resolved_year

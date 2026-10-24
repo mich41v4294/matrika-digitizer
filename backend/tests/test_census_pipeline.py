@@ -2094,6 +2094,186 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 detail_disk_muni = asyncio.run(get_census_sheet_detail("cair-manual-switch-1", session))
                 self.assertEqual(detail_disk_muni["sheet"]["sheet_type"], "municipal_overview")
 
+    def test_reocr_prehlad_domov_no_duplicate_houses_and_revisor_repair(self) -> None:
+        import asyncio
+        from backend.app.api.census import (
+            get_census_sheet_detail,
+            get_municipalities_summary,
+            get_municipality_overview,
+            list_overview_houses,
+        )
+        from backend.app.db.models import (
+            CensusMunicipalOverviewDistrict,
+            CensusOverviewHouse,
+            RecordRow,
+            ScanImage,
+        )
+        from backend.app.pipeline.census_layout import (
+            detect_is_municipal_overview_sheet,
+            detect_is_overview_sheet,
+            extract_municipal_overview_header_metadata,
+            is_valid_commissioner_or_revisor_name,
+        )
+
+        # 1. Verify 1930 Obecný prehľad header with instruction paragraph mentioning 'prehlad scitacieho obvodu'
+        # is detected as municipal_overview (not overview) and extracts 'František Mallý' (never 'Hornie Lelenice')
+        ko2a0od_header_ocr = (
+            "Sčitanie l'udu 1930\n\nPolitický okres\nAlohovec\nHornie Lelenice\n\n"
+            "Meno sčitacieho revízora\nFrantišelu Mally'\n\nObec\n\nObecný prehl'ad\n\n"
+            "Za obecný prehlád v obciach, kde sčitací obvod sa kryje s obvodom obce, slúži prehlad sčitacieho obvodu, "
+            "ktorý vyhotovi dvojmo už sčitací komisár sám."
+        )
+        self.assertTrue(detect_is_municipal_overview_sheet(ko2a0od_header_ocr, "cair-ko2a0od"))
+        self.assertFalse(detect_is_overview_sheet(ko2a0od_header_ocr, "cair-ko2a0od"))
+        self.assertFalse(is_valid_commissioner_or_revisor_name("Hornie Lelenice"))
+        self.assertFalse(
+            is_valid_commissioner_or_revisor_name(
+                "Hornie Lelenice", municipality="Horné Zelenice", district="Hlohovec"
+            )
+        )
+        self.assertEqual(
+            extract_municipal_overview_header_metadata(ko2a0od_header_ocr)["revisor_name"],
+            "František Mallý",
+        )
+        # Also test when OCR places 'Hornie Lelenice' on the line right after 'Meno sčítacieho revízora'
+        interleaved_header_ocr = (
+            "Politický okres Alohovec\nMeno sčitacieho revízora\nHornie Lelenice\nFrantišel Mallý\nObecný prehl'ad"
+        )
+        self.assertEqual(
+            extract_municipal_overview_header_metadata(interleaved_header_ocr)["revisor_name"],
+            "František Mallý",
+        )
+
+        # 2. Verify that duplicate CensusOverviewHouse rows and garbled owners from re-OCRing a Prehľad domov
+        # are deduplicated and repaired in Obecný prehľad (joined_overview_houses), Prehľad domov, and Municipality Overview,
+        # and bogus revisor 'Hornie Lelenice' on cair-ko2a0od is self-healed to 'František Mallý'
+        test_engine = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(test_engine)
+        ensure_fts_schema(test_engine)
+
+        with Session(test_engine) as session:
+            muni_sheet = CensusSheet(
+                slovakiana_key="cair-ko2a0od",
+                census_year=1930,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                municipality_folded="horne zelenice",
+                sheet_type="municipal_overview",
+                commissioner_name="Hornie Lelenice",  # Bogus revisor to be repaired
+                download_status="extracted",
+            )
+            ov_sheet = CensusSheet(
+                slovakiana_key="cair-ko270vr",
+                census_year=1930,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                municipality_folded="horne zelenice",
+                sheet_type="overview",
+                obvod_number="I",
+                commissioner_name="Eduard Zoltický",
+                download_status="extracted",
+            )
+            session.add_all([muni_sheet, ov_sheet])
+            session.commit()
+            session.refresh(muni_sheet)
+            session.refresh(ov_sheet)
+
+            muni_scan = ScanImage(
+                census_sheet_id=muni_sheet.id,
+                page_side="front",
+                filename="cair-ko2a0od_front.jpg",
+                original_path="/nonexistent/cair-ko2a0od_front.jpg",
+                header_raw_ocr=ko2a0od_header_ocr,
+                detected_year="1930",
+                detected_type="census",
+                status="extracted",
+            )
+            session.add(muni_scan)
+            session.commit()
+            session.refresh(muni_scan)
+            muni_sheet.front_scan_id = muni_scan.id
+            session.add(muni_sheet)
+
+            session.add(
+                CensusMunicipalOverviewDistrict(
+                    census_sheet_id=muni_sheet.id or 0,
+                    scan_id=muni_scan.id,
+                    row_index=1,
+                    census_year=1930,
+                    district="Hlohovec",
+                    municipality="Horné Zelenice",
+                    ordinal_number="1",
+                    settlement_name="Horné Zelenice",
+                    obvod_number="I",
+                    commissioner_name="Eduard Zoltický",
+                    houses_total=4,
+                    houses_inhabited=4,
+                    houses_uninhabited=0,
+                    household_count=5,
+                    present_persons_count=27,
+                    matched_overview_sheet_id=ov_sheet.id,
+                )
+            )
+
+            # Seed DUPLICATE CensusOverviewHouse rows (each house inserted twice, with garbled Dom č. 2 & Dom č. 4)
+            dup_houses_spec = [
+                (1, "1", 1, "P. Hrivnáková", 1, 2, "/media/crops/scan_151/row_01_stitched.jpg"),
+                (1, "1", 1, "P. Hrivnáková", 1, 2, "/media/crops/scan_151/row_01_stitched.jpg"),
+                (2, "2", 2, "Kinds Habitied Air Love Or This May Be Described", 1, 3, "/media/crops/scan_151/row_02_stitched.jpg"),
+                (2, "2", 2, "Kinds Habitied Air Love Or This May Be Described", 1, 3, "/media/crops/scan_151/row_02_stitched.jpg"),
+                (3, "3", 3, "Ján Petrovič, Ján Práznovský", 1, 13, "/media/crops/scan_151/row_03_stitched.jpg"),
+                (3, "3", 3, "Ján Petrovič, Ján Práznovský", 1, 13, "/media/crops/scan_151/row_03_stitched.jpg"),
+                (4, "4", 4, "Ľudovít Jucev", 2, 9, "/media/crops/scan_151/row_04_stitched.jpg"),
+                (4, "4", 4, "Ľudovít Jucev", 2, 9, "/media/crops/scan_151/row_04_stitched.jpg"),
+            ]
+            for r_idx, hn, hn_int, owner, hh_c, pp_c, crop_p in dup_houses_spec:
+                session.add(
+                    CensusOverviewHouse(
+                        census_sheet_id=ov_sheet.id or 0,
+                        row_index=r_idx,
+                        ordinal_number=str(r_idx),
+                        census_year=1930,
+                        district="Hlohovec",
+                        municipality="Horné Zelenice",
+                        obvod_number="I",
+                        house_number=hn,
+                        house_number_int=hn_int,
+                        is_inhabited=True,
+                        owner_name=owner,
+                        household_count=hh_c,
+                        present_persons_count=pp_c,
+                        stitched_crop_path=crop_p,
+                    )
+                )
+            session.commit()
+
+            # View Obecný prehľad (cair-ko2a0od)
+            muni_detail = asyncio.run(get_census_sheet_detail("cair-ko2a0od", session))
+            self.assertEqual(muni_detail["sheet"]["sheet_type"], "municipal_overview")
+            self.assertEqual(muni_detail["sheet"]["commissioner_name"], "František Mallý")
+            joined = muni_detail["joined_overview_houses"]
+            self.assertEqual(len(joined), 4)
+            self.assertEqual(
+                [(jh["house_number"], jh["owner_name"]) for jh in joined],
+                [
+                    ("1", "P. Hrivnáková"),
+                    ("2", "Rím.-kat. cirkev"),
+                    ("3", "Ján Petrovič, Ján Práznovský"),
+                    ("4", "Ľudovít Jurčo"),
+                ],
+            )
+            self.assertEqual(muni_detail["linked_overview_sheets"][0]["overview_houses_count"], 4)
+
+            # Verify Prehľad domov (cair-ko270vr), Municipality Overview, list_overview_houses, and summary also have 4 unique houses
+            ov_detail = asyncio.run(get_census_sheet_detail("cair-ko270vr", session))
+            self.assertEqual(len(ov_detail["overview_houses"]), 4)
+            muni_ov = get_municipality_overview(session, municipality="Horné Zelenice", census_year=1930)
+            self.assertEqual(len(muni_ov["houses_directory"]), 4)
+            ov_list = list_overview_houses(session, municipality="Horné Zelenice", census_year=1930)
+            self.assertEqual(ov_list["total"], 4)
+            summary = get_municipalities_summary(session, census_year=1930)
+            hz_summary = next(m for m in summary["municipalities"] if m["municipality"] == "Horné Zelenice")
+            self.assertEqual(hz_summary["overview_houses_count"], 4)
 
 
 if __name__ == "__main__":

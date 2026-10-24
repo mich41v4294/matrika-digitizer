@@ -17,6 +17,7 @@ from backend.app.pipeline.census_layout import (
     detect_is_overview_sheet,
     extract_municipal_overview_header_metadata,
     extract_overview_header_metadata,
+    is_valid_commissioner_or_revisor_name,
 )
 
 
@@ -245,17 +246,47 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
     if sheet:
         if detect_is_municipal_overview_sheet(raw_text, f"{scan.filename} {sheet.slovakiana_key}"):
             sheet.sheet_type = "municipal_overview"
-            meta_rev = extract_municipal_overview_header_metadata(raw_text)
-            if meta_rev.get("revisor_name") and not sheet.commissioner_name:
+            meta_rev = extract_municipal_overview_header_metadata(
+                raw_text, municipality=sheet.municipality, district=sheet.district
+            )
+            if meta_rev.get("revisor_name") and (
+                not sheet.commissioner_name
+                or not is_valid_commissioner_or_revisor_name(
+                    sheet.commissioner_name,
+                    municipality=sheet.municipality,
+                    district=sheet.district,
+                )
+            ):
                 sheet.commissioner_name = meta_rev["revisor_name"]
+            elif not is_valid_commissioner_or_revisor_name(
+                sheet.commissioner_name,
+                municipality=sheet.municipality,
+                district=sheet.district,
+            ):
+                sheet.commissioner_name = None
             session.add(sheet)
         elif detect_is_overview_sheet(raw_text, f"{scan.filename} {sheet.slovakiana_key}"):
             sheet.sheet_type = "overview"
-            meta = extract_overview_header_metadata(raw_text)
+            meta = extract_overview_header_metadata(
+                raw_text, municipality=sheet.municipality, district=sheet.district
+            )
             if meta.get("obvod_number") and not sheet.obvod_number:
                 sheet.obvod_number = meta["obvod_number"]
-            if meta.get("commissioner_name") and not sheet.commissioner_name:
+            if meta.get("commissioner_name") and (
+                not sheet.commissioner_name
+                or not is_valid_commissioner_or_revisor_name(
+                    sheet.commissioner_name,
+                    municipality=sheet.municipality,
+                    district=sheet.district,
+                )
+            ):
                 sheet.commissioner_name = meta["commissioner_name"]
+            elif not is_valid_commissioner_or_revisor_name(
+                sheet.commissioner_name,
+                municipality=sheet.municipality,
+                district=sheet.district,
+            ):
+                sheet.commissioner_name = None
             session.add(sheet)
     if (
         scan.detected_type != prev_scan_type

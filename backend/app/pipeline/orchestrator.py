@@ -81,14 +81,14 @@ def _persist_layout_result(
     scan.error_message = None
     session.add(scan)
 
-    # Update existing rows by row_index in-place (preserving row IDs) and remove orphaned child records
+    # Update existing rows by row_index in-place (preserving row IDs) and remove orphaned or duplicate child records
     existing_rows = session.exec(
-        select(RecordRow).where(RecordRow.scan_id == scan.id).order_by(RecordRow.row_index)
+        select(RecordRow).where(RecordRow.scan_id == scan.id).order_by(RecordRow.row_index, RecordRow.id)
     ).all()
-    existing_by_idx = {er.row_index: er for er in existing_rows}
+    existing_by_idx: dict[int, RecordRow] = {}
     new_indices = {r_info.row_index for r_info in layout_res.rows}
     for er in existing_rows:
-        if er.row_index not in new_indices:
+        if er.row_index not in new_indices or er.row_index in existing_by_idx:
             for m in session.exec(
                 select(FamilySearchMatch).where(FamilySearchMatch.row_id == er.id)
             ).all():
@@ -98,6 +98,8 @@ def _persist_layout_result(
             for qi in session.exec(select(QuestionItem).where(QuestionItem.row_id == er.id)).all():
                 session.delete(qi)
             session.delete(er)
+        else:
+            existing_by_idx[er.row_index] = er
 
     created_rows: list[RecordRow] = []
     for r_info in layout_res.rows:
@@ -227,6 +229,21 @@ async def process_single_scan_pipeline(
         scan = session.get(ScanImage, scan_id)
         if not scan:
             raise ValueError(f"Scan {scan_id} not found")
+        if finalize_idle and scan.census_sheet_id:
+            parent_sh = session.get(CensusSheet, scan.census_sheet_id)
+            if parent_sh and parent_sh.sheet_type in ("overview", "municipal_overview"):
+                res_ov = await process_census_sheet_pipeline(
+                    scan.census_sheet_id,
+                    max_rows=max_rows,
+                    run_mcp=run_mcp,
+                )
+                return {
+                    "scan_id": scan.id,
+                    "rows_processed": int(res_ov.get("rows_processed", 0)),
+                    "matched_count": 0,
+                    "detected_year": scan.detected_year,
+                    "detected_type": scan.detected_type,
+                }
 
         try:
             from backend.app.pipeline.feedback import reset_ocr_feedback
@@ -269,7 +286,9 @@ async def process_single_scan_pipeline(
             rows = session.exec(
                 select(RecordRow).where(RecordRow.scan_id == scan.id).order_by(RecordRow.row_index)
             ).all()
-            if not rows:
+            grid_meta = json.loads(scan.grid_metadata_json or "{}")
+            slicing_mode = str(grid_meta.get("slicing_mode") or "")
+            if not rows or (scan.detected_type == "census" and "overview" in slicing_mode):
                 rows = await run_layout_for_scan_async(session, scan)
 
             target_rows = rows[:max_rows] if max_rows else rows
@@ -287,6 +306,21 @@ async def process_single_scan_pipeline(
                 },
             )
             await run_ocr_for_scan_header(session, scan)
+            if finalize_idle and scan.census_sheet_id:
+                parent_sh = session.get(CensusSheet, scan.census_sheet_id)
+                if parent_sh and parent_sh.sheet_type in ("overview", "municipal_overview"):
+                    res_ov = await process_census_sheet_pipeline(
+                        scan.census_sheet_id,
+                        max_rows=max_rows,
+                        run_mcp=run_mcp,
+                    )
+                    return {
+                        "scan_id": scan.id,
+                        "rows_processed": int(res_ov.get("rows_processed", 0)),
+                        "matched_count": 0,
+                        "detected_year": scan.detected_year,
+                        "detected_type": scan.detected_type,
+                    }
             for idx, row in enumerate(target_rows, start=1):
                 await ws_manager.broadcast(
                     "state",

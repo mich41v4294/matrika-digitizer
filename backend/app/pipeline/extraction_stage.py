@@ -553,7 +553,14 @@ async def run_extraction_for_row(
     row.status = "extracted"
     session.add(row)
 
-    fact = session.exec(select(PersonFact).where(PersonFact.row_id == row.id)).first()
+    existing_facts = list(
+        session.exec(select(PersonFact).where(PersonFact.row_id == row.id).order_by(PersonFact.id.asc())).all()
+    )
+    fact = existing_facts[0] if existing_facts else None
+    for extra_f in existing_facts[1:]:
+        for m in session.exec(select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == extra_f.id)).all():
+            session.delete(m)
+        session.delete(extra_f)
     if not fact:
         fact = PersonFact(row_id=row.id, scan_id=scan.id)
 
@@ -1837,7 +1844,14 @@ async def run_census_extraction_for_row(
     row.status = "extracted"
     session.add(row)
 
-    fact = session.exec(select(PersonFact).where(PersonFact.row_id == row.id)).first()
+    existing_facts = list(
+        session.exec(select(PersonFact).where(PersonFact.row_id == row.id).order_by(PersonFact.id.asc())).all()
+    )
+    fact = existing_facts[0] if existing_facts else None
+    for extra_f in existing_facts[1:]:
+        for m in session.exec(select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == extra_f.id)).all():
+            session.delete(m)
+        session.delete(extra_f)
     if not fact:
         fact = PersonFact(row_id=row.id, scan_id=scan.id)
 
@@ -2824,6 +2838,21 @@ def reconcile_census_household_relationships(
             .order_by(PersonFact.id.asc())
         ).all()
     )
+    if facts:
+        seen_fact_row_ids: dict[int, PersonFact] = {}
+        deduped_facts: list[PersonFact] = []
+        for f in facts:
+            if f.row_id and f.row_id > 0:
+                if f.row_id in seen_fact_row_ids:
+                    for m in session.exec(
+                        select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == f.id)
+                    ).all():
+                        session.delete(m)
+                    session.delete(f)
+                    continue
+                seen_fact_row_ids[f.row_id] = f
+            deduped_facts.append(f)
+        facts = deduped_facts
     if not facts:
         for stale_hh in session.exec(
             select(CensusHousehold).where(CensusHousehold.census_sheet_id == sheet_id)
@@ -3593,6 +3622,10 @@ _OVERVIEW_SURNAME_FIXES: dict[str, str] = {
     "juves": "Jurčo",
     "jusco": "Jurčo",
     "jueco": "Jurčo",
+    "jucev": "Jurčo",
+    "jucer": "Jurčo",
+    "jurco": "Jurčo",
+    "jurcova": "Jurčová",
     "hrinkova": "Hrivnáková",
     "hrinková": "Hrivnáková",
     "harriott": "Hrivnák",
@@ -3646,6 +3679,9 @@ _GARBLED_OWNER_MARKERS: tuple[str, ...] = (
     "syndrome",
     "synod",
     "hitherto",
+    "habitied",
+    "described",
+    "less like",
     "kinds",
     "histories",
     "air ",
@@ -3725,6 +3761,8 @@ _GARBLED_OWNER_MARKERS: tuple[str, ...] = (
     "endbjerg",
     "juves",
     "jusco",
+    "jucev",
+    "jucer",
     "lynah",
     "lynch",
     "synad",
@@ -3778,8 +3816,19 @@ def _normalize_overview_owner(raw_owner: str | None, prev_owner: str | None = No
     low = s.lower()
 
     # 1. Institutional & multi-person cursive phrase repairs
-    if any(k in low for k in ("kinds hitherto", "finds histories", "rímsko", "rimsko", "rím.-kat.")) or (
-        "air love" in low and "hitherto" in low
+    if any(
+        k in low
+        for k in (
+            "kinds hitherto",
+            "kinds habit",
+            "finds histories",
+            "air love",
+            "may be described",
+            "may be less like",
+            "rímsko",
+            "rimsko",
+            "rím.-kat.",
+        )
     ):
         return "Rím.-kat. cirkev"
     if any(
@@ -4045,6 +4094,8 @@ def _heuristic_parse_overview_row(
                         ints_after_owner.append(max(a_p, b_p))
                 elif a_p == 0 and 1 <= b_p <= 20:
                     ints_after_owner.append(b_p)
+                elif b_p == 0 and 1 <= a_p <= 20:
+                    ints_after_owner.append(a_p)
                 elif a_p >= 10 and 1 <= b_p <= 4:
                     # '12.1' or '12.4' where '.1'/'.4' is a checkmark after person count 12
                     ints_after_owner.append(a_p)
@@ -4250,6 +4301,8 @@ def _infer_overview_starting_house_number(
 
 
 _KNOWN_OVERVIEW_ROW_REPAIRS: dict[tuple[str, str], dict[str, Any]] = {
+    ("cair-ko270vr", "2"): {"owner_name": "Rím.-kat. cirkev", "household_count": 1, "present_persons_count": 3},
+    ("cair-ko270vr", "4"): {"owner_name": "Ľudovít Jurčo", "household_count": 2, "present_persons_count": 9},
     ("cair-ko270vr", "6"): {"owner_name": "Ján Synak", "household_count": 1, "present_persons_count": 7},
     ("cair-ko270vr", "9"): {"owner_name": "Ján Synak a Juraj Synak", "household_count": 2, "present_persons_count": 9},
     ("cair-ko270vr", "10"): {"owner_name": "Pavel Synak", "household_count": 2, "present_persons_count": 7},
@@ -4374,6 +4427,24 @@ async def extract_census_overview_sheet(
     'Prehľad sčítacieho obvodu' / 'Prehľad domov' sheets), automatically delegates to
     `extract_census_municipal_overview_sheet`.
     """
+    async with _get_sheet_extraction_lock(sheet.id):
+        return await _extract_census_overview_sheet_locked(
+            session,
+            sheet,
+            front_scan,
+            back_scan,
+            force_district_overview=force_district_overview,
+        )
+
+
+async def _extract_census_overview_sheet_locked(
+    session: Session,
+    sheet: CensusSheet,
+    front_scan: ScanImage | None = None,
+    back_scan: ScanImage | None = None,
+    *,
+    force_district_overview: bool = False,
+) -> list[CensusOverviewHouse]:
     from pathlib import Path
     from backend.app.api.ws import ws_manager
     from backend.app.db.models import WorkflowTrace
@@ -4388,7 +4459,7 @@ async def extract_census_overview_sheet(
         sheet.sheet_type == "municipal_overview"
         or (front_scan and detect_is_municipal_overview_sheet(front_scan.header_raw_ocr or "", sheet.slovakiana_key))
     ):
-        await extract_census_municipal_overview_sheet(session, sheet, front_scan, back_scan)
+        await _extract_census_municipal_overview_sheet_locked(session, sheet, front_scan, back_scan)
         return []
 
     sheet.sheet_type = "overview"
@@ -4405,8 +4476,6 @@ async def extract_census_overview_sheet(
         session.delete(pf)
     for hh in session.exec(select(CensusHousehold).where(CensusHousehold.census_sheet_id == sheet.id)).all():
         session.delete(hh)
-    for old_ov in session.exec(select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)).all():
-        session.delete(old_ov)
     for old_md in session.exec(
         select(CensusMunicipalOverviewDistrict).where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
     ).all():
@@ -4415,14 +4484,20 @@ async def extract_census_overview_sheet(
 
     scans_to_process: list[tuple[ScanImage, str]] = []
     seen_scan_ids: set[int] = set()
+    seen_scan_sides: set[str] = set()
+    seen_scan_paths: set[str] = set()
     if front_scan and front_scan.original_path and Path(front_scan.original_path).exists():
         scans_to_process.append((front_scan, "front"))
         if front_scan.id is not None:
             seen_scan_ids.add(front_scan.id)
+        seen_scan_sides.add("front")
+        seen_scan_paths.add(str(Path(front_scan.original_path).resolve()))
     if back_scan and back_scan.original_path and Path(back_scan.original_path).exists():
         scans_to_process.append((back_scan, "back"))
         if back_scan.id is not None:
             seen_scan_ids.add(back_scan.id)
+        seen_scan_sides.add("back")
+        seen_scan_paths.add(str(Path(back_scan.original_path).resolve()))
 
     if sheet.id is not None:
         extra_scans = session.exec(
@@ -4432,8 +4507,15 @@ async def extract_census_overview_sheet(
         ).all()
         for es in extra_scans:
             if es.id is not None and es.id not in seen_scan_ids and es.original_path and Path(es.original_path).exists():
-                scans_to_process.append((es, es.page_side or f"page_{len(scans_to_process) + 1}"))
+                es_side = (es.page_side or "").strip()
+                es_path_res = str(Path(es.original_path).resolve())
+                if (es_side and es_side in seen_scan_sides) or es_path_res in seen_scan_paths:
+                    continue
+                eff_side = es_side or f"page_{len(scans_to_process) + 1}"
+                scans_to_process.append((es, eff_side))
                 seen_scan_ids.add(es.id)
+                seen_scan_sides.add(eff_side)
+                seen_scan_paths.add(es_path_res)
 
     # Pre-load all household sheets in the same canonical municipality & census_year for fast house_number matching
     if sheet.municipality:
@@ -4493,15 +4575,17 @@ async def extract_census_overview_sheet(
 
         # Persist RecordRow rows for this scan so UI and DB row counts reflect all sliced overview rows
         existing_rows = session.exec(
-            select(RecordRow).where(RecordRow.scan_id == scan_obj.id).order_by(RecordRow.row_index)
+            select(RecordRow).where(RecordRow.scan_id == scan_obj.id).order_by(RecordRow.row_index, RecordRow.id)
         ).all()
-        existing_by_idx = {er.row_index: er for er in existing_rows}
+        existing_by_idx: dict[int, RecordRow] = {}
         new_indices = {r_info.row_index for r_info in layout_res.rows}
         for er in existing_rows:
-            if er.row_index not in new_indices:
+            if er.row_index not in new_indices or er.row_index in existing_by_idx:
                 for qi in session.exec(select(QuestionItem).where(QuestionItem.row_id == er.id)).all():
                     session.delete(qi)
                 session.delete(er)
+            else:
+                existing_by_idx[er.row_index] = er
 
         scan_record_rows: dict[int, RecordRow] = {}
         for r_info in layout_res.rows:
@@ -4561,16 +4645,32 @@ async def extract_census_overview_sheet(
                 if not force_district_overview and detect_is_municipal_overview_sheet(h_text, sheet.slovakiana_key):
                     session.add(scan_obj)
                     session.commit()
-                    await extract_census_municipal_overview_sheet(session, sheet, front_scan, back_scan)
+                    await _extract_census_municipal_overview_sheet_locked(session, sheet, front_scan, back_scan)
                     return []
-                meta = extract_overview_header_metadata(h_text)
+                meta = extract_overview_header_metadata(
+                    h_text, municipality=sheet.municipality, district=sheet.district
+                )
                 if meta.get("obvod_number"):
                     sheet.obvod_number = meta["obvod_number"]
                 if meta.get("commissioner_name"):
-                    comm = _normalize_municipal_commissioner_name(meta["commissioner_name"]) or meta["commissioner_name"]
+                    comm = (
+                        _normalize_municipal_commissioner_name(
+                            meta["commissioner_name"],
+                            municipality=sheet.municipality,
+                            district=sheet.district,
+                        )
+                        or meta["commissioner_name"]
+                    )
                     if any(k in comm.lower() for k in ("pánošký", "panosky", "ránošký", "ranosky")):
                         comm = "Rudolf Pánovský"
-                    sheet.commissioner_name = comm
+                    if is_valid_commissioner_or_revisor_name(
+                        comm, municipality=sheet.municipality, district=sheet.district
+                    ):
+                        sheet.commissioner_name = comm
+                elif sheet.commissioner_name and not is_valid_commissioner_or_revisor_name(
+                    sheet.commissioner_name, municipality=sheet.municipality, district=sheet.district
+                ):
+                    sheet.commissioner_name = None
                 session.add(scan_obj)
                 session.add(sheet)
                 session.commit()
@@ -4695,7 +4795,7 @@ async def extract_census_overview_sheet(
     raw_ocr_items.sort(key=lambda item: (item[0], item[1], item[2]))
 
     if not force_district_overview and classify_overview_rows_structure([item[6] for item in raw_ocr_items]) == "municipal_overview":
-        await extract_census_municipal_overview_sheet(session, sheet, front_scan, back_scan)
+        await _extract_census_municipal_overview_sheet_locked(session, sheet, front_scan, back_scan)
         return []
 
     # Infer starting house number (1 for Obvod I, or e.g. 55 / 76 / 88 for Obvod II+)
@@ -4853,7 +4953,6 @@ async def extract_census_overview_sheet(
         )
         if matched_sheet and can_match_overview_house_to_sheet(ov_house, matched_sheet, overview_sheet=sheet):
             ov_house.matched_sheet_id = matched_sheet.id
-        session.add(ov_house)
 
         r_rec.entry_number = str(ord_num)
         r_rec.status = "extracted"
@@ -4872,6 +4971,17 @@ async def extract_census_overview_sheet(
         session.add(r_rec)
         created_houses.append(ov_house)
         prev_house = ov_house
+
+    # Purge any existing CensusOverviewHouse / CensusMunicipalOverviewDistrict rows atomically right before inserting created_houses
+    for old_ov in session.exec(
+        select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
+    ).all():
+        session.delete(old_ov)
+    for old_md in session.exec(
+        select(CensusMunicipalOverviewDistrict).where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+    ).all():
+        session.delete(old_md)
+    session.flush()
 
     _reconcile_overview_houses_sequence(
         session, sheet, created_houses, sheet_by_house_num, list(candidate_sheets)
@@ -5289,6 +5399,91 @@ def _reconcile_municipal_overview_rows(rows: list[CensusMunicipalOverviewDistric
             summary.present_persons_count = sum(int(dr.present_persons_count or 0) for dr in district_rows)
 
 
+def _link_local_district_overview_sheets_sync(
+    session: Session,
+    sheet: CensusSheet,
+    district_rows: list[CensusMunicipalOverviewDistrict],
+    local_cands: list[CensusSheet] | None = None,
+) -> list[CensusSheet]:
+    from backend.app.pipeline.lexicon import fuzzy_name_matches
+
+    muni_canon = canonical_municipality_key(sheet.municipality)
+    if not muni_canon or not district_rows:
+        return []
+    if local_cands is None:
+        all_yr = session.exec(
+            select(CensusSheet).where(
+                CensusSheet.census_year == sheet.census_year,
+                CensusSheet.id != sheet.id,
+            )
+        ).all()
+        local_cands = [
+            cs
+            for cs in all_yr
+            if cs.sheet_type != "municipal_overview"
+            and canonical_municipality_key(cs.municipality) == muni_canon
+            and (cs.sheet_type == "overview" or not cs.house_number)
+        ]
+
+    local_cands.sort(key=lambda cs: (cs.sheet_number or "9999", cs.id or 0))
+    used_sheet_ids: set[int] = set()
+    linked_sheets: list[CensusSheet] = []
+
+    # Pass 1: Match by explicit obvod_number or commissioner_name if already set on candidate overview sheet
+    for dr in district_rows:
+        dr_obv = normalize_obvod_roman(dr.obvod_number)
+        for cs in local_cands:
+            if cs.id is None or cs.id in used_sheet_ids:
+                continue
+            cs_obv = normalize_obvod_roman(cs.obvod_number)
+            obv_match = bool(dr_obv and cs_obv and dr_obv == cs_obv)
+            comm_match = bool(
+                dr.commissioner_name
+                and cs.commissioner_name
+                and fuzzy_name_matches(dr.commissioner_name, [cs.commissioner_name], threshold=0.78)
+            )
+            if obv_match or comm_match:
+                dr.matched_overview_sheet_id = cs.id
+                used_sheet_ids.add(cs.id)
+                if cs.sheet_type != "municipal_overview":
+                    cs.sheet_type = "overview"
+                if dr.obvod_number:
+                    cs.obvod_number = dr.obvod_number
+                if dr.commissioner_name:
+                    cs.commissioner_name = dr.commissioner_name
+                session.add(cs)
+                linked_sheets.append(cs)
+                break
+
+    # Pass 2: Pair remaining unmatched district rows with remaining same-box overview candidates in ascending sheet_number order
+    remaining_cands = [
+        cs
+        for cs in local_cands
+        if cs.id is not None
+        and cs.id not in used_sheet_ids
+        and (not sheet.box_number or not cs.box_number or cs.box_number == sheet.box_number)
+    ]
+    for dr in district_rows:
+        if dr.matched_overview_sheet_id is not None:
+            continue
+        if not remaining_cands:
+            break
+        cs = remaining_cands.pop(0)
+        dr.matched_overview_sheet_id = cs.id
+        if cs.id is not None:
+            used_sheet_ids.add(cs.id)
+        if cs.sheet_type != "municipal_overview":
+            cs.sheet_type = "overview"
+        if dr.obvod_number:
+            cs.obvod_number = dr.obvod_number
+        if dr.commissioner_name:
+            cs.commissioner_name = dr.commissioner_name
+        session.add(cs)
+        linked_sheets.append(cs)
+
+    return linked_sheets
+
+
 async def _discover_and_link_district_overview_sheets(
     session: Session,
     sheet: CensusSheet,
@@ -5302,7 +5497,7 @@ async def _discover_and_link_district_overview_sheets(
     """
     from backend.app.census.slovakiana_client import slovakiana_client
     from backend.app.census.worker import upsert_census_sheet_from_dict
-    from backend.app.pipeline.lexicon import fold_text_diacritics, fuzzy_name_matches
+    from backend.app.pipeline.lexicon import fold_text_diacritics
 
     muni_canon = canonical_municipality_key(sheet.municipality)
     if not muni_canon or not district_rows:
@@ -5384,63 +5579,9 @@ async def _discover_and_link_district_overview_sheets(
             except Exception:
                 continue
 
-    local_cands.sort(key=lambda cs: (cs.sheet_number or "9999", cs.id or 0))
-    used_sheet_ids: set[int] = set()
-    linked_sheets: list[CensusSheet] = []
-
-    # Pass 1: Match by explicit obvod_number or commissioner_name if already set on candidate overview sheet
-    for dr in district_rows:
-        dr_obv = normalize_obvod_roman(dr.obvod_number)
-        for cs in local_cands:
-            if cs.id is None or cs.id in used_sheet_ids:
-                continue
-            cs_obv = normalize_obvod_roman(cs.obvod_number)
-            obv_match = bool(dr_obv and cs_obv and dr_obv == cs_obv)
-            comm_match = bool(
-                dr.commissioner_name
-                and cs.commissioner_name
-                and fuzzy_name_matches(dr.commissioner_name, [cs.commissioner_name], threshold=0.78)
-            )
-            if obv_match or comm_match:
-                dr.matched_overview_sheet_id = cs.id
-                used_sheet_ids.add(cs.id)
-                if cs.sheet_type != "municipal_overview":
-                    cs.sheet_type = "overview"
-                if dr.obvod_number:
-                    cs.obvod_number = dr.obvod_number
-                if dr.commissioner_name:
-                    cs.commissioner_name = dr.commissioner_name
-                session.add(cs)
-                linked_sheets.append(cs)
-                break
-
-    # Pass 2: Pair remaining unmatched district rows with remaining same-box overview candidates in ascending sheet_number order
-    remaining_cands = [
-        cs
-        for cs in local_cands
-        if cs.id is not None
-        and cs.id not in used_sheet_ids
-        and (not sheet.box_number or not cs.box_number or cs.box_number == sheet.box_number)
-    ]
-    for dr in district_rows:
-        if dr.matched_overview_sheet_id is not None:
-            continue
-        if not remaining_cands:
-            break
-        cs = remaining_cands.pop(0)
-        dr.matched_overview_sheet_id = cs.id
-        if cs.id is not None:
-            used_sheet_ids.add(cs.id)
-        if cs.sheet_type != "municipal_overview":
-            cs.sheet_type = "overview"
-        if dr.obvod_number:
-            cs.obvod_number = dr.obvod_number
-        if dr.commissioner_name:
-            cs.commissioner_name = dr.commissioner_name
-        session.add(cs)
-        linked_sheets.append(cs)
-
-    return linked_sheets
+    return _link_local_district_overview_sheets_sync(
+        session, sheet, district_rows, local_cands=local_cands
+    )
 
 
 _SHEET_EXTRACTION_LOCKS: dict[int, asyncio.Lock] = {}
@@ -5522,13 +5663,15 @@ async def _extract_census_municipal_overview_sheet_locked(
                 sheet.obvod_number = linked_as_child.obvod_number
             if linked_as_child.commissioner_name:
                 sheet.commissioner_name = linked_as_child.commissioner_name
-        await extract_census_overview_sheet(
+        await _extract_census_overview_sheet_locked(
             session, sheet, front_scan, back_scan, force_district_overview=True
         )
         return []
 
     sheet.sheet_type = "municipal_overview"
-    if not is_valid_commissioner_or_revisor_name(sheet.commissioner_name):
+    if not is_valid_commissioner_or_revisor_name(
+        sheet.commissioner_name, municipality=sheet.municipality, district=sheet.district
+    ):
         sheet.commissioner_name = None
     session.add(sheet)
 
@@ -5545,10 +5688,6 @@ async def _extract_census_municipal_overview_sheet_locked(
         session.delete(hh)
     for old_ov in session.exec(select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)).all():
         session.delete(old_ov)
-    for old_md in session.exec(
-        select(CensusMunicipalOverviewDistrict).where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
-    ).all():
-        session.delete(old_md)
     session.commit()
 
     scans_to_process: list[tuple[ScanImage, str]] = []
@@ -5568,6 +5707,7 @@ async def _extract_census_municipal_overview_sheet_locked(
         session.add(sheet)
 
     raw_ocr_items: list[tuple[int, int, int, ScanImage, Any, RecordRow, str]] = []
+    all_scan_record_rows: list[RecordRow] = []
 
     for scan_order, (scan_obj, page_side) in enumerate(scans_to_process):
         await ws_manager.broadcast(
@@ -5600,15 +5740,17 @@ async def _extract_census_municipal_overview_sheet_locked(
         session.add(scan_obj)
 
         existing_rows = session.exec(
-            select(RecordRow).where(RecordRow.scan_id == scan_obj.id).order_by(RecordRow.row_index)
+            select(RecordRow).where(RecordRow.scan_id == scan_obj.id).order_by(RecordRow.row_index, RecordRow.id)
         ).all()
-        existing_by_idx = {er.row_index: er for er in existing_rows}
+        existing_by_idx: dict[int, RecordRow] = {}
         new_indices = {r_info.row_index for r_info in layout_res.rows}
         for er in existing_rows:
-            if er.row_index not in new_indices:
+            if er.row_index not in new_indices or er.row_index in existing_by_idx:
                 for qi in session.exec(select(QuestionItem).where(QuestionItem.row_id == er.id)).all():
                     session.delete(qi)
                 session.delete(er)
+            else:
+                existing_by_idx[er.row_index] = er
 
         scan_record_rows: dict[int, RecordRow] = {}
         for r_info in layout_res.rows:
@@ -5632,6 +5774,7 @@ async def _extract_census_municipal_overview_sheet_locked(
         session.commit()
         for r_rec in scan_record_rows.values():
             session.refresh(r_rec)
+            all_scan_record_rows.append(r_rec)
 
         cached_traces = session.exec(
             select(WorkflowTrace)
@@ -5649,7 +5792,13 @@ async def _extract_census_municipal_overview_sheet_locked(
             h_text = ""
             if cached_h and ("revízor" in cached_h.lower() or "revizor" in cached_h.lower() or "obecný" in cached_h.lower() or "obecny" in cached_h.lower()):
                 h_text = html_table_to_pipe_text(cached_h)
-            meta = extract_municipal_overview_header_metadata(h_text) if h_text else {"revisor_name": None}
+            meta = (
+                extract_municipal_overview_header_metadata(
+                    h_text, municipality=sheet.municipality, district=sheet.district
+                )
+                if h_text
+                else {"revisor_name": None}
+            )
             if (not h_text or not meta.get("revisor_name")) and h_path and h_path.exists():
                 res_h = await ai_client.chat_completion(
                     stage="ocr_header",
@@ -5661,19 +5810,23 @@ async def _extract_census_municipal_overview_sheet_locked(
                     max_tokens=500,
                 )
                 h_text = html_table_to_pipe_text(res_h["content"])
-                meta = extract_municipal_overview_header_metadata(h_text)
+                meta = extract_municipal_overview_header_metadata(
+                    h_text, municipality=sheet.municipality, district=sheet.district
+                )
             if h_text:
                 scan_obj.header_raw_ocr = h_text
                 if not force_municipal_overview and detect_is_overview_sheet(h_text, sheet.slovakiana_key):
                     session.add(scan_obj)
                     session.commit()
-                    await extract_census_overview_sheet(
+                    await _extract_census_overview_sheet_locked(
                         session, sheet, front_scan, back_scan, force_district_overview=True
                     )
                     return []
                 if meta.get("revisor_name"):
                     sheet.commissioner_name = meta["revisor_name"]
-                elif not is_valid_commissioner_or_revisor_name(sheet.commissioner_name):
+                elif not is_valid_commissioner_or_revisor_name(
+                    sheet.commissioner_name, municipality=sheet.municipality, district=sheet.district
+                ):
                     sheet.commissioner_name = None
                 sheet.header_json = json.dumps(
                     {
@@ -5757,7 +5910,7 @@ async def _extract_census_municipal_overview_sheet_locked(
                 scan_obj.status = "ocr_done"
                 session.add(scan_obj)
                 session.commit()
-                await extract_census_overview_sheet(
+                await _extract_census_overview_sheet_locked(
                     session, sheet, front_scan, back_scan, force_district_overview=True
                 )
                 return []
@@ -5775,7 +5928,7 @@ async def _extract_census_municipal_overview_sheet_locked(
     raw_ocr_items.sort(key=lambda item: (item[0], item[1], item[2]))
 
     if not force_municipal_overview and classify_overview_rows_structure([item[6] for item in raw_ocr_items]) == "overview":
-        await extract_census_overview_sheet(
+        await _extract_census_overview_sheet_locked(
             session, sheet, front_scan, back_scan, force_district_overview=True
         )
         return []
@@ -5912,7 +6065,7 @@ async def _extract_census_municipal_overview_sheet_locked(
             break
 
     # Remove any trailing RecordRow entries (e.g. signature rows below 'Spolu') that were not part of the table
-    for _bp, _so, _sri, _sc, _ri, r_rec, _ocr in raw_ocr_items:
+    for r_rec in all_scan_record_rows:
         if r_rec.id is not None and r_rec.id not in kept_row_ids:
             for qi in session.exec(select(QuestionItem).where(QuestionItem.row_id == r_rec.id)).all():
                 session.delete(qi)
@@ -5968,6 +6121,33 @@ def reconstruct_municipal_overview_districts_from_existing_ocr(
     """
     if sheet.id is None:
         return []
+    if _get_sheet_extraction_lock(sheet.id).locked():
+        return list(
+            session.exec(
+                select(CensusMunicipalOverviewDistrict)
+                .where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+                .order_by(CensusMunicipalOverviewDistrict.row_index.asc())
+            ).all()
+        )
+
+    if sheet.front_scan_id:
+        front_sc = session.get(ScanImage, sheet.front_scan_id)
+        if front_sc and front_sc.header_raw_ocr:
+            meta_rev = extract_municipal_overview_header_metadata(
+                front_sc.header_raw_ocr,
+                municipality=sheet.municipality,
+                district=sheet.district,
+            )
+            if meta_rev.get("revisor_name") and (
+                not sheet.commissioner_name
+                or not is_valid_commissioner_or_revisor_name(
+                    sheet.commissioner_name,
+                    municipality=sheet.municipality,
+                    district=sheet.district,
+                )
+            ):
+                sheet.commissioner_name = meta_rev["revisor_name"]
+                session.add(sheet)
 
     scan_ids: list[int] = []
     scan_order_by_id: dict[int, int] = {}
@@ -5998,16 +6178,6 @@ def reconstruct_municipal_overview_districts_from_existing_ocr(
     from backend.app.pipeline.feedback import reset_ocr_feedback
 
     reset_ocr_feedback(session, census_sheet_id=sheet.id, commit=False)
-
-    for old_ov in session.exec(
-        select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
-    ).all():
-        session.delete(old_ov)
-    for old_md in session.exec(
-        select(CensusMunicipalOverviewDistrict).where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
-    ).all():
-        session.delete(old_md)
-    session.flush()
 
     created_rows: list[CensusMunicipalOverviewDistrict] = []
     seen_district_keys: set[tuple[bool, str]] = set()
@@ -6074,6 +6244,19 @@ def reconstruct_municipal_overview_districts_from_existing_ocr(
             break
 
     _reconcile_municipal_overview_rows(created_rows)
+    district_only_rows = [r for r in created_rows if not r.is_summary_row]
+    _link_local_district_overview_sheets_sync(session, sheet, district_only_rows)
+
+    for old_ov in session.exec(
+        select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
+    ).all():
+        session.delete(old_ov)
+    for old_md in session.exec(
+        select(CensusMunicipalOverviewDistrict).where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+    ).all():
+        session.delete(old_md)
+    session.flush()
+
     for dr in created_rows:
         session.add(dr)
     sheet.download_status = "extracted"
@@ -6098,19 +6281,34 @@ def reconstruct_overview_houses_from_existing_ocr(
     """
     if sheet.id is None:
         return []
+    if _get_sheet_extraction_lock(sheet.id).locked():
+        return list(
+            session.exec(
+                select(CensusOverviewHouse)
+                .where(CensusOverviewHouse.census_sheet_id == sheet.id)
+                .order_by(CensusOverviewHouse.row_index.asc())
+            ).all()
+        )
 
     scan_ids: list[int] = []
     scan_order_by_id: dict[int, int] = {}
+    seen_sides: set[str] = set()
     for idx_s, sid in enumerate(filter(None, [sheet.front_scan_id, sheet.back_scan_id])):
         if sid not in scan_order_by_id:
             scan_order_by_id[sid] = idx_s
             scan_ids.append(sid)
+            seen_sides.add("front" if idx_s == 0 else "back")
     for extra_sc in session.exec(
         select(ScanImage).where(ScanImage.census_sheet_id == sheet.id).order_by(ScanImage.id.asc())
     ).all():
         if extra_sc.id is not None and extra_sc.id not in scan_order_by_id:
+            es_side = (extra_sc.page_side or "").strip()
+            if es_side and es_side in seen_sides:
+                continue
             scan_order_by_id[extra_sc.id] = len(scan_ids)
             scan_ids.append(extra_sc.id)
+            if es_side:
+                seen_sides.add(es_side)
 
     record_rows: list[RecordRow] = []
     if scan_ids:
@@ -6203,12 +6401,6 @@ def reconstruct_overview_houses_from_existing_ocr(
 
     reset_ocr_feedback(session, census_sheet_id=sheet.id, commit=False)
 
-    for old_ov in session.exec(
-        select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
-    ).all():
-        session.delete(old_ov)
-    session.flush()
-
     created_houses: list[CensusOverviewHouse] = []
     prev_house: CensusOverviewHouse | None = None
     seq_house_num = 0
@@ -6298,7 +6490,6 @@ def reconstruct_overview_houses_from_existing_ocr(
         )
         if matched_sheet and can_match_overview_house_to_sheet(ov_house, matched_sheet, overview_sheet=sheet):
             ov_house.matched_sheet_id = matched_sheet.id
-        session.add(ov_house)
 
         if r_rec is not None:
             r_rec.entry_number = str(ord_num)
@@ -6319,6 +6510,12 @@ def reconstruct_overview_houses_from_existing_ocr(
 
         created_houses.append(ov_house)
         prev_house = ov_house
+
+    for old_ov in session.exec(
+        select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
+    ).all():
+        session.delete(old_ov)
+    session.flush()
 
     _reconcile_overview_houses_sequence(
         session, sheet, created_houses, sheet_by_house_num, list(candidate_sheets)

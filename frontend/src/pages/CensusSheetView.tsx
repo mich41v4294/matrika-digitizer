@@ -1313,8 +1313,21 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
   const handleSetSheetType = async (nextType: "household" | "overview" | "municipal_overview") => {
     if (!detail) return;
+    const prevType = detail.sheet.sheet_type || "household";
     const sheetRef = detail.sheet.slovakiana_id || String(detail.sheet.id);
     setActionError(null);
+    // Optimistically reflect the chosen sheet type immediately in the UI
+    setDetail((prev) =>
+      prev
+        ? {
+            ...prev,
+            sheet: {
+              ...prev.sheet,
+              sheet_type: nextType,
+            },
+          }
+        : prev
+    );
     setSwitchingType(true);
     const startMs = Date.now();
     setSheetProgress({
@@ -1338,29 +1351,54 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
           run_extract: true,
         }),
       });
-      if (r.ok) {
-        await loadDetail();
-        refreshStatus();
-        const totalElapsed = Math.max(1, Math.round((Date.now() - startMs) / 1000));
-        setSheetProgress((prev) => ({
-          ...prev,
-          active: false,
-          completedJustNow: true,
-          active_stage: "idle",
-          active_model: null,
-          progress_pct: 100,
-          elapsed_sec: totalElapsed,
-          message_sk: "Typ hárku bol zmenený a AI OCR extrakcia bola dokončená.",
-          message_en: "Sheet type updated and AI OCR extraction completed.",
-        }));
-      } else {
-        setSheetProgress((prev) => ({
-          ...prev,
-          active: false,
-          completedJustNow: false,
-          active_stage: "idle",
-        }));
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(
+          errBody.detail ||
+            errBody.error ||
+            (lang === "sk"
+              ? `Nepodarilo sa zmeniť typ hárku (HTTP ${r.status})`
+              : `Failed to switch sheet type (HTTP ${r.status})`)
+        );
       }
+      await loadDetail();
+      refreshStatus();
+      const totalElapsed = Math.max(1, Math.round((Date.now() - startMs) / 1000));
+      setSheetProgress((prev) => ({
+        ...prev,
+        active: false,
+        completedJustNow: true,
+        active_stage: "idle",
+        active_model: null,
+        progress_pct: 100,
+        elapsed_sec: totalElapsed,
+        message_sk: "Typ hárku bol zmenený a AI OCR extrakcia bola dokončená.",
+        message_en: "Sheet type updated and AI OCR extraction completed.",
+      }));
+    } catch (err: any) {
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              sheet: {
+                ...prev.sheet,
+                sheet_type: prevType,
+              },
+            }
+          : prev
+      );
+      setActionError(
+        err?.message ||
+          (lang === "sk"
+            ? "Nepodarilo sa zmeniť typ hárku."
+            : "Failed to switch sheet type.")
+      );
+      setSheetProgress((prev) => ({
+        ...prev,
+        active: false,
+        completedJustNow: false,
+        active_stage: "idle",
+      }));
     } finally {
       setSwitchingType(false);
     }
@@ -2144,6 +2182,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
                 {/* Cross-Year Connected House Sheet Badges (1930 <-> 1940) */}
                 {!isOverviewSheet &&
+                  !isMunicipalOverviewSheet &&
                   linkedHouseSheets.map((linked) => {
                     const targetRef =
                       linked.cair_id || linked.slovakiana_key || String(linked.id);
@@ -2236,6 +2275,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                   {lang === "sk" ? "Typ hárku:" : "Sheet type:"}
                 </label>
                 <select
+                  data-testid="sheet-type-select"
                   value={
                     isMunicipalOverviewSheet
                       ? "municipal_overview"
@@ -2734,6 +2774,17 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
               </div>
             )}
 
+            {isMunicipalOverviewSheet && (
+              <div className="text-xs sm:text-sm font-semibold text-indigo-950 flex items-center gap-1.5">
+                <Layers className="w-4 h-4 text-indigo-700" />
+                <span>
+                  {lang === "sk" ? "Obecný prehľad" : "Municipal overview"} ·{" "}
+                  {municipal_overview_districts.filter((d) => !d.is_summary_row).length}{" "}
+                  {lang === "sk" ? "sčítacích obvodov" : "census districts"}
+                </span>
+              </div>
+            )}
+
             {isOverviewSheet && (
               <div className="text-xs sm:text-sm font-semibold text-purple-900 flex items-center gap-1.5">
                 <Building2 className="w-4 h-4 text-purple-700" />
@@ -2806,6 +2857,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             front_scan?.height &&
             front_scan.height > 0 &&
             !isOverviewSheet &&
+            !isMunicipalOverviewSheet &&
             members.map((m) => {
               const r = m.row || rowsById.get(m.fact.row_id);
               if (!r || r.y_end <= r.y_start) return null;
@@ -2870,7 +2922,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       </datalist>
 
       {/* Prepojený sčítací hárok pre ten istý dom (1930 ↔ 1940) */}
-      {!isOverviewSheet && linkedHouseSheets.length > 0 && (
+      {!isOverviewSheet && !isMunicipalOverviewSheet && linkedHouseSheets.length > 0 && (
         <div className="bg-indigo-50/70 rounded-xl p-4 border border-indigo-200 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-200/80 pb-2.5">
             <div className="flex items-center gap-2">
@@ -3024,7 +3076,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       )}
 
       {/* Ďalšie bytové/domové hárky pre ten istý dom v tom istom roku sčítania */}
-      {!isOverviewSheet && sameYearHouseSheets.length > 0 && (
+      {!isOverviewSheet && !isMunicipalOverviewSheet && sameYearHouseSheets.length > 0 && (
         <div className="bg-stone-50 rounded-xl px-4 py-3 border border-stone-200 flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="text-stone-700">
             <strong>
@@ -3065,7 +3117,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       )}
 
       {/* Prehľad domácnosti / Prehľad bytov a domácností na hárku */}
-      {!isOverviewSheet && bytGroups.length > 0 && (
+      {!isOverviewSheet && !isMunicipalOverviewSheet && bytGroups.length > 0 && (
         <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 pb-2.5">
             <div className="flex items-center gap-2">

@@ -445,6 +445,20 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await page.locator("tbody").getByRole("button", { name: "Vymazať", exact: true }).click();
     await expect(page.locator("tbody tr").filter({ hasText: "Dom č. 24" })).toHaveCount(0);
 
+    // Manually switch sheet type from Prehľad obvodu (overview) -> Obecný prehľad (municipal_overview) and back
+    const sheetTypeSelect = page.getByTestId("sheet-type-select");
+    await expect(sheetTypeSelect).toHaveValue("overview");
+    await sheetTypeSelect.selectOption("municipal_overview");
+    await expect(sheetTypeSelect).toHaveValue("municipal_overview");
+    await expect(page.locator("body")).toContainText(
+      "Obecný prehľad – Súhrn sčítacích obvodov (Prehľadov domov)"
+    );
+    await sheetTypeSelect.selectOption("overview");
+    await expect(sheetTypeSelect).toHaveValue("overview");
+    await expect(page.locator("body")).toContainText(
+      "Prehľad sčítacieho obvodu – Zoznam domov a majiteľov"
+    );
+
     // C. Feature Flags & OCR Feedback / Model Combo Statistics in /debug
     await page.goto("/debug", { waitUntil: "networkidle" });
     await expect(page.getByTestId("debug-model-combo-stats-card")).toBeVisible();

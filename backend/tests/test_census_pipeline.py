@@ -1901,6 +1901,199 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 ],
             )
 
+    def test_manual_switch_sheet_type_overview_to_municipal_overview_and_back(self) -> None:
+        import asyncio
+        from backend.app.api.census import (
+            SetSheetTypeRequest,
+            get_census_sheet_detail,
+            get_municipality_overview,
+            set_census_sheet_type,
+        )
+        from backend.app.db.models import (
+            CensusMunicipalOverviewDistrict,
+            CensusOverviewHouse,
+            RecordRow,
+            ScanImage,
+        )
+
+        test_engine = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(test_engine)
+        ensure_fts_schema(test_engine)
+
+        with Session(test_engine) as session:
+            # Create a sheet initially extracted as 'overview' (Prehľad domov) with Prehľad sčítacieho obvodu header
+            # and even linked as matched_overview_sheet_id of another sheet, then manually switch it to 'municipal_overview'
+            sheet = CensusSheet(
+                slovakiana_key="cair-manual-switch-1",
+                census_year=1930,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                municipality_folded="horne zelenice",
+                sheet_type="overview",
+                download_status="extracted",
+            )
+            parent_muni = CensusSheet(
+                slovakiana_key="cair-parent-muni-1",
+                census_year=1930,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                municipality_folded="horne zelenice",
+                sheet_type="municipal_overview",
+                download_status="extracted",
+            )
+            session.add_all([sheet, parent_muni])
+            session.commit()
+            session.refresh(sheet)
+            session.refresh(parent_muni)
+
+            fscan = ScanImage(
+                census_sheet_id=sheet.id,
+                page_side="front",
+                filename="cair-manual-switch-1_front.jpg",
+                original_path="/nonexistent/cair-manual-switch-1_front.jpg",
+                header_raw_ocr=(
+                    "Sčítanie ľudu 1930\nPolitický okres Hlohovec\nČíslo sčítacieho obvodu I.\n"
+                    "Obec Horné Zelenice\nMeno sčítacieho komisára Eduard Zoltický\n"
+                    "Prehľad sčítacieho obvodu"
+                ),
+                detected_year="1930",
+                detected_type="census",
+                status="extracted",
+            )
+            session.add(fscan)
+            session.commit()
+            session.refresh(fscan)
+            sheet.front_scan_id = fscan.id
+            session.add(sheet)
+
+            # Link sheet as child of parent_muni and seed RecordRows + CensusOverviewHouse
+            session.add(
+                CensusMunicipalOverviewDistrict(
+                    census_sheet_id=parent_muni.id or 0,
+                    row_index=1,
+                    census_year=1930,
+                    district="Hlohovec",
+                    municipality="Horné Zelenice",
+                    obvod_number="I",
+                    commissioner_name="Eduard Zoltický",
+                    houses_total=53,
+                    houses_inhabited=52,
+                    houses_uninhabited=1,
+                    household_count=81,
+                    present_persons_count=420,
+                    matched_overview_sheet_id=sheet.id,
+                )
+            )
+            session.add_all(
+                [
+                    RecordRow(
+                        scan_id=fscan.id or 0,
+                        row_index=1,
+                        raw_ocr_combined="1 | Horné Zelenice | I. | Eduard Zoltický | 53 | 52 | 1 | 81 | 420",
+                        status="extracted",
+                    ),
+                    RecordRow(
+                        scan_id=fscan.id or 0,
+                        row_index=2,
+                        raw_ocr_combined="1 | Horné Zelenice | II. | Michal Rafajdus | 52 | 50 | 2 | 72 | 344",
+                        status="extracted",
+                    ),
+                    RecordRow(
+                        scan_id=fscan.id or 0,
+                        row_index=3,
+                        raw_ocr_combined="Spolu | 105 | 102 | 3 | 153 | 764",
+                        status="extracted",
+                    ),
+                    CensusOverviewHouse(
+                        census_sheet_id=sheet.id or 0,
+                        scan_id=fscan.id,
+                        row_index=1,
+                        census_year=1930,
+                        municipality="Horné Zelenice",
+                        house_number="1",
+                        house_number_int=1,
+                        owner_name="Ján Kováč",
+                        household_count=1,
+                        present_persons_count=5,
+                    ),
+                ]
+            )
+            session.commit()
+
+            # 1. Manually switch from 'overview' (Prehľad domov / Súhrn domov) -> 'municipal_overview' (Obecný prehľad / Prehľad obvodov)
+            res_switch_muni = asyncio.run(
+                set_census_sheet_type(
+                    "cair-manual-switch-1",
+                    SetSheetTypeRequest(sheet_type="municipal_overview", run_extract=True),
+                    session,
+                )
+            )
+            self.assertEqual(res_switch_muni["sheet"]["sheet_type"], "municipal_overview")
+            self.assertEqual(len(res_switch_muni["municipal_overview_districts"]), 3)
+
+            # Verify get_census_sheet_detail and get_municipality_overview preserve the manual switch
+            detail_after_muni = asyncio.run(get_census_sheet_detail("cair-manual-switch-1", session))
+            self.assertEqual(detail_after_muni["sheet"]["sheet_type"], "municipal_overview")
+            self.assertEqual(len(detail_after_muni["municipal_overview_districts"]), 3)
+            self.assertEqual(detail_after_muni["overview_houses"], [])
+
+            muni_ov_after = get_municipality_overview(session, municipality="Horné Zelenice", census_year=1930)
+            muni_ov_keys = [ms["slovakiana_id"] for ms in muni_ov_after["municipal_overview_sheets"]]
+            self.assertIn("cair-manual-switch-1", muni_ov_keys)
+
+            # 2. Manually switch back from 'municipal_overview' -> 'overview'
+            res_switch_ov = asyncio.run(
+                set_census_sheet_type(
+                    "cair-manual-switch-1",
+                    SetSheetTypeRequest(sheet_type="overview", run_extract=True),
+                    session,
+                )
+            )
+            self.assertEqual(res_switch_ov["sheet"]["sheet_type"], "overview")
+            detail_after_ov = asyncio.run(get_census_sheet_detail("cair-manual-switch-1", session))
+            self.assertEqual(detail_after_ov["sheet"]["sheet_type"], "overview")
+            self.assertEqual(detail_after_ov["municipal_overview_districts"], [])
+            self.assertGreaterEqual(len(detail_after_ov["overview_houses"]), 1)
+
+            # 3. Also test when original scan file exists on disk (full extract_census_municipal_overview_sheet path)
+            from unittest.mock import patch
+            from backend.app.config import settings
+            from backend.app.pipeline.ai_client import ai_client
+
+            with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+                settings, "crops_dir", Path(tmp_dir) / "crops"
+            ), patch(
+                "backend.app.pipeline.ocr_stage.settings.crops_dir", Path(tmp_dir) / "crops"
+            ):
+                img_path = Path(tmp_dir) / "cair-manual-switch-1_front.jpg"
+                img = np.full((1200, 900, 3), 240, dtype=np.uint8)
+                for i in range(4):
+                    y = 480 + i * 50
+                    cv2.line(img, (40, y), (860, y), (20, 20, 20), 6 if i == 0 else 2)
+                cv2.imwrite(str(img_path), img)
+                fscan.original_path = str(img_path)
+                session.add(fscan)
+                session.commit()
+
+                async def fake_chat_comp(**kwargs: object) -> dict[str, object]:
+                    stage = str(kwargs.get("stage") or "")
+                    if stage == "ocr_header":
+                        # Even if GLM-OCR reads "Prehľad sčítacieho obvodu" on the header!
+                        return {"content": "Prehľad sčítacieho obvodu | Číslo sčítacieho obvodu I."}
+                    return {"content": "1 | Horné Zelenice | I. | Eduard Zoltický | 53 | 52 | 1 | 81 | 420"}
+
+                with patch.object(ai_client, "chat_completion", side_effect=fake_chat_comp):
+                    res_disk_muni = asyncio.run(
+                        set_census_sheet_type(
+                            "cair-manual-switch-1",
+                            SetSheetTypeRequest(sheet_type="municipal_overview", run_extract=True),
+                            session,
+                        )
+                    )
+                self.assertEqual(res_disk_muni["sheet"]["sheet_type"], "municipal_overview")
+                detail_disk_muni = asyncio.run(get_census_sheet_detail("cair-manual-switch-1", session))
+                self.assertEqual(detail_disk_muni["sheet"]["sheet_type"], "municipal_overview")
+
 
 
 if __name__ == "__main__":

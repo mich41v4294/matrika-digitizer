@@ -705,6 +705,7 @@ async def process_census_sheet_pipeline(
     *,
     max_rows: int | None = None,
     run_mcp: bool = True,
+    force_sheet_type: str | None = None,
 ) -> dict[str, Any]:
     """
     Runs the full pipeline on a CensusSheet (front scan `_v` and optional back scan `_r`
@@ -719,15 +720,32 @@ async def process_census_sheet_pipeline(
         front_scan_id = sheet.front_scan_id
         back_scan_id = sheet.back_scan_id
         enable_overview = bool(settings.get_feature_flags().get("census_overview_sheets", True))
+        if not force_sheet_type and sheet.header_json:
+            try:
+                hdr_dict = json.loads(sheet.header_json)
+                if isinstance(hdr_dict, dict) and hdr_dict.get("manual_sheet_type") in (
+                    "household",
+                    "overview",
+                    "municipal_overview",
+                ):
+                    force_sheet_type = str(hdr_dict["manual_sheet_type"])
+            except Exception:
+                pass
         if not sheet.house_number and sheet.sheet_type == "overview":
             sheet.sheet_type = "overview"
             session.add(sheet)
             session.commit()
 
-        if enable_overview and sheet.sheet_type == "municipal_overview":
+        if enable_overview and force_sheet_type != "household" and sheet.sheet_type == "municipal_overview":
             front_scan = session.get(ScanImage, front_scan_id) if front_scan_id else None
             back_scan = session.get(ScanImage, back_scan_id) if back_scan_id else None
-            districts = await extract_census_municipal_overview_sheet(session, sheet, front_scan, back_scan)
+            districts = await extract_census_municipal_overview_sheet(
+                session,
+                sheet,
+                front_scan,
+                back_scan,
+                force_municipal_overview=(force_sheet_type == "municipal_overview"),
+            )
             session.refresh(sheet)
             return {
                 "census_sheet_id": sheet.id,
@@ -738,10 +756,16 @@ async def process_census_sheet_pipeline(
                 "download_status": sheet.download_status,
             }
 
-        if enable_overview and sheet.sheet_type == "overview":
+        if enable_overview and force_sheet_type != "household" and sheet.sheet_type == "overview":
             front_scan = session.get(ScanImage, front_scan_id) if front_scan_id else None
             back_scan = session.get(ScanImage, back_scan_id) if back_scan_id else None
-            houses = await extract_census_overview_sheet(session, sheet, front_scan, back_scan)
+            houses = await extract_census_overview_sheet(
+                session,
+                sheet,
+                front_scan,
+                back_scan,
+                force_district_overview=(force_sheet_type == "overview"),
+            )
             session.refresh(sheet)
             return {
                 "census_sheet_id": sheet.id,
@@ -790,11 +814,21 @@ async def process_census_sheet_pipeline(
             )
             await run_ocr_for_scan_header(session, front_scan)
             session.refresh(sheet)
-            if enable_overview and (
+            if force_sheet_type == "household" and sheet.sheet_type != "household":
+                sheet.sheet_type = "household"
+                session.add(sheet)
+                session.commit()
+            if enable_overview and force_sheet_type != "household" and (
                 sheet.sheet_type == "municipal_overview"
                 or detect_is_municipal_overview_sheet(front_scan.header_raw_ocr or "", sheet.slovakiana_key)
             ):
-                districts = await extract_census_municipal_overview_sheet(session, sheet, front_scan, back_scan)
+                districts = await extract_census_municipal_overview_sheet(
+                    session,
+                    sheet,
+                    front_scan,
+                    back_scan,
+                    force_municipal_overview=(force_sheet_type == "municipal_overview"),
+                )
                 return {
                     "census_sheet_id": sheet.id,
                     "slovakiana_key": sheet.slovakiana_key,
@@ -803,11 +837,17 @@ async def process_census_sheet_pipeline(
                     "municipal_districts_count": len([d for d in districts if not d.is_summary_row]),
                     "download_status": sheet.download_status,
                 }
-            if enable_overview and (
+            if enable_overview and force_sheet_type != "household" and (
                 sheet.sheet_type == "overview"
                 or detect_is_overview_sheet(front_scan.header_raw_ocr or "", sheet.slovakiana_key)
             ):
-                houses = await extract_census_overview_sheet(session, sheet, front_scan, back_scan)
+                houses = await extract_census_overview_sheet(
+                    session,
+                    sheet,
+                    front_scan,
+                    back_scan,
+                    force_district_overview=(force_sheet_type == "overview"),
+                )
                 session.refresh(sheet)
                 return {
                     "census_sheet_id": sheet.id,
@@ -865,10 +905,16 @@ async def process_census_sheet_pipeline(
         sheet = session.get(CensusSheet, sheet_id)
         if sheet:
             enable_overview = bool(settings.get_feature_flags().get("census_overview_sheets", True))
-            if enable_overview and sheet.sheet_type == "municipal_overview":
+            if enable_overview and force_sheet_type != "household" and sheet.sheet_type == "municipal_overview":
                 front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
                 back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
-                districts = await extract_census_municipal_overview_sheet(session, sheet, front_scan, back_scan)
+                districts = await extract_census_municipal_overview_sheet(
+                    session,
+                    sheet,
+                    front_scan,
+                    back_scan,
+                    force_municipal_overview=(force_sheet_type == "municipal_overview"),
+                )
                 return {
                     "census_sheet_id": sheet.id,
                     "slovakiana_key": sheet.slovakiana_key,
@@ -877,10 +923,16 @@ async def process_census_sheet_pipeline(
                     "municipal_districts_count": len([d for d in districts if not d.is_summary_row]),
                     "download_status": sheet.download_status,
                 }
-            if enable_overview and sheet.sheet_type == "overview":
+            if enable_overview and force_sheet_type != "household" and sheet.sheet_type == "overview":
                 front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
                 back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
-                houses = await extract_census_overview_sheet(session, sheet, front_scan, back_scan)
+                houses = await extract_census_overview_sheet(
+                    session,
+                    sheet,
+                    front_scan,
+                    back_scan,
+                    force_district_overview=(force_sheet_type == "overview"),
+                )
                 session.refresh(sheet)
                 return {
                     "census_sheet_id": sheet.id,

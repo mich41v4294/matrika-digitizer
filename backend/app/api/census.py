@@ -62,6 +62,7 @@ from backend.app.pipeline.extraction_stage import (
     extract_census_municipal_overview_sheet,
     extract_census_overview_sheet,
     reconcile_census_household_relationships,
+    reconstruct_municipal_overview_districts_from_existing_ocr,
     reconstruct_overview_houses_from_existing_ocr,
 )
 from backend.app.pipeline.lexicon import (
@@ -1831,6 +1832,34 @@ def _serialize_overview_house(
     }
 
 
+def _has_manual_sheet_type_override(sheet: CensusSheet, expected_type: str | None = None) -> bool:
+    if not sheet.header_json:
+        return False
+    try:
+        hdr = json.loads(sheet.header_json)
+        if isinstance(hdr, dict):
+            mt = hdr.get("manual_sheet_type")
+            if expected_type:
+                return mt == expected_type
+            return bool(mt)
+    except Exception:
+        pass
+    return False
+
+
+def _set_manual_sheet_type_override(sheet: CensusSheet, target_type: str) -> None:
+    hdr: dict[str, Any] = {}
+    if sheet.header_json:
+        try:
+            parsed = json.loads(sheet.header_json)
+            if isinstance(parsed, dict):
+                hdr = parsed
+        except Exception:
+            hdr = {}
+    hdr["manual_sheet_type"] = target_type
+    sheet.header_json = json.dumps(hdr, ensure_ascii=False)
+
+
 def _md_rows_are_bogus_house_rows(md_rows: list[CensusMunicipalOverviewDistrict]) -> bool:
     """
     Returns True if `md_rows` stored in `CensusMunicipalOverviewDistrict` are actually
@@ -2013,6 +2042,8 @@ def _deduplicate_and_repair_municipal_overview(
         if not md.is_summary_row and md.matched_overview_sheet_id and md.matched_overview_sheet_id != sheet.id:
             child_ov = session.get(CensusSheet, md.matched_overview_sheet_id)
             if child_ov is not None:
+                if _has_manual_sheet_type_override(child_ov, "municipal_overview") or _has_manual_sheet_type_override(child_ov, "household"):
+                    continue
                 child_dirty = False
                 if child_ov.sheet_type != "overview":
                     child_ov.sheet_type = "overview"
@@ -2269,7 +2300,8 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
 
     # Pre-check and self-heal if a Prehľad sčítacieho obvodu ('overview') was marked 'municipal_overview'
     # or has bogus CensusMunicipalOverviewDistrict rows (e.g. 'Objvany', 'Obfvany', >10 rows, or sequential house numbers)
-    if sheet.id is not None and eff_sheet_type in ("municipal_overview", "overview"):
+    manual_muni_override = _has_manual_sheet_type_override(sheet, "municipal_overview")
+    if sheet.id is not None and eff_sheet_type in ("municipal_overview", "overview") and not manual_muni_override:
         existing_mds_for_sheet = list(
             session.exec(
                 select(CensusMunicipalOverviewDistrict)
@@ -2411,6 +2443,8 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
                 )
             ).all()
         )
+        if not md_rows and rows_by_id:
+            md_rows = reconstruct_municipal_overview_districts_from_existing_ocr(session, sheet)
         md_rows = _deduplicate_and_repair_municipal_overview(
             session, sheet, md_rows, front_scan=front_scan
         )
@@ -2437,8 +2471,9 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
                 ).all()
             )
             if cs.sheet_type == "municipal_overview":
-                if _md_rows_are_bogus_house_rows(cs_mds) or any(
-                    md.matched_overview_sheet_id == cs.id for md in md_rows
+                if not _has_manual_sheet_type_override(cs, "municipal_overview") and (
+                    _md_rows_are_bogus_house_rows(cs_mds)
+                    or any(md.matched_overview_sheet_id == cs.id for md in md_rows)
                 ):
                     _repair_misclassified_district_overview_sheet(session, cs, md_rows=cs_mds)
                     repaired_same_muni_ov.append(cs)
@@ -2969,13 +3004,14 @@ async def set_census_sheet_type(
     session: SessionDep,
 ) -> dict[str, Any]:
     sheet = await _resolve_census_sheet(session, sheet_ref)
-    if req.sheet_type in ("municipal_overview", "obecny_prehlad"):
+    if req.sheet_type in ("municipal_overview", "obecny_prehlad", "prehlad_obvodov", "suhrn_obvodov"):
         target_type = "municipal_overview"
-    elif req.sheet_type == "overview":
+    elif req.sheet_type in ("overview", "prehlad_obvodu", "prehlad_domov", "suhrn_domov"):
         target_type = "overview"
     else:
         target_type = "household"
     sheet.sheet_type = target_type
+    _set_manual_sheet_type_override(sheet, target_type)
     if req.obvod_number is not None:
         sheet.obvod_number = req.obvod_number
     if req.commissioner_name is not None:
@@ -2988,8 +3024,23 @@ async def set_census_sheet_type(
     municipal_districts: list[CensusMunicipalOverviewDistrict] = []
     if req.run_extract:
         if target_type == "municipal_overview":
+            for ovh in session.exec(
+                select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
+            ).all():
+                session.delete(ovh)
+            session.commit()
+            front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
+            back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
+            front_exists = bool(
+                front_scan and front_scan.original_path and Path(front_scan.original_path).exists()
+            )
             if not sheet.front_scan_id:
-                await download_and_process_single_census_sheet(sheet.id or 0, run_pipeline=True, run_mcp=False)
+                await download_and_process_single_census_sheet(
+                    sheet.id or 0,
+                    run_pipeline=True,
+                    run_mcp=False,
+                    force_sheet_type="municipal_overview",
+                )
                 session.refresh(sheet)
                 municipal_districts = list(
                     session.exec(
@@ -2998,22 +3049,60 @@ async def set_census_sheet_type(
                         .order_by(CensusMunicipalOverviewDistrict.row_index.asc())
                     ).all()
                 )
-            else:
-                front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
-                back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
+            elif front_exists:
                 municipal_districts = await extract_census_municipal_overview_sheet(
-                    session, sheet, front_scan, back_scan
+                    session,
+                    sheet,
+                    front_scan,
+                    back_scan,
+                    force_municipal_overview=True,
                 )
-        elif target_type == "overview":
-            if not sheet.front_scan_id:
-                await download_and_process_single_census_sheet(sheet.id or 0, run_pipeline=True, run_mcp=False)
-                session.refresh(sheet)
             else:
-                front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
-                back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
+                municipal_districts = reconstruct_municipal_overview_districts_from_existing_ocr(
+                    session, sheet
+                )
+            sheet.sheet_type = "municipal_overview"
+            _set_manual_sheet_type_override(sheet, "municipal_overview")
+            session.add(sheet)
+            session.commit()
+            session.refresh(sheet)
+        elif target_type == "overview":
+            for md in session.exec(
+                select(CensusMunicipalOverviewDistrict).where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+            ).all():
+                session.delete(md)
+            session.commit()
+            front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
+            back_scan = session.get(ScanImage, sheet.back_scan_id) if sheet.back_scan_id else None
+            front_exists = bool(
+                front_scan and front_scan.original_path and Path(front_scan.original_path).exists()
+            )
+            if not sheet.front_scan_id:
+                await download_and_process_single_census_sheet(
+                    sheet.id or 0,
+                    run_pipeline=True,
+                    run_mcp=False,
+                    force_sheet_type="overview",
+                )
+                session.refresh(sheet)
+                overview_houses = list(
+                    session.exec(
+                        select(CensusOverviewHouse)
+                        .where(CensusOverviewHouse.census_sheet_id == sheet.id)
+                        .order_by(CensusOverviewHouse.row_index.asc())
+                    ).all()
+                )
+            elif front_exists:
                 overview_houses = await extract_census_overview_sheet(
                     session, sheet, front_scan, back_scan, force_district_overview=True
                 )
+            else:
+                overview_houses = reconstruct_overview_houses_from_existing_ocr(session, sheet)
+            sheet.sheet_type = "overview"
+            _set_manual_sheet_type_override(sheet, "overview")
+            session.add(sheet)
+            session.commit()
+            session.refresh(sheet)
         else:
             for ovh in session.exec(
                 select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
@@ -3024,12 +3113,27 @@ async def set_census_sheet_type(
             ).all():
                 session.delete(md)
             session.commit()
-            if sheet.front_scan_id:
+            front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
+            front_exists = bool(
+                front_scan and front_scan.original_path and Path(front_scan.original_path).exists()
+            )
+            if sheet.front_scan_id and front_exists:
                 from backend.app.pipeline.orchestrator import process_census_sheet_pipeline
 
-                await process_census_sheet_pipeline(sheet.id or 0, run_mcp=True)
-            else:
-                await download_and_process_single_census_sheet(sheet.id or 0, run_pipeline=True, run_mcp=True)
+                await process_census_sheet_pipeline(
+                    sheet.id or 0, run_mcp=True, force_sheet_type="household"
+                )
+            elif not sheet.front_scan_id:
+                await download_and_process_single_census_sheet(
+                    sheet.id or 0,
+                    run_pipeline=True,
+                    run_mcp=True,
+                    force_sheet_type="household",
+                )
+            sheet.sheet_type = "household"
+            _set_manual_sheet_type_override(sheet, "household")
+            session.add(sheet)
+            session.commit()
             session.refresh(sheet)
 
     return {
@@ -3293,7 +3397,11 @@ def get_municipality_overview(
     for s in sheets:
         if s.id is not None and (s.sheet_type or "household") == "municipal_overview":
             raw_mds = muni_ov_districts_map.get(s.id, [])
-            if _md_rows_are_bogus_house_rows(raw_mds):
+            if not raw_mds and _has_manual_sheet_type_override(s, "municipal_overview"):
+                raw_mds = reconstruct_municipal_overview_districts_from_existing_ocr(session, s)
+                if raw_mds:
+                    muni_ov_districts_map[s.id] = raw_mds
+            if not _has_manual_sheet_type_override(s, "municipal_overview") and _md_rows_are_bogus_house_rows(raw_mds):
                 bogus_muni_ov_sheet_ids.add(s.id)
                 continue
             if raw_mds:
@@ -3310,7 +3418,7 @@ def get_municipality_overview(
         if s.id is None:
             continue
         raw_mds = muni_ov_districts_map.get(s.id, [])
-        if (
+        if not _has_manual_sheet_type_override(s, "municipal_overview") and (
             s.id in bogus_muni_ov_sheet_ids
             or (raw_mds and (s.sheet_type or "household") == "overview")
             or (

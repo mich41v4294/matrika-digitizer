@@ -433,6 +433,7 @@ async def download_and_process_single_census_sheet(
     run_pipeline: bool = True,
     run_mcp: bool = True,
     max_rows: int | None = None,
+    force_sheet_type: str | None = None,
 ) -> dict[str, Any]:
     """
     Tier 2 Single-Sheet Materializer:
@@ -614,6 +615,7 @@ async def download_and_process_single_census_sheet(
             sheet_id,
             max_rows=max_rows,
             run_mcp=run_mcp,
+            force_sheet_type=force_sheet_type,
         )
         return {
             "sheet_id": sheet_id,

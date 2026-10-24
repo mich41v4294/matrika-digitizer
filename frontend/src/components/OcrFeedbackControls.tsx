@@ -51,6 +51,7 @@ interface Props {
   overviewHouseId?: number | null;
   municipalDistrictId?: number | null;
   initialFeedback?: OcrFeedbackItem | null;
+  resetVersion?: number;
   compact?: boolean;
   onFeedbackSaved?: (feedback: OcrFeedbackItem | null) => void;
 }
@@ -65,6 +66,7 @@ export default function OcrFeedbackControls({
   overviewHouseId = null,
   municipalDistrictId = null,
   initialFeedback = null,
+  resetVersion = 0,
   compact = true,
   onFeedbackSaved,
 }: Props) {
@@ -76,11 +78,32 @@ export default function OcrFeedbackControls({
   useEffect(() => {
     setFeedback(initialFeedback || null);
     setNoteText(initialFeedback?.comment || "");
+    if (!initialFeedback) {
+      setShowNoteInput(false);
+    }
   }, [
+    initialFeedback,
     initialFeedback?.id,
     initialFeedback?.verdict,
     initialFeedback?.comment,
+    targetType,
+    rowId,
+    scanId,
+    censusSheetId,
+    personFactId,
+    overviewHouseId,
+    municipalDistrictId,
   ]);
+
+  useEffect(() => {
+    if (resetVersion > 0) {
+      setFeedback(initialFeedback || null);
+      setNoteText(initialFeedback?.comment || "");
+      if (!initialFeedback) {
+        setShowNoteInput(false);
+      }
+    }
+  }, [resetVersion]);
 
   const submitVerdict = async (
     verdict: "correct" | "incorrect",

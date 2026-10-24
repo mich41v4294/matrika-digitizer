@@ -772,6 +772,162 @@ def serialize_ocr_feedback(fb: OCRFeedback, *, include_traces: bool = True) -> d
     return out
 
 
+def reset_ocr_feedback(
+    session: Session,
+    *,
+    census_sheet_id: int | None = None,
+    scan_id: int | None = None,
+    scan_ids: list[int] | None = None,
+    row_id: int | None = None,
+    row_ids: list[int] | None = None,
+    person_fact_id: int | None = None,
+    overview_house_id: int | None = None,
+    municipal_district_id: int | None = None,
+    commit: bool = True,
+) -> int:
+    """
+    Deletes all `OCRFeedback` records (verdicts and comments) associated with the specified
+    sheet, scan(s), row(s), person fact, overview house, or municipal overview district,
+    and refreshes the workspace LLM debug report files.
+    """
+    target_sheet_ids: set[int] = {census_sheet_id} if census_sheet_id else set()
+    target_scan_ids: set[int] = set(scan_ids or [])
+    if scan_id:
+        target_scan_ids.add(scan_id)
+    target_row_ids: set[int] = set(row_ids or [])
+    if row_id:
+        target_row_ids.add(row_id)
+    target_fact_ids: set[int] = {person_fact_id} if person_fact_id else set()
+    target_house_ids: set[int] = {overview_house_id} if overview_house_id else set()
+    target_dist_ids: set[int] = {municipal_district_id} if municipal_district_id else set()
+
+    # Expand from census_sheet_id -> all scans, rows, facts, houses, districts of that sheet
+    if target_sheet_ids:
+        for sid in list(target_sheet_ids):
+            sh = session.get(CensusSheet, sid)
+            if sh:
+                if sh.front_scan_id:
+                    target_scan_ids.add(sh.front_scan_id)
+                if sh.back_scan_id:
+                    target_scan_ids.add(sh.back_scan_id)
+            for sc_id in session.exec(
+                select(ScanImage.id).where(ScanImage.census_sheet_id == sid)
+            ).all():
+                if sc_id is not None:
+                    target_scan_ids.add(sc_id)
+            for f_id in session.exec(
+                select(PersonFact.id).where(PersonFact.census_sheet_id == sid)
+            ).all():
+                if f_id is not None:
+                    target_fact_ids.add(f_id)
+            for h_id in session.exec(
+                select(CensusOverviewHouse.id).where(CensusOverviewHouse.census_sheet_id == sid)
+            ).all():
+                if h_id is not None:
+                    target_house_ids.add(h_id)
+            for d_id in session.exec(
+                select(CensusMunicipalOverviewDistrict.id).where(
+                    CensusMunicipalOverviewDistrict.census_sheet_id == sid
+                )
+            ).all():
+                if d_id is not None:
+                    target_dist_ids.add(d_id)
+
+    # Expand from scan_ids -> all rows, facts, houses, districts on those scans (only when not scoped to specific row_ids)
+    if target_scan_ids and not (row_id or row_ids):
+        for r_id in session.exec(
+            select(RecordRow.id).where(RecordRow.scan_id.in_(list(target_scan_ids)))  # type: ignore[union-attr]
+        ).all():
+            if r_id is not None:
+                target_row_ids.add(r_id)
+        for f_id in session.exec(
+            select(PersonFact.id).where(PersonFact.scan_id.in_(list(target_scan_ids)))  # type: ignore[union-attr]
+        ).all():
+            if f_id is not None:
+                target_fact_ids.add(f_id)
+        for h_id in session.exec(
+            select(CensusOverviewHouse.id).where(
+                CensusOverviewHouse.scan_id.in_(list(target_scan_ids))  # type: ignore[union-attr]
+            )
+        ).all():
+            if h_id is not None:
+                target_house_ids.add(h_id)
+        for d_id in session.exec(
+            select(CensusMunicipalOverviewDistrict.id).where(
+                CensusMunicipalOverviewDistrict.scan_id.in_(list(target_scan_ids))  # type: ignore[union-attr]
+            )
+        ).all():
+            if d_id is not None:
+                target_dist_ids.add(d_id)
+
+    # Expand from row_ids -> facts, overview houses, municipal districts on those rows
+    if target_row_ids:
+        for f_id in session.exec(
+            select(PersonFact.id).where(PersonFact.row_id.in_(list(target_row_ids)))  # type: ignore[union-attr]
+        ).all():
+            if f_id is not None:
+                target_fact_ids.add(f_id)
+        row_objs = list(
+            session.exec(
+                select(RecordRow).where(RecordRow.id.in_(list(target_row_ids)))  # type: ignore[union-attr]
+            ).all()
+        )
+        for r_obj in row_objs:
+            if r_obj.scan_id:
+                for ovh in session.exec(
+                    select(CensusOverviewHouse).where(CensusOverviewHouse.scan_id == r_obj.scan_id)
+                ).all():
+                    if ovh.id is not None and (
+                        (r_obj.stitched_crop_path and ovh.stitched_crop_path == r_obj.stitched_crop_path)
+                        or ovh.row_index == r_obj.row_index
+                    ):
+                        target_house_ids.add(ovh.id)
+                for md in session.exec(
+                    select(CensusMunicipalOverviewDistrict).where(
+                        CensusMunicipalOverviewDistrict.scan_id == r_obj.scan_id
+                    )
+                ).all():
+                    if md.id is not None and (
+                        (r_obj.stitched_crop_path and md.stitched_crop_path == r_obj.stitched_crop_path)
+                        or md.row_index == r_obj.row_index
+                    ):
+                        target_dist_ids.add(md.id)
+
+    all_fb = list(session.exec(select(OCRFeedback)).all())
+    deleted_count = 0
+    for fb in all_fb:
+        should_delete = False
+        if target_sheet_ids and fb.census_sheet_id in target_sheet_ids:
+            should_delete = True
+        elif (
+            target_scan_ids
+            and not (row_id or row_ids)
+            and fb.scan_id in target_scan_ids
+        ):
+            should_delete = True
+        elif target_row_ids and fb.row_id in target_row_ids:
+            should_delete = True
+        elif target_fact_ids and fb.person_fact_id in target_fact_ids:
+            should_delete = True
+        elif target_house_ids and fb.overview_house_id in target_house_ids:
+            should_delete = True
+        elif target_dist_ids and fb.municipal_district_id in target_dist_ids:
+            should_delete = True
+
+        if should_delete:
+            session.delete(fb)
+            deleted_count += 1
+
+    if deleted_count > 0:
+        if commit:
+            session.commit()
+        else:
+            session.flush()
+        persist_llm_debug_report_files(session)
+
+    return deleted_count
+
+
 def build_feedback_lookup_maps(
     session: Session,
     *,
@@ -781,7 +937,12 @@ def build_feedback_lookup_maps(
     fact_ids: list[int] | None = None,
 ) -> dict[str, dict[int, dict[str, Any]]]:
     stmt = select(OCRFeedback).order_by(OCRFeedback.updated_at.desc(), OCRFeedback.id.desc())
-    if census_sheet_id is not None:
+    if census_sheet_id is not None and scan_ids:
+        stmt = stmt.where(
+            (OCRFeedback.census_sheet_id == census_sheet_id)
+            | (OCRFeedback.scan_id.in_(scan_ids))  # type: ignore[union-attr]
+        )
+    elif census_sheet_id is not None:
         stmt = stmt.where(OCRFeedback.census_sheet_id == census_sheet_id)
     elif scan_ids:
         stmt = stmt.where(OCRFeedback.scan_id.in_(scan_ids))  # type: ignore[union-attr]

@@ -39,6 +39,7 @@ from backend.app.pipeline.feedback import (
     format_llm_debug_report_markdown,
     get_feedback_statistics,
     persist_llm_debug_report_files,
+    reset_ocr_feedback,
     serialize_ocr_feedback,
     upsert_ocr_feedback,
 )
@@ -342,6 +343,8 @@ async def rerun_single_row_stage(
     scan = session.get(ScanImage, row.scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+
+    reset_ocr_feedback(session, row_id=row.id)
 
     is_census = bool(
         scan.detected_type == "census"

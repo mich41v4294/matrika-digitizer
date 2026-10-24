@@ -222,6 +222,7 @@ export default function BooksOverview({
     searchParams.get("mode") === "original" ? "original" : "overlay"
   );
   const [processingId, setProcessingId] = useState<number | null>(null);
+  const [feedbackResetVersion, setFeedbackResetVersion] = useState<number>(0);
 
   // Inline Edit & Delete State for Records
   const [editingFactId, setEditingFactId] = useState<number | null>(null);
@@ -530,6 +531,20 @@ export default function BooksOverview({
   const handleProcessScan = async (scanId: number, maxRows: number | null = null) => {
     setProcessingId(scanId);
     setActionError(null);
+    setFeedbackResetVersion((v) => v + 1);
+    setSelectedScanDetail((prev) =>
+      prev && prev.scan.id === scanId
+        ? {
+            ...prev,
+            rows: prev.rows.map((r) => ({ ...r, ocr_feedback: null })),
+          }
+        : prev
+    );
+    setRecords((prev) =>
+      prev.map((item) =>
+        item.fact.scan_id === scanId ? { ...item, ocr_feedback: null } : item
+      )
+    );
     try {
       const r = await fetch(`/api/scans/${scanId}/process`, {
         method: "POST",
@@ -546,7 +561,10 @@ export default function BooksOverview({
         );
       }
       refreshStatus();
-      setTimeout(loadData, 1500);
+      setTimeout(() => {
+        void loadData();
+        setFeedbackResetVersion((v) => v + 1);
+      }, 1500);
     } catch {
       setActionError(
         lang === "sk"
@@ -958,7 +976,29 @@ export default function BooksOverview({
                         scanId={selectedScanDetail.scan.id}
                         personFactId={selectedRow.fact?.id ?? null}
                         initialFeedback={selectedRow.ocr_feedback}
+                        resetVersion={feedbackResetVersion}
                         compact={false}
+                        onFeedbackSaved={(fb) => {
+                          setSelectedScanDetail((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  rows: prev.rows.map((rw) =>
+                                    rw.id === selectedRow.id
+                                      ? { ...rw, ocr_feedback: fb }
+                                      : rw
+                                  ),
+                                }
+                              : prev
+                          );
+                          setRecords((prev) =>
+                            prev.map((rec) =>
+                              rec.fact.row_id === selectedRow.id
+                                ? { ...rec, ocr_feedback: fb }
+                                : rec
+                            )
+                          );
+                        }}
                       />
                     </div>
                     <HoverZoomRowCrop
@@ -1446,6 +1486,28 @@ export default function BooksOverview({
                       scanId={r.scan_id}
                       censusSheetId={r.census_sheet_id ?? null}
                       initialFeedback={item.ocr_feedback}
+                      resetVersion={feedbackResetVersion}
+                      onFeedbackSaved={(fb) => {
+                        setRecords((prev) =>
+                          prev.map((rec) =>
+                            rec.fact.id === r.id
+                              ? { ...rec, ocr_feedback: fb }
+                              : rec
+                          )
+                        );
+                        setSelectedScanDetail((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                rows: prev.rows.map((rw) =>
+                                  rw.id === r.row_id
+                                    ? { ...rw, ocr_feedback: fb }
+                                    : rw
+                                ),
+                              }
+                            : prev
+                        );
+                      }}
                     />
 
                     <button

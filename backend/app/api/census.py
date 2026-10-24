@@ -41,7 +41,7 @@ from backend.app.db.models import (
     ScanImage,
 )
 from backend.app.db.session import SessionDep
-from backend.app.pipeline.feedback import build_feedback_lookup_maps
+from backend.app.pipeline.feedback import build_feedback_lookup_maps, reset_ocr_feedback
 from backend.app.mcp.familysearch_client import (
     match_census_to_local_matrika,
     schedule_auto_fs_match,
@@ -2002,6 +2002,7 @@ def _repair_misclassified_district_overview_sheet(
 
     sheet.sheet_type = "overview"
     session.add(sheet)
+    reset_ocr_feedback(session, census_sheet_id=sheet.id, commit=False)
 
     existing_ov_houses = list(
         session.exec(
@@ -2745,7 +2746,11 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             }
         )
 
-    fb_maps = build_feedback_lookup_maps(session, census_sheet_id=sheet.id)
+    fb_maps = build_feedback_lookup_maps(
+        session,
+        census_sheet_id=sheet.id,
+        scan_ids=scan_ids_for_rows,
+    )
     fb_by_row = fb_maps["by_row"]
     fb_by_fact = fb_maps["by_fact"]
     fb_by_house = fb_maps["by_house"]
@@ -3038,6 +3043,8 @@ async def trigger_sheet_download_and_process(
     run_mcp: bool = True,
 ) -> dict[str, Any]:
     sheet = await _resolve_census_sheet(session, sheet_ref)
+    if sheet.id is not None:
+        reset_ocr_feedback(session, census_sheet_id=sheet.id)
 
     result = await download_and_process_single_census_sheet(
         sheet.id or 0,
@@ -3245,6 +3252,11 @@ async def set_census_sheet_type(
         target_type = "overview"
     else:
         target_type = "household"
+
+    # Reset all OCR feedback and comments on this sheet whenever its document type is switched
+    if sheet.id is not None:
+        reset_ocr_feedback(session, census_sheet_id=sheet.id, commit=False)
+
     sheet.sheet_type = target_type
     _set_manual_sheet_type_override(sheet, target_type)
     if req.obvod_number is not None:
@@ -3371,6 +3383,9 @@ async def set_census_sheet_type(
             session.commit()
             session.refresh(sheet)
 
+    if sheet.id is not None:
+        reset_ocr_feedback(session, census_sheet_id=sheet.id)
+
     return {
         "status": "updated",
         "sheet": _serialize_sheet(
@@ -3430,6 +3445,7 @@ def delete_municipal_overview_district(district_id: int, session: SessionDep) ->
     md = session.get(CensusMunicipalOverviewDistrict, district_id)
     if not md:
         raise HTTPException(status_code=404, detail="CensusMunicipalOverviewDistrict not found")
+    reset_ocr_feedback(session, municipal_district_id=district_id, commit=False)
     session.delete(md)
     session.commit()
     return {"status": "deleted", "district_id": district_id}
@@ -3502,6 +3518,7 @@ def delete_overview_house(house_id: int, session: SessionDep) -> dict[str, Any]:
     ovh = session.get(CensusOverviewHouse, house_id)
     if not ovh:
         raise HTTPException(status_code=404, detail="CensusOverviewHouse not found")
+    reset_ocr_feedback(session, overview_house_id=house_id, commit=False)
     session.delete(ovh)
     session.commit()
     return {"status": "deleted", "house_id": house_id}

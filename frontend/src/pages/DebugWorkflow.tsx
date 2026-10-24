@@ -480,6 +480,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
     null
   );
   const [editingCommentText, setEditingCommentText] = useState<string>("");
+  const [feedbackResetVersion, setFeedbackResetVersion] = useState<number>(0);
 
   const loadFeedbackAndStats = async (
     filterOverride?: "" | "incorrect" | "correct"
@@ -504,6 +505,13 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
         setSelectedFeedbackItem((prev) => {
           if (!prev) return items[0] ?? null;
           return items.find((i) => i.id === prev.id) ?? items[0] ?? null;
+        });
+        setEditingFeedbackId((prev) => {
+          if (prev && !items.some((i) => i.id === prev)) {
+            setEditingCommentText("");
+            return null;
+          }
+          return prev;
         });
       }
     } catch {
@@ -992,6 +1000,17 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
 
   const handleRerunRow = async (rowId: number, stage: string) => {
     setRerunningRowId(rowId);
+    setFeedbackResetVersion((v) => v + 1);
+    setScanDetail((prev) =>
+      prev
+        ? {
+            ...prev,
+            rows: prev.rows.map((r) =>
+              r.id === rowId ? { ...r, ocr_feedback: null } : r
+            ),
+          }
+        : prev
+    );
     try {
       await fetch(`/api/debug/rerun-stage`, {
         method: "POST",
@@ -1004,6 +1023,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
           setScanDetail(await res.json());
         }
       }
+      setFeedbackResetVersion((v) => v + 1);
       await loadDebug();
       await loadFeedbackAndStats();
       refreshStatus();
@@ -1015,6 +1035,15 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
   const handleResliceScan = async () => {
     if (!selectedScanId) return;
     setReslicingScan(true);
+    setFeedbackResetVersion((v) => v + 1);
+    setScanDetail((prev) =>
+      prev
+        ? {
+            ...prev,
+            rows: prev.rows.map((r) => ({ ...r, ocr_feedback: null })),
+          }
+        : prev
+    );
     try {
       await fetch(`/api/scans/${selectedScanId}/slice`, { method: "POST" });
       const res = await fetch(`/api/scans/${selectedScanId}`);
@@ -1022,7 +1051,9 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
         setScanDetail(await res.json());
       }
       setCacheRev(Date.now());
+      setFeedbackResetVersion((v) => v + 1);
       await loadDebug();
+      await loadFeedbackAndStats();
       refreshStatus();
     } finally {
       setReslicingScan(false);
@@ -2552,7 +2583,20 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
                         scanId={scanDetail.scan.id}
                         personFactId={row.fact?.id ?? null}
                         initialFeedback={row.ocr_feedback}
-                        onFeedbackSaved={() => {
+                        resetVersion={feedbackResetVersion}
+                        onFeedbackSaved={(fb) => {
+                          setScanDetail((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  rows: prev.rows.map((rw) =>
+                                    rw.id === row.id
+                                      ? { ...rw, ocr_feedback: fb }
+                                      : rw
+                                  ),
+                                }
+                              : prev
+                          );
                           void loadFeedbackAndStats();
                         }}
                       />

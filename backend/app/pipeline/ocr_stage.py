@@ -238,8 +238,10 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
     scan.header_raw_ocr = raw_text
     if year:
         scan.detected_year = year
+    prev_scan_type = scan.detected_type
     if scan.detected_type != "census":
         scan.detected_type = rec_type
+    prev_sheet_type = sheet.sheet_type if sheet else None
     if sheet:
         if detect_is_municipal_overview_sheet(raw_text, f"{scan.filename} {sheet.slovakiana_key}"):
             sheet.sheet_type = "municipal_overview"
@@ -255,6 +257,18 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
             if meta.get("commissioner_name") and not sheet.commissioner_name:
                 sheet.commissioner_name = meta["commissioner_name"]
             session.add(sheet)
+    if (
+        scan.detected_type != prev_scan_type
+        or (sheet and sheet.sheet_type != prev_sheet_type)
+    ):
+        from backend.app.pipeline.feedback import reset_ocr_feedback
+
+        reset_ocr_feedback(
+            session,
+            census_sheet_id=sheet.id if sheet else None,
+            scan_id=scan.id,
+            commit=False,
+        )
     session.add(scan)
     session.commit()
 
@@ -460,5 +474,8 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
 
     row.status = "ocr_done"
     session.add(row)
+    from backend.app.pipeline.feedback import reset_ocr_feedback
+
+    reset_ocr_feedback(session, row_id=row.id, commit=False)
     session.commit()
     return {"left": left_text, "right": right_text}

@@ -445,6 +445,10 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await page.locator("tbody").getByRole("button", { name: "Vymazať", exact: true }).click();
     await expect(page.locator("tbody tr").filter({ hasText: "Dom č. 24" })).toHaveCount(0);
 
+    // Mark OCR feedback on Dom č. 15 before switching document type, then verify switching type resets feedback & comments
+    await house15Row.getByTestId("ocr-feedback-incorrect-btn").click();
+    await expect(house15Row.getByTestId("ocr-feedback-incorrect-btn")).toHaveClass(/bg-red-600/);
+
     // Manually switch sheet type from Prehľad obvodu (overview) -> Obecný prehľad (municipal_overview) and back
     const sheetTypeSelect = page.getByTestId("sheet-type-select");
     await expect(sheetTypeSelect).toHaveValue("overview");
@@ -469,6 +473,7 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
       "OCR: local:glm-ocr-g32-mixed_4_8-mlx + Extract: local:underdog-saluki-27b-1.0"
     );
     await expect(page.getByTestId("debug-ocr-feedback-card")).toContainText("cair-test001");
+    await expect(page.getByTestId("debug-ocr-feedback-card")).not.toContainText("cair-test002");
     await page.getByTestId("toggle-llm-report-preview-btn").click();
     await expect(page.getByTestId("llm-report-preview-box")).toContainText(
       "Matrika & Census Digitizer — OCR Feedback & LLM Debugging Report"

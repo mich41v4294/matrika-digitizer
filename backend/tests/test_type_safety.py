@@ -613,6 +613,35 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
             self.assertIn("[INCORRECT]", md_text)
             self.assertIn("50.0%", md_text)
 
+            # 1) Re-OCR on row1 resets row1's feedback & comment
+            import asyncio
+            from backend.app.pipeline.ocr_stage import run_ocr_for_row
+            from backend.app.api.census import SetSheetTypeRequest, set_census_sheet_type
+
+            asyncio.run(run_ocr_for_row(session, scan, row1))
+            stats_after_row_reocr = get_feedback_statistics(session)
+            self.assertEqual(stats_after_row_reocr["summary"]["total_feedback"], 1)
+            self.assertEqual(stats_after_row_reocr["summary"]["correct_count"], 0)
+            self.assertEqual(stats_after_row_reocr["summary"]["incorrect_count"], 1)
+
+            # 2) Switching document type on sheet resets all remaining feedback & comments on the sheet
+            asyncio.run(
+                set_census_sheet_type(
+                    "cair-fbtest01",
+                    SetSheetTypeRequest(sheet_type="overview", run_extract=True),
+                    session,
+                )
+            )
+            stats_after_type_switch = get_feedback_statistics(session)
+            self.assertEqual(stats_after_type_switch["summary"]["total_feedback"], 0)
+            self.assertEqual(stats_after_type_switch["summary"]["correct_count"], 0)
+            self.assertEqual(stats_after_type_switch["summary"]["incorrect_count"], 0)
+            md_after_reset = format_llm_debug_report_markdown(
+                build_llm_debug_report_payload(session)
+            )
+            self.assertNotIn("Priezvisko má byť Kováčová, nie Koráčová", md_after_reset)
+            self.assertIn("_No OCR feedback entries recorded yet._", md_after_reset)
+
 
 
 if __name__ == "__main__":

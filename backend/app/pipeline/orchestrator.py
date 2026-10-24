@@ -143,6 +143,14 @@ def _persist_layout_result(
         status="ok",
         duration_ms=dur_ms,
     )
+    from backend.app.pipeline.feedback import reset_ocr_feedback
+
+    reset_ocr_feedback(
+        session,
+        census_sheet_id=scan.census_sheet_id,
+        scan_id=scan.id,
+        commit=False,
+    )
     session.add(trace)
     session.commit()
     for r in created_rows:
@@ -221,6 +229,15 @@ async def process_single_scan_pipeline(
             raise ValueError(f"Scan {scan_id} not found")
 
         try:
+            from backend.app.pipeline.feedback import reset_ocr_feedback
+
+            if max_rows is None:
+                reset_ocr_feedback(
+                    session,
+                    census_sheet_id=scan.census_sheet_id,
+                    scan_id=scan.id,
+                    commit=False,
+                )
             scan.error_message = None
             session.add(scan)
             session.commit()
@@ -717,6 +734,9 @@ async def process_census_sheet_pipeline(
         sheet = session.get(CensusSheet, sheet_id)
         if not sheet:
             raise ValueError(f"CensusSheet {sheet_id} not found")
+        from backend.app.pipeline.feedback import reset_ocr_feedback
+
+        reset_ocr_feedback(session, census_sheet_id=sheet_id)
         front_scan_id = sheet.front_scan_id
         back_scan_id = sheet.back_scan_id
         enable_overview = bool(settings.get_feature_flags().get("census_overview_sheets", True))

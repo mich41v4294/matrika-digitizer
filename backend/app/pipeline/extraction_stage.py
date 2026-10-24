@@ -590,6 +590,9 @@ async def run_extraction_for_row(
 
     session.add(fact)
     session.flush()
+    from backend.app.pipeline.feedback import reset_ocr_feedback
+
+    reset_ocr_feedback(session, row_id=row.id, person_fact_id=fact.id, commit=False)
     index_person_fact(session, fact)
     session.commit()
     session.refresh(fact)
@@ -1469,6 +1472,9 @@ async def run_census_extraction_for_row(
 
     left_is_blank = _is_effectively_blank_census_left_ocr(row.raw_ocr_left)
     if left_is_blank and not human_notes:
+        from backend.app.pipeline.feedback import reset_ocr_feedback
+
+        reset_ocr_feedback(session, row_id=row.id, commit=False)
         row.status = "empty_row"
         row.normalized_json = json.dumps({"status": "empty_row"}, ensure_ascii=False)
         session.add(row)
@@ -1585,6 +1591,9 @@ async def run_census_extraction_for_row(
     clean_given_check = (given_name_raw or "").strip(" ?.-_\"'/,;:")
     clean_surname_check = (surname_raw or "").strip(" ?.-_\"'/,;:")
     if not clean_given_check and not clean_surname_check:
+        from backend.app.pipeline.feedback import reset_ocr_feedback
+
+        reset_ocr_feedback(session, row_id=row.id, commit=False)
         row.status = "empty_row"
         row.normalized_json = json.dumps({"status": "empty_row"}, ensure_ascii=False)
         session.add(row)
@@ -1878,6 +1887,9 @@ async def run_census_extraction_for_row(
 
     session.add(fact)
     session.flush()
+    from backend.app.pipeline.feedback import reset_ocr_feedback
+
+    reset_ocr_feedback(session, row_id=row.id, person_fact_id=fact.id, commit=False)
     index_person_fact(session, fact)
     session.commit()
     session.refresh(fact)
@@ -4382,6 +4394,10 @@ async def extract_census_overview_sheet(
     sheet.sheet_type = "overview"
     session.add(sheet)
 
+    from backend.app.pipeline.feedback import reset_ocr_feedback
+
+    reset_ocr_feedback(session, census_sheet_id=sheet.id, commit=False)
+
     # 1. Delete any bogus PersonFact / FamilySearchMatch / CensusHousehold / CensusMunicipalOverviewDistrict previously created on this overview sheet
     for pf in session.exec(select(PersonFact).where(PersonFact.census_sheet_id == sheet.id)).all():
         for m in session.exec(select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == pf.id)).all():
@@ -5516,6 +5532,10 @@ async def _extract_census_municipal_overview_sheet_locked(
         sheet.commissioner_name = None
     session.add(sheet)
 
+    from backend.app.pipeline.feedback import reset_ocr_feedback
+
+    reset_ocr_feedback(session, census_sheet_id=sheet.id, commit=False)
+
     # 1. Delete any bogus PersonFact / FamilySearchMatch / CensusHousehold / CensusOverviewHouse previously created on this sheet
     for pf in session.exec(select(PersonFact).where(PersonFact.census_sheet_id == sheet.id)).all():
         for m in session.exec(select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == pf.id)).all():
@@ -5975,6 +5995,10 @@ def reconstruct_municipal_overview_districts_from_existing_ocr(
     if not rows_with_ocr:
         return []
 
+    from backend.app.pipeline.feedback import reset_ocr_feedback
+
+    reset_ocr_feedback(session, census_sheet_id=sheet.id, commit=False)
+
     for old_ov in session.exec(
         select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)
     ).all():
@@ -6174,6 +6198,10 @@ def reconstruct_overview_houses_from_existing_ocr(
         hn_key = normalize_house_number(cs.house_number)
         if hn_key and hn_key not in sheet_by_house_num:
             sheet_by_house_num[hn_key] = cs
+
+    from backend.app.pipeline.feedback import reset_ocr_feedback
+
+    reset_ocr_feedback(session, census_sheet_id=sheet.id, commit=False)
 
     for old_ov in session.exec(
         select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == sheet.id)

@@ -134,6 +134,13 @@ def delete_person_fact_cascade(session: Session, fact_id: int) -> bool:
     if not fact:
         return False
 
+    try:
+        from backend.app.pipeline.feedback import reset_ocr_feedback
+
+        reset_ocr_feedback(session, row_id=fact.row_id, person_fact_id=fact_id, commit=False)
+    except Exception:
+        pass
+
     for fsm in session.exec(
         _select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == fact_id)
     ).all():

@@ -946,6 +946,36 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const [processing, setProcessing] = useState(false);
   const [switchingType, setSwitchingType] = useState(false);
   const [switchingYear, setSwitchingYear] = useState(false);
+  const [feedbackResetVersion, setFeedbackResetVersion] = useState<number>(0);
+
+  const clearAllSheetFeedbackInState = () => {
+    setFeedbackResetVersion((v) => v + 1);
+    setDetail((prev) =>
+      prev
+        ? {
+            ...prev,
+            members: (prev.members || []).map((m) => ({
+              ...m,
+              ocr_feedback: null,
+            })),
+            overview_houses: (prev.overview_houses || []).map((h) => ({
+              ...h,
+              ocr_feedback: null,
+            })),
+            municipal_overview_districts: (
+              prev.municipal_overview_districts || []
+            ).map((d) => ({
+              ...d,
+              ocr_feedback: null,
+            })),
+            rows: (prev.rows || []).map((r) => ({
+              ...r,
+              ocr_feedback: null,
+            })),
+          }
+        : prev
+    );
+  };
   const [sheetProgress, setSheetProgress] = useState<{
     active: boolean;
     completedJustNow: boolean;
@@ -1346,6 +1376,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const handleDownloadAndProcess = async () => {
     if (!sheetId) return;
     setActionError(null);
+    clearAllSheetFeedbackInState();
     setProcessing(true);
     const startMs = Date.now();
     const isReprocess =
@@ -1387,6 +1418,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         throw new Error(resData?.error || resData?.pipeline?.error || "OCR error");
       }
       await loadDetail();
+      setFeedbackResetVersion((v) => v + 1);
       refreshStatus();
       const totalElapsed = Math.max(1, Math.round((Date.now() - startMs) / 1000));
       setSheetProgress((prev) => ({
@@ -1423,6 +1455,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     const prevType = detail.sheet.sheet_type || "household";
     const sheetRef = detail.sheet.slovakiana_id || String(detail.sheet.id);
     setActionError(null);
+    clearAllSheetFeedbackInState();
     // Optimistically reflect the chosen sheet type immediately in the UI
     setDetail((prev) =>
       prev
@@ -1469,6 +1502,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         );
       }
       await loadDetail();
+      setFeedbackResetVersion((v) => v + 1);
       refreshStatus();
       const totalElapsed = Math.max(1, Math.round((Date.now() - startMs) / 1000));
       setSheetProgress((prev) => ({
@@ -3632,6 +3666,23 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                   scanId={d.scan_id ?? front_scan?.id ?? null}
                                   censusSheetId={sheet.id}
                                   initialFeedback={d.ocr_feedback}
+                                  resetVersion={feedbackResetVersion}
+                                  onFeedbackSaved={(fb) => {
+                                    setDetail((prev) =>
+                                      prev
+                                        ? {
+                                            ...prev,
+                                            municipal_overview_districts: (
+                                              prev.municipal_overview_districts || []
+                                            ).map((item) =>
+                                              item.id === d.id
+                                                ? { ...item, ocr_feedback: fb }
+                                                : item
+                                            ),
+                                          }
+                                        : prev
+                                    );
+                                  }}
                                 />
                                 <button
                                   type="button"
@@ -4272,6 +4323,23 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 scanId={h.scan_id ?? front_scan?.id ?? null}
                                 censusSheetId={sheet.id}
                                 initialFeedback={h.ocr_feedback}
+                                resetVersion={feedbackResetVersion}
+                                onFeedbackSaved={(fb) => {
+                                  setDetail((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          overview_houses: (
+                                            prev.overview_houses || []
+                                          ).map((item) =>
+                                            item.id === h.id
+                                              ? { ...item, ocr_feedback: fb }
+                                              : item
+                                          ),
+                                        }
+                                      : prev
+                                  );
+                                }}
                               />
                               <button
                                 type="button"
@@ -4988,6 +5056,21 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                               scanId={f.scan_id}
                               censusSheetId={sheet.id}
                               initialFeedback={m.ocr_feedback}
+                              resetVersion={feedbackResetVersion}
+                              onFeedbackSaved={(fb) => {
+                                setDetail((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        members: (prev.members || []).map((item) =>
+                                          item.fact.id === f.id
+                                            ? { ...item, ocr_feedback: fb }
+                                            : item
+                                        ),
+                                      }
+                                    : prev
+                                );
+                              }}
                             />
                             <button
                               type="button"

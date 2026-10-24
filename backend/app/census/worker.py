@@ -447,6 +447,10 @@ async def download_and_process_single_census_sheet(
         sheet = session.get(CensusSheet, sheet_id)
         if not sheet:
             return {"error": f"CensusSheet {sheet_id} not found"}
+        if run_pipeline:
+            from backend.app.pipeline.feedback import reset_ocr_feedback
+
+            reset_ocr_feedback(session, census_sheet_id=sheet_id)
         slovakiana_key = sheet.slovakiana_key
         sheet_label = (
             f"{sheet.municipality or ''} č. {sheet.house_number or sheet.sheet_number or slovakiana_key}".strip()

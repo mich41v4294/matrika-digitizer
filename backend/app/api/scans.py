@@ -12,7 +12,7 @@ from sqlmodel import select
 from backend.app.config import settings
 from backend.app.db.models import Batch, FamilySearchMatch, PersonFact, QuestionItem, RecordRow, ScanImage
 from backend.app.db.session import SessionDep
-from backend.app.pipeline.feedback import build_feedback_lookup_maps
+from backend.app.pipeline.feedback import build_feedback_lookup_maps, reset_ocr_feedback
 from backend.app.pipeline.orchestrator import (
     process_batch_stage_queued,
     process_single_scan_pipeline,
@@ -202,7 +202,11 @@ def get_scan_detail(scan_id: int, session: SessionDep) -> dict[str, Any]:
         for gr in grid_meta.get("rows", [])
         if isinstance(gr, dict) and gr.get("row_index") is not None
     }
-    fb_maps = build_feedback_lookup_maps(session, scan_ids=[scan_id])
+    fb_maps = build_feedback_lookup_maps(
+        session,
+        census_sheet_id=scan.census_sheet_id,
+        scan_ids=[scan_id],
+    )
     fb_by_row = fb_maps["by_row"]
     fb_by_fact = fb_maps["by_fact"]
 
@@ -276,6 +280,12 @@ async def trigger_scan_pipeline(
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
 
+    reset_ocr_feedback(
+        session,
+        census_sheet_id=scan.census_sheet_id,
+        scan_id=scan_id,
+    )
+
     if req.background:
         background_tasks.add_task(
             process_single_scan_pipeline,
@@ -299,8 +309,16 @@ async def trigger_scan_pipeline(
 async def trigger_batch_pipeline(
     batch_id: int,
     req: ProcessScanRequest,
+    session: SessionDep,
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
+    batch_scan_ids = [
+        sid
+        for sid in session.exec(select(ScanImage.id).where(ScanImage.batch_id == batch_id)).all()
+        if sid is not None
+    ]
+    if batch_scan_ids:
+        reset_ocr_feedback(session, scan_ids=batch_scan_ids)
     background_tasks.add_task(
         process_batch_stage_queued,
         batch_id,

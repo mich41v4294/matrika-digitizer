@@ -2884,15 +2884,15 @@ def can_match_overview_house_to_sheet(
 
     ov_hn = normalize_house_number(getattr(ovh, "house_number", None))
     cand_hn = normalize_house_number(getattr(candidate_sheet, "house_number", None))
-    if not ov_hn or not cand_hn or ov_hn != cand_hn:
+    if not ov_hn or not cand_hn:
         return False
-
-    if not is_compatible_settlement(
-        getattr(ovh, "settlement_name", None),
-        getattr(candidate_sheet, "street_raw", None),
-        ov_muni_raw,
-    ):
-        return False
+    if ov_hn != cand_hn:
+        cand_raw_hn = str(getattr(candidate_sheet, "house_number", "") or "")
+        # Handle Slovakiana compound house labels like '31a, 32b' matching house '31'
+        if "," in cand_raw_hn and ov_hn.isdigit() and re.sub(r"[a-z]+$", "", cand_hn) == ov_hn:
+            pass
+        else:
+            return False
 
     return True
 

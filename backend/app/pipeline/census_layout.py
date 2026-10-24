@@ -89,6 +89,24 @@ _KNOWN_OCCUPANCY_PHRASES: frozenset[str] = frozenset(
         "shy raing",
         "stiguation",
         "suffrage",
+        "obligant",
+        "plyram",
+        "alysang",
+        "albvam",
+        "mhvany",
+        "sygrany",
+        "obfragen",
+        "obframy",
+        "objuny",
+        "aljrawnj",
+        "aljramj",
+        "syvan",
+        "phynang",
+        "shyvany",
+        "sbyrany",
+        "abjrang",
+        "abyrang",
+        "obfray",
     }
 )
 
@@ -131,6 +149,8 @@ def is_occupancy_status_token(text: str | None) -> tuple[bool, bool]:
             return True, False
 
     # 2. Inhabited ('obývaný', 'obyv.', 'objvany', 'obfvany', 'objrany', 'objvarij', 'obijrany', 'obfryany', 'objvranž', etc.)
+    if compact in {"sylval", "synak", "synad", "synach"}:
+        return False, False
     if "obyv" in compact or compact in {"obyv", "obiv", "obyr"}:
         return True, True
 
@@ -1068,7 +1088,7 @@ def slice_census_overview_sheet(
                     if has_ink:
                         any_kept_on_subpage = True
 
-                # Full active-page width strip for single-pass Table Recognition OCR, plus right half crop
+                # Full active-page width strip for single-pass Table Recognition OCR, plus focused Owner+Counts right crop
                 left_strip = stitched_strip.copy()
                 # On continuation pages (Pages 2, 3, 4), Row 1 has a narrow 'Prenos' carry-over band
                 # at the top of Columns 7-8 (0.68w..0.94w). Mask that top-right carry-over band on OCR strips
@@ -1078,7 +1098,14 @@ def slice_census_overview_sheet(
                     paper_bgr = np.percentile(left_strip.reshape(-1, 3), 78, axis=0).astype(np.uint8)
                     left_strip[: int(rh_s * 0.36), int(rw_s * 0.68) : int(rw_s * 0.94)] = paper_bgr
 
-                right_strip = left_strip[:, max(0, int(page_w * 0.34)) : page_w]
+                # Focused Columns 6..8 (Owner Name + Household Count + Present Persons Count) crop at ~5.2:1 aspect ratio.
+                # Keep natural ink on right_strip (without crayon suppression) so red apartment counts in Col 7
+                # and black person counts crossed by red checkmarks in Col 8 remain completely intact.
+                r_x0 = max(0, int(page_w * (0.470 if is_cover_page else 0.505)))
+                r_x1 = min(page_w, int(page_w * (0.825 if is_cover_page else 0.855)))
+                right_raw = left_strip[:, r_x0:r_x1]
+                r_bg = np.median(right_raw, axis=(0, 1)).astype(np.uint8).tolist() if right_raw.size else [235, 235, 235]
+                right_strip = cv2.copyMakeBorder(right_raw, 16, 16, 12, 12, cv2.BORDER_CONSTANT, value=r_bg)
                 candidate_strips.append((idx, top_m, bot_m, left_strip, right_strip, stitched_strip, has_ink))
 
             any_ink = any(item[6] for item in candidate_strips)
@@ -1101,12 +1128,22 @@ def slice_census_overview_sheet(
 
                 left_file = scan_crop_dir / f"row_{out_row_idx:02d}_left.jpg"
                 right_file = scan_crop_dir / f"row_{out_row_idx:02d}_right.jpg"
+                owner_file = scan_crop_dir / f"row_{out_row_idx:02d}_owner.jpg"
                 stitched_file = scan_crop_dir / f"row_{out_row_idx:02d}_stitched.jpg"
 
                 left_ocr_img = suppress_auditor_crayon(left_strip)
-                right_ocr_img = left_ocr_img[:, max(0, int(page_w * 0.34)) : page_w]
+                right_ocr_img = right_strip
+
+                # Dedicated Column 6 (Meno majiteľa domu) crop at ~3.2:1 aspect ratio with vertical padding
+                o_x0 = max(0, int(page_w * (0.475 if is_cover_page else 0.512)))
+                o_x1 = min(page_w, int(page_w * (0.672 if is_cover_page else 0.708)))
+                owner_raw = left_strip[:, o_x0:o_x1]
+                o_bg = np.median(owner_raw, axis=(0, 1)).astype(np.uint8).tolist() if owner_raw.size else [235, 235, 235]
+                owner_ocr_img = cv2.copyMakeBorder(owner_raw, 20, 20, 16, 16, cv2.BORDER_CONSTANT, value=o_bg)
+
                 cv2.imwrite(str(left_file), left_ocr_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-                cv2.imwrite(str(right_file), right_ocr_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+                cv2.imwrite(str(right_file), right_ocr_img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                cv2.imwrite(str(owner_file), owner_ocr_img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
                 cv2.imwrite(str(stitched_file), stitched_strip, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
 
                 xs_full = [int(round(v)) for v in np.linspace(page_x0 + 10, page_x1 - 10, 9)]
@@ -1157,6 +1194,7 @@ def slice_census_overview_sheet(
                                 "page_x0": page_x0,
                                 "page_x1": page_x1,
                                 "header_crop_url": sub_header_rel,
+                                "owner_crop_url": f"/media/crops/scan_{scan_id}/row_{out_row_idx:02d}_owner.jpg",
                             }
                         ],
                         angle_left_deg=round(top_m.angle_deg, 2),

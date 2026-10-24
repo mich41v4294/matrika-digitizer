@@ -1780,6 +1780,127 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                     ],
                 )
 
+    def test_overview_owner_hallucination_repair_and_duplicate_house_deduplication(self) -> None:
+        from backend.app.api.census import get_municipality_overview
+        from backend.app.db.models import CensusOverviewHouse
+        from backend.app.pipeline.extraction_stage import (
+            _is_garbled_or_english_owner_ocr,
+            _normalize_overview_owner,
+        )
+
+        self.assertTrue(_is_garbled_or_english_owner_ocr("Malele to Syndrome"))
+        self.assertTrue(_is_garbled_or_english_owner_ocr("Jaw Paterson Jan Singo"))
+        self.assertTrue(_is_garbled_or_english_owner_ocr("Martin Endbjørn"))
+        self.assertFalse(_is_garbled_or_english_owner_ocr("Martin Ondrejička"))
+
+        self.assertEqual(_normalize_overview_owner("Malele to Syndrome"), "Maloleté Synakové deti")
+        self.assertEqual(_normalize_overview_owner("Jaw Paterson Jan Singo"), "Ján Petrovič, Ján Šingo")
+        self.assertEqual(_normalize_overview_owner("Martin Endbjørn"), "Martin Ondrejička")
+        self.assertEqual(_normalize_overview_owner("Must be signed at the time"), "Michal Synak a deti")
+        self.assertEqual(_normalize_overview_owner("Snow Trademark"), "Anna Grabanová")
+
+        engine = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(engine)
+        ensure_fts_schema(engine)
+
+        with Session(engine) as session:
+            ov_sheet = CensusSheet(
+                slovakiana_key="cair-ko270vr",
+                census_year=1930,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                sheet_type="overview",
+                obvod_number="I",
+                download_status="extracted",
+            )
+            h14_1930 = CensusSheet(
+                slovakiana_key="cair-ko12rb7",
+                census_year=1930,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                street_raw="Horné Zelenice",
+                house_number="14",
+                house_number_int=14,
+                sheet_type="household",
+                download_status="cataloged",
+            )
+            h14_1940 = CensusSheet(
+                slovakiana_key="cair-kozp1q",
+                census_year=1940,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                house_number="14",
+                house_number_int=14,
+                sheet_type="household",
+                download_status="cataloged",
+            )
+            session.add_all([ov_sheet, h14_1930, h14_1940])
+            session.commit()
+            session.refresh(ov_sheet)
+            session.refresh(h14_1930)
+
+            ovh_13 = CensusOverviewHouse(
+                census_sheet_id=ov_sheet.id or 0,
+                row_index=13,
+                census_year=1930,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                obvod_number="I",
+                ordinal_number="13",
+                settlement_name="Horné Zelenice",
+                house_number="13",
+                house_number_int=13,
+                is_inhabited=True,
+                owner_name="Malele to Syndrome",
+                household_count=1,
+                present_persons_count=5,
+            )
+            ovh_14 = CensusOverviewHouse(
+                census_sheet_id=ov_sheet.id or 0,
+                row_index=14,
+                census_year=1930,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                obvod_number="I",
+                ordinal_number="14",
+                settlement_name="Horné Zelenice",
+                house_number="14",
+                house_number_int=14,
+                is_inhabited=True,
+                owner_name="Jaw Paterson Jan Singo",
+                household_count=3,
+                present_persons_count=13,
+                matched_sheet_id=h14_1930.id,
+            )
+            ovh_15 = CensusOverviewHouse(
+                census_sheet_id=ov_sheet.id or 0,
+                row_index=15,
+                census_year=1930,
+                district="Hlohovec",
+                municipality="Horné Zelenice",
+                obvod_number="I",
+                ordinal_number="15",
+                settlement_name="Horné Zelenice",
+                house_number="15",
+                house_number_int=15,
+                is_inhabited=True,
+                owner_name="Martin Endbjørn",
+                household_count=1,
+                present_persons_count=5,
+            )
+            session.add_all([ovh_13, ovh_14, ovh_15])
+            session.commit()
+
+            res = get_municipality_overview(session=session, municipality="Horné Zelenice", census_year=None)
+            self.assertEqual(
+                [(h["house_number"], h["owner_name"], h["street_name"]) for h in res["houses_directory"]],
+                [
+                    ("13", "Maloleté Synakové deti", None),
+                    ("14", "Ján Petrovič, Ján Šingo", None),
+                    ("15", "Martin Ondrejička", None),
+                ],
+            )
+
 
 
 if __name__ == "__main__":

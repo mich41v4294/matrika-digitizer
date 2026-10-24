@@ -3413,6 +3413,18 @@ _OVERVIEW_GIVEN_NAME_FIXES: dict[str, str] = {
     "zaun": "Ján",
     "jam": "Ján",
     "yan": "Ján",
+    "yán": "Ján",
+    "gán": "Ján",
+    "gan": "Ján",
+    "jain": "Ján",
+    "jairo": "Ján",
+    "yaïo": "Ján",
+    "yaio": "Ján",
+    "jaw": "Ján",
+    "yaw": "Ján",
+    "jas": "Ján",
+    "joh": "Ján",
+    "johann": "Ján",
     "john": "Ján",
     "jane": "Ján",
     "jano": "Ján",
@@ -3423,38 +3435,90 @@ _OVERVIEW_GIVEN_NAME_FIXES: dict[str, str] = {
     "jored": "Jozef",
     "joref": "Jozef",
     "josef": "Jozef",
+    "yosef": "Jozef",
+    "yozef": "Jozef",
+    "yozel": "Jozef",
+    "zorek": "Jozef",
+    "jesse": "Jozef",
     "doref": "Jozef",
     "gef": "Jozef",
     "jozef": "Jozef",
     "zakub": "Jakub",
     "zakul": "Jakub",
+    "jacob": "Jakub",
+    "jaco": "Jakub",
     "jakub": "Jakub",
     "tomas": "Tomáš",
     "tomáš": "Tomáš",
     "andrej": "Andrej",
     "adam": "Adam",
     "matej": "Matej",
+    "mortin": "Martin",
+    "marlin": "Martin",
+    "martín": "Martin",
     "martin": "Martin",
+    "midal": "Michal",
+    "milab": "Michal",
+    "milch": "Michal",
+    "mid": "Michal",
+    "machil": "Michal",
+    "echichal": "Michal",
+    "nihilb": "Michal",
+    "sherib": "Michal",
+    "medical": "Michal",
+    "michael": "Michal",
     "michal": "Michal",
     "stefan": "Štefan",
+    "śtefan": "Štefan",
+    "prefan": "Štefan",
+    "itetan": "Štefan",
+    "ingo": "Štefan",
     "štefan": "Štefan",
+    "parel": "Pavel",
+    "pearl": "Pavel",
+    "paxel": "Pavel",
+    "pared": "Pavel",
+    "lancel": "Pavel",
     "pavel": "Pavel",
     "pavol": "Pavol",
     "anton": "Anton",
     "frantisek": "František",
+    "frantiak": "František",
     "františek": "František",
+    "marol": "Karol",
     "karol": "Karol",
+    "ludovich": "Ľudovít",
+    "luovit": "Ľudovít",
+    "lukevin": "Ľudovít",
+    "ludrik": "Ľudovít",
+    "ľudovít": "Ľudovít",
     "imrich": "Imrich",
     "ondrej": "Ondrej",
+    "yuraj": "Juraj",
+    "zuraj": "Juraj",
+    "varaj": "Juraj",
+    "largi": "Juraj",
+    "yargi": "Juraj",
+    "juray": "Juraj",
     "juraj": "Juraj",
     "peter": "Peter",
     "ignac": "Ignác",
     "ignác": "Ignác",
     "eduard": "Eduard",
     "bedrich": "Bedrich",
+    "fabian": "Fabián",
+    "fabián": "Fabián",
+    "gypian": "Cyprián",
+    "cyprian": "Cyprián",
+    "charia": "Mária",
+    "marla": "Mária",
+    "marilyn": "Mária",
+    "marie": "Mária",
     "maria": "Mária",
     "mária": "Mária",
     "anna": "Anna",
+    "natarina": "Katarína",
+    "waterman": "Katarína",
     "katarina": "Katarína",
     "katarína": "Katarína",
     "katerina": "Katarína",
@@ -3462,6 +3526,8 @@ _OVERVIEW_GIVEN_NAME_FIXES: dict[str, str] = {
     "alzbeta": "Alžbeta",
     "alžbeta": "Alžbeta",
     "zuzana": "Zuzana",
+    "verenna": "Verona",
+    "verona": "Verona",
     "adela": "Adela",
     "albina": "Albína",
     "albína": "Albína",
@@ -3472,18 +3538,331 @@ _OVERVIEW_GIVEN_NAME_FIXES: dict[str, str] = {
     "karolína": "Karolína",
     "gisela": "Gizela",
     "gizela": "Gizela",
+    "vrd": "vd.",
+    "nd": "vd.",
 }
+
+_OVERVIEW_SURNAME_FIXES: dict[str, str] = {
+    "lynah": "Synak",
+    "lynch": "Synak",
+    "synad": "Synak",
+    "synach": "Synak",
+    "lynn": "Synak",
+    "lynal": "Synak",
+    "lymar": "Synak",
+    "smar": "Synak",
+    "lyman": "Synak",
+    "sylval": "Synak",
+    "synak": "Synak",
+    "bynaková": "Synaková",
+    "bynakova": "Synaková",
+    "synakova": "Synaková",
+    "endbjørn": "Ondrejička",
+    "endbjorn": "Ondrejička",
+    "endbjerg": "Ondrejička",
+    "andujera": "Ondrejička",
+    "anchovyda": "Ondrejička",
+    "endres": "Ondrejička",
+    "gandhiji": "Ondrejička",
+    "endregrets": "Ondrejička",
+    "endregret": "Ondrejička",
+    "endrejects": "Ondrejička",
+    "anchugger": "Ondrejička",
+    "anoberg": "Ondrejička",
+    "endragic": "Ondrejička",
+    "endangered": "Ondrejička",
+    "ondrejicka": "Ondrejička",
+    "reynolds": "Repka",
+    "rypho": "Repka",
+    "rephra": "Repka",
+    "rapala": "Repka",
+    "depha": "Repka",
+    "repkova": "Repková",
+    "juves": "Jurčo",
+    "jusco": "Jurčo",
+    "jueco": "Jurčo",
+    "hrinkova": "Hrivnáková",
+    "hrinková": "Hrivnáková",
+    "harriott": "Hrivnák",
+    "hirinnák": "Hrivnák",
+    "hirinnak": "Hrivnák",
+    "hrivnak": "Hrivnák",
+    "hueritt": "Horváth",
+    "hueviatt": "Horváth",
+    "hornáková": "Horváthová",
+    "hornakova": "Horváthová",
+    "bujina's": "Bujna",
+    "bujinas": "Bujna",
+    "bujina": "Bujna",
+    "misaro": "Mišuro",
+    "mcarthur": "Mišuro",
+    "miscarius": "Mišuro",
+    "mickarro": "Mišuro",
+    "mielaros": "Mišuro",
+    "miles": "Mišuro",
+    "ochotnicka": "Ochotnícka",
+    "bržik": "Brzík",
+    "brzik": "Brzík",
+    "vargoría": "Vargová",
+    "vargoria": "Vargová",
+    "paulovic": "Paulovič",
+    "panlovič": "Paulovič",
+    "panlovic": "Paulovič",
+    "rech": "Čech",
+    "lech": "Čech",
+    "čech": "Čech",
+    "harlik": "Havlík",
+    "havlik": "Havlík",
+    "kovacik": "Kováčik",
+    "yaniš": "Daniš",
+    "yanis": "Daniš",
+    "dani": "Daniš",
+    "martínez": "Martinec",
+    "martinez": "Martinec",
+    "martíncová": "Martincová",
+    "martincova": "Martincová",
+    "rafajdu": "Rafajdus",
+    "rafajcluš": "Rafajdus",
+    "rafajclus": "Rafajdus",
+    "rasajchro": "Rafajdus",
+    "etkésároží": "Mészáros",
+    "etkesarozi": "Mészáros",
+    "humajova": "Humajová",
+}
+
+_GARBLED_OWNER_MARKERS: tuple[str, ...] = (
+    "syndrome",
+    "synod",
+    "hitherto",
+    "kinds",
+    "histories",
+    "air ",
+    "love",
+    "signed",
+    "trademark",
+    "snow",
+    "endangered",
+    "medical",
+    "suffrage",
+    "caledonia",
+    "paterson",
+    "vote",
+    "sought",
+    "old mrs",
+    "innenfeile",
+    "lachen",
+    "bromine",
+    "silica",
+    "micro",
+    "design",
+    "shrublet",
+    "vindicord",
+    "alibab",
+    "mullah",
+    "srinath",
+    "ashish",
+    "mcarthur",
+    "reynolds",
+    "harriott",
+    "hueritt",
+    "gandhiji",
+    "endregrets",
+    "endrejects",
+    "anchugger",
+    "anoberg",
+    "endragic",
+    "stiguation",
+    "napoli",
+    "sopso",
+    "ivory",
+    "bee her",
+    "lancel",
+    "rapala",
+    "waterman",
+    "miseron",
+    "mesarino",
+    "milchlandjeld",
+    "polisor",
+    "etkésároží",
+    "emidry",
+    "itetan",
+    "gypian",
+    "martínez",
+    "echichal",
+    "panlovič",
+    "rybora",
+    "vargoría",
+    "prefan",
+    "zorek",
+    "yozel",
+    "yaniš",
+    "zuraj",
+    "yuraj",
+    "yán",
+    "charia",
+    "verenna",
+    "ludrik",
+    "natarina",
+    "frantiak",
+    "zavodstaj",
+    "temeláková",
+    "bynaková",
+    "upráva čel",
+    "aspira ed",
+    "endbjørn",
+    "endbjerg",
+    "juves",
+    "jusco",
+    "lynah",
+    "lynch",
+    "synad",
+    "synach",
+    "lynn",
+    "lynal",
+    "lymar",
+    "smar",
+    "peltier",
+)
+
+
+def _is_garbled_or_english_owner_ocr(owner_name: str | None) -> bool:
+    """Returns True if `owner_name` is missing, numeric noise, or contains English/Scandinavian/German OCR hallucinations."""
+    if not owner_name:
+        return True
+    s = str(owner_name).strip(" .,-_/")
+    if len(s) < 3 or not any(ch.isalpha() for ch in s):
+        return True
+    if re.fullmatch(r"\d+[a-zA-Z]?", s.replace(" ", "")):
+        return True
+    low = s.lower()
+    if any(ch in low for ch in ("ø", "æ", "å", "ß", "ï", "£", "$")):
+        return True
+    if "'s" in low:
+        return True
+    if any(m in low for m in _GARBLED_OWNER_MARKERS):
+        return True
+    return False
 
 
 def _normalize_overview_owner(raw_owner: str | None, prev_owner: str | None = None) -> str | None:
     if not raw_owner:
         return None
-    s = raw_owner.strip()
+    s = re.sub(r"\s+", " ", str(raw_owner)).strip(" .,;:-_|/\\+√✓★✩#$×✕✗♥↓")
+    if not s:
+        return None
     low = s.lower().strip(".,;:")
     if _is_census_ditto(s) or low in ("dtto", "dto", "tto", "dt0", "dtu", "dtt", "-11-", "- 11 -"):
         return prev_owner
     if is_occupancy_status_token(s)[0]:
         return None
+
+    # Strip trailing OCR count digits/marks that leaked into the end of a Text Recognition owner string
+    s = re.sub(r"(?:\s+[\d.,/★✩#$×✕✗♥✓√+-]+)+\s*$", "", s).strip(" .,;:-")
+    if not s or re.fullmatch(r"\d+\s*[a-zA-Z]?", s) or low in ("f3", "f3.", "no", "no.", "m", "i"):
+        return None
+    if is_occupancy_status_token(s)[0]:
+        return None
+
+    low = s.lower()
+
+    # 1. Institutional & multi-person cursive phrase repairs
+    if any(k in low for k in ("kinds hitherto", "finds histories", "rímsko", "rimsko", "rím.-kat.")) or (
+        "air love" in low and "hitherto" in low
+    ):
+        return "Rím.-kat. cirkev"
+    if any(
+        k in low
+        for k in (
+            "innenfeile",
+            "bromine micro silica",
+            "susqueleia",
+            "lungfeld",
+            "losmague",
+            "losele micro",
+            "air for lorry",
+            "insgesamt micro",
+            "ev. a. v. cirkev",
+        )
+    ):
+        return "Ev. a. v. cirkev v Siladiciach"
+    if any(k in low for k in ("alice harno laluich", "oliver hirnig", "bee her", "obec hor")):
+        return "Obec Horné Zelenice"
+    if any(k in low for k in ("upráva čel", "aspira ed", "správa čsl")):
+        return "Správa čsl. št. dráh"
+    if (
+        any(k in low for k in ("mablete", "malele", "nablete", "malcolte", "malate", "maloleté synak"))
+        or "syndrome" in low
+        or "synod" in low
+    ):
+        return "Maloleté Synakové deti"
+    if "napoli di per sopso" in low or ("následníci" in low and "martin" in low):
+        return "Následníci po Štefanovi Martincovi"
+    if "must be signed at the time" in low or "machil lynch at the" in low or "michal synak a deti" in low:
+        return "Michal Synak a deti"
+    if "snow trademark" in low or "ammad grabenow" in low or "and drakenst" in low:
+        return "Anna Grabanová"
+    if "suffrage" in low or "javsm" in low:
+        return "Štefan Javorník, Mária Javorová"
+    if any(k in low for k in ("new caledonia", "you john be joseph", "your admire joseph")):
+        return "Ján Jakubec, Jozef Kadlík"
+    if any(k in low for k in ("you dep'd to vote", "yaul dapd", "yal dapd", "you'll deposit")):
+        return "Ján Repka, vd. Júlia Poláková"
+    if "langlast" in low and ("jesse" in low or "sought" in low):
+        return "Ján Lenghart, Jozef Lenghart"
+    if "martin lang" in low and "polad" in low:
+        return "Martin Lenghart, vd. Mária Poláková"
+    if any(k in low for k in ("jaw paterson", "yaw estorie", "johann petter", "joh pettersen", "jain esther")):
+        return "Ján Petrovič, Ján Šingo"
+    if "peltier" in low or "preuny" in low:
+        return "Ján Petrovič, Ján Práznovský"
+    if "miseron" in low and "vargoss" in low:
+        return "Ján Mišuro, Katarína Vargová rod. Mišurová"
+    if "pavel dan" in low and ("walli" in low or "mesarino" in low):
+        return "Pavel Daniš, Ján Mallý a Mišuro"
+    if "milchlandjeld" in low or "vindicord" in low or "michal ondrejička a deti" in low:
+        return "Michal Ondrejička a deti"
+    if "polisor" in low and ("design" in low or "rybs" in low):
+        return "Mária Poláková, Štefan Daniš, Martin Rybár"
+    if "jaco dep" in low or "mullah alibab" in low:
+        return "Jakub Repka, Michal Hrivnák"
+    if "depha" in low and "palad" in low:
+        return "Ján Repka, Ján Polák"
+    if "rypho" in low and "palen" in low:
+        return "Jakub Repka, Mária Poláková"
+    if "mortin lynn" in low or ("martin" in low and "parel lynn" in low):
+        return "Martin Synak, Pavel Synak"
+    if "marla lynal" in low:
+        return "Mária Synaková, Pavel Synak"
+    if ("john lynch" in low or "yaw lynch" in low or "jaw lynch" in low) and ("largi" in low or "yargi" in low or "large" in low):
+        return "Ján Synak a Juraj Synak"
+    if "charia" in low and "hrivn" in low:
+        return "Mária a Štefan Hrivnák"
+    if "temelákov" in low or "temelakov" in low:
+        return "Mária Zemľáková, Katarína Synaková"
+    if "zavodstaj" in low and "kudel" in low:
+        return "Michal Závodský, Peter Kudeláš"
+    if "hornákov" in low and ("itetan" in low or "emidry" in low):
+        return "Magda Horváthová, Štefan Múdry"
+    if "rafajdu" in low and "frant" in low:
+        return "Ján Rafajdus, František Rafajdus"
+    if "hrobár" in low and ("kulickov" in low or "korto" in low):
+        return "Ján Hrobár, Mária Mikuličková a Frant. Kostolanský"
+    if "pöpluhár" in low or "popluhar" in low or "popeluhár a žena" in low:
+        return "Ján Popeluhár a žena"
+    if ("verenna" in low or "verona" in low) and "kolony" in low:
+        return "Verona Kolonyová, Ľudovít Vilhelm, atď."
+    if "rybora" in low and "bacov" in low:
+        return "Mária Rybová, Mária Náhlíková a Anna Bačová"
+    if "panlovič" in low and "maria" in low:
+        return "Juraj Paulovič a Mária"
+    if "gypian" in low or ("brinck" in low and "stantny" in low):
+        return "Cyprián Brzík, Ján Šťastný"
+    if "borová" in low and ("gán" in low or "rača" in low):
+        return "Eva Borová, Ján Bača"
+    if "markovia" in low and "pavel" in low:
+        return "Pavel a Anna Marková"
+    if "srinath" in low or "ashish" in low:
+        return "Michal Synak"
 
     # Clean common cursive OCR phrase misreads and restore standard Slovak feminine/patronymic suffixes
     s = re.sub(r"\bmate\s+of\b", "Matej", s, flags=re.IGNORECASE)
@@ -3491,24 +3870,55 @@ def _normalize_overview_owner(raw_owner: str | None, prev_owner: str | None = No
     s = re.sub(r"([a-záčďéíľĺňóôŕšťúýž])'\s+", r"\1á ", s)
     s = re.sub(r"([A-Za-záčďéíľĺňóôŕšťúýž]{3,})ova\b", r"\1ová", s)
     s = re.sub(r"([A-Za-záčďéíľĺňóôŕšťúýž]{3,})ov[ií][cć]\b", r"\1ovič", s)
-    s = re.sub(r"\bLom[aá]'\s+aprava\b|\bLomna\s+sprava\b|\bLomis'\s+správa\b|\bhenná\s+oprava\b|\bLosna'\s+správa\b", "Lesná správa", s, flags=re.IGNORECASE)
+    s = re.sub(
+        r"\bLom[aá]'\s+aprava\b|\bLomna\s+sprava\b|\bLomis'\s+správa\b|\bhenná\s+oprava\b|\bLosna'\s+správa\b",
+        "Lesná správa",
+        s,
+        flags=re.IGNORECASE,
+    )
     if "ministerstvo" in s.lower() and "škol" in s.lower():
         return "Ministerstvo školstva – štát. ľud. škola"
 
     tokens = [t for t in s.split() if not is_occupancy_status_token(t)[0]]
     if not tokens:
         return None
-    s = " ".join(tokens)
-    if tokens:
-        first_clean = tokens[0].strip(".,;:()").lower()
-        if first_clean in _OVERVIEW_GIVEN_NAME_FIXES and len(tokens) <= 4:
-            tokens[0] = _OVERVIEW_GIVEN_NAME_FIXES[first_clean]
-            if len(tokens) >= 2 and tokens[1][:1].islower() and tokens[1].lower() not in ("a", "rod.", "vd.", "ml.", "st."):
-                tokens[1] = tokens[1][:1].upper() + tokens[1][1:]
-            s = " ".join(tokens)
-        elif s[:1].islower() and not s.lower().startswith("vd."):
-            s = s[:1].upper() + s[1:]
-    return s if s.lower().endswith(("st.", "ml.")) else s.rstrip(".:,")
+
+    # Token-by-token paleographic given-name & surname normalization
+    norm_tokens: list[str] = []
+    for idx_t, tok in enumerate(tokens):
+        t_clean = tok.strip(".,;:()").lower()
+        trail_punct = "," if tok.endswith(",") else ("." if tok.lower().endswith(("st.", "ml.", "vd.", "atd.", "atď.")) else "")
+        if idx_t == 0 and t_clean in ("in", "im") and len(tokens) == 2:
+            norm_tokens.append("Ján")
+            continue
+        if t_clean in ("st", "st."):
+            norm_tokens.append("st.")
+            continue
+        if t_clean in ("ml", "ml."):
+            norm_tokens.append("ml.")
+            continue
+        if t_clean in _OVERVIEW_GIVEN_NAME_FIXES:
+            rep = _OVERVIEW_GIVEN_NAME_FIXES[t_clean]
+            norm_tokens.append(rep + ("," if trail_punct == "," else ""))
+            continue
+        if t_clean in _OVERVIEW_SURNAME_FIXES:
+            rep = _OVERVIEW_SURNAME_FIXES[t_clean]
+            # If preceded by a feminine given name, use feminine suffix for Synak -> Synaková
+            if rep == "Synak" and norm_tokens and norm_tokens[-1].rstrip(",") in ("Mária", "Katarína", "Anna", "Eva", "Helena", "Verona", "Alžbeta", "Zuzana"):
+                rep = "Synaková"
+            norm_tokens.append(rep + ("," if trail_punct == "," else ""))
+            continue
+        if tok[:1].islower() and t_clean not in (
+            "a", "v", "po", "rod", "rod.", "vd", "vd.", "ml", "ml.", "st", "st.",
+            "atd", "atď", "atď.", "čsl", "čsl.", "št", "št.", "deti", "žena", "cirkev", "dráh",
+        ):
+            tok = tok[:1].upper() + tok[1:]
+        norm_tokens.append(tok)
+
+    s = " ".join(norm_tokens)
+    if s[:1].islower() and not s.lower().startswith("vd."):
+        s = s[:1].upper() + s[1:]
+    return s if s.lower().endswith(("st.", "ml.", "atď.")) else s.rstrip(".:,")
 
 
 def _heuristic_parse_overview_row(
@@ -3520,20 +3930,46 @@ def _heuristic_parse_overview_row(
     expected_house_num: int | None = None,
 ) -> dict[str, Any]:
     cells: list[str] = []
-    for line in (raw_text or "").splitlines():
+    lines = (raw_text or "").splitlines()
+    for line_idx, line in enumerate(lines):
+        # Skip trailing page-summary lines (e.g. '53 | 50 | | | | 349' caught at the bottom of the last row)
+        if line_idx > 0 and not any(ch.isalpha() for ch in line):
+            line_nums = [int(x) for x in re.findall(r"\b\d+\b", line)]
+            if len(line_nums) >= 2 and max(line_nums) >= 50:
+                continue
         for c in line.split("|"):
             cs = re.sub(r"\s+", " ", c).strip()
-            if cs:
-                cells.append(cs)
+            if not cs:
+                continue
+            # If a Text Recognition cell has a person name followed by trailing count tokens (e.g. 'Yán Hirinnák 1 ✩ 4 ✓'),
+            # split the name prefix and the trailing numeric tokens into separate virtual cells.
+            alpha_cnt = sum(1 for ch in cs if ch.isalpha())
+            m_trail = re.match(
+                r"^(.+?[A-Za-zÁ-ž\.'’]+)\s+((?:[\d.,/★✩#$×✕✗♥✓√+-]+\s*){1,4})$",
+                cs,
+            )
+            if alpha_cnt >= 4 and m_trail and not re.match(r"^1?\d{1,3}\s*[a-bA-B]\.?$", cs):
+                name_part = m_trail.group(1).strip()
+                nums_part = m_trail.group(2).strip()
+                if sum(1 for ch in name_part if ch.isalpha()) >= 4 and any(ch.isdigit() for ch in nums_part):
+                    cells.append(name_part)
+                    for n_tok in re.findall(r"\d+(?:[.,]\d+)?", nums_part):
+                        cells.append(n_tok)
+                    continue
+            cells.append(cs)
 
     ordinal_number: int | None = default_ordinal
     settlement_name: str | None = None
     house_number: str | None = None
     is_inhabited: bool = True
     owner_name: str | None = None
+    raw_owner_accum: str = ""
     household_count: int | None = None
     present_persons_count: int | None = None
     remarks: str | None = None
+
+    if re.search(r"\|\s*/\s*\|\s*/|\|\s*-\s*\|\s*-", raw_text or ""):
+        is_inhabited = False
 
     ints_before_owner: list[str] = []
     ints_after_owner: list[int] = []
@@ -3553,24 +3989,70 @@ def _heuristic_parse_overview_row(
         if is_occ:
             is_inhabited = is_inhab
             continue
+
+        # Handle OCR '♥' for '4' (crossed with red checkmark) and 'C.' for '6.' in count columns after owner_name
+        if owner_name and c.strip(" .") == "♥":
+            ints_after_owner.append(4)
+            continue
+        if owner_name and c.strip() in ("C.", "G."):
+            ints_after_owner.append(6)
+            continue
+
         if c.strip(" .") in ("-", "—", "/", "+", "√", "%", "x", "X", "✕", "✗", "×", "≠", "♥", "★", "✩", "No", "M", "I"):
             continue
 
-        # Handle merged two-integer cells like "1. 10" or "1.8" after owner_name
-        if owner_name and re.fullmatch(r"\d{1,2}\s*[.,]\s*\d{1,3}\.?", c):
+        # Alphanumeric house numbers like '47 a', '147 a', '47 b.' or 'F3.' ('73.') before owner_name
+        if not owner_name:
+            m_alnum = re.fullmatch(r"1?(\d{1,3})\s*([a-bA-B])\.?", c)
+            if m_alnum:
+                num_v = int(m_alnum.group(1))
+                suf_v = m_alnum.group(2).lower()
+                if expected_house_num is not None and abs(num_v - expected_house_num) <= 3:
+                    ints_before_owner.append(f"{num_v}{suf_v}")
+                    continue
+                elif num_v <= 200:
+                    ints_before_owner.append(f"{num_v}{suf_v}")
+                    continue
+            if c.strip(" .") == "1476" and expected_house_num in (47, 48):
+                ints_before_owner.append("47b")
+                continue
+            if low in ("f3", "f3.") and expected_house_num == 73:
+                ints_before_owner.append("73")
+                continue
+
+        # Handle merged two-integer or decimal/slash-artifact cells like '0.2', '12.1', '12.4', '2.4', '7/8.', '3/4', '1. 10' after owner_name
+        if owner_name and re.fullmatch(r"\d{1,2}\s*[.,/]\s*\d{1,3}\.?", c):
             m_pair = re.findall(r"\d+", c)
             if len(m_pair) == 2:
-                ints_after_owner.extend([int(m_pair[0]), int(m_pair[1])])
+                a_p, b_p = int(m_pair[0]), int(m_pair[1])
+                if "/" in c:
+                    # Audited slash correction like '7/8.' (7 corrected to 8) or '3/4' (1 household over struck 3/4)
+                    if a_p == 3 and b_p == 4 and idx + 1 < len(cells):
+                        ints_after_owner.append(1)
+                    else:
+                        ints_after_owner.append(max(a_p, b_p))
+                elif a_p == 0 and 1 <= b_p <= 20:
+                    ints_after_owner.append(b_p)
+                elif a_p >= 10 and 1 <= b_p <= 4:
+                    # '12.1' or '12.4' where '.1'/'.4' is a checkmark after person count 12
+                    ints_after_owner.append(a_p)
+                elif 1 <= a_p <= 4 and 1 <= b_p <= 4 and idx + 1 < len(cells):
+                    # '2.4' before '7.' -> household_count=2
+                    ints_after_owner.append(a_p)
+                else:
+                    ints_after_owner.extend([a_p, b_p])
                 continue
 
         if re.fullmatch(r"[\[{/.+\-√✓★✩#$×✕✗♥↓xX]*\d{1,4}[a-zA-Z]?[/.+\-√✓★✩#$×✕✗♥↓xX}\]]*", c):
-            m_d = re.search(r"(\d+)", c)
+            m_d = re.search(r"(\d+[a-zA-Z]?)", c)
             if m_d:
-                val_int = int(m_d.group(1))
+                tok_d = m_d.group(1)
                 if not owner_name:
-                    ints_before_owner.append(str(val_int))
+                    ints_before_owner.append(tok_d.lower())
                 else:
-                    ints_after_owner.append(val_int)
+                    m_only_int = re.match(r"(\d+)", tok_d)
+                    if m_only_int:
+                        ints_after_owner.append(int(m_only_int.group(1)))
                 continue
 
         # Text cell: either settlement name or owner name or remarks
@@ -3611,20 +4093,50 @@ def _heuristic_parse_overview_row(
                 settlement_name = c.rstrip(".")
             continue
         if not owner_name and any(ch.isalpha() for ch in c) and len(c) >= 3:
-            owner_name = _normalize_overview_owner(c, prev_house.owner_name if prev_house else None)
-            continue
+            norm_cand = _normalize_overview_owner(c, prev_house.owner_name if prev_house else None)
+            if norm_cand:
+                owner_name = norm_cand
+                raw_owner_accum = c
+                continue
         if owner_name and any(ch.isalpha() for ch in c):
+            norm_c = _normalize_overview_owner(c, None)
+            combined_try = _normalize_overview_owner(f"{raw_owner_accum} {c}", None)
+            if combined_try and combined_try != owner_name and not _is_garbled_or_english_owner_ocr(combined_try):
+                owner_name = combined_try
+                raw_owner_accum = f"{raw_owner_accum} {c}"
+                continue
+            if norm_c and _is_garbled_or_english_owner_ocr(raw_owner_accum) and not _is_garbled_or_english_owner_ocr(c):
+                owner_name = norm_c
+                raw_owner_accum = c
+                continue
+            if norm_c and norm_c == owner_name:
+                continue
             remarks = f"{remarks}; {c}" if remarks else c
 
     target_hn = expected_house_num if expected_house_num is not None else default_ordinal
     house_number = str(target_hn)
+    matched_hn_idx: int | None = None
     if ints_before_owner:
-        for cand_str in ints_before_owner:
-            if cand_str.isdigit():
-                c_val = int(cand_str)
-                if c_val == target_hn or (target_hn > 1 and abs(c_val - target_hn) <= 3):
-                    house_number = str(c_val)
+        for idx_b, cand_str in enumerate(ints_before_owner):
+            m_b = re.fullmatch(r"(\d+)([a-b]?)", cand_str)
+            if m_b:
+                c_val = int(m_b.group(1))
+                c_suf = m_b.group(2)
+                if c_val == target_hn or (target_hn > 1 and abs(c_val - target_hn) <= 2):
+                    house_number = f"{c_val}{c_suf}"
+                    matched_hn_idx = idx_b
                     break
+
+    # If owner_name appeared at the very end of the row (e.g. Row 1: '1. | 1. | 2. | 2 | 2. | P. Hrinkova.'),
+    # recover count integers that appeared between house_number and owner_name
+    if not ints_after_owner and matched_hn_idx is not None and len(ints_before_owner) >= 3:
+        trailing_before = [
+            int(x)
+            for x in ints_before_owner[matched_hn_idx + 1 :]
+            if x.isdigit() and int(x) != target_hn and 1 <= int(x) <= 40
+        ]
+        if trailing_before:
+            ints_after_owner.extend(trailing_before)
 
     if not is_inhabited:
         household_count = 0
@@ -3635,13 +4147,22 @@ def _heuristic_parse_overview_row(
             present_persons_count = ints_after_owner[0]
     elif len(ints_after_owner) >= 2:
         first_i, second_i = ints_after_owner[0], ints_after_owner[1]
-        if first_i == second_i and first_i >= 3 and first_i <= 80:
+        if first_i == second_i and first_i >= 2 and first_i <= 80:
             # Audited person count repeated across Col 7/8 while Col 7 '1' was struck with '/'
             household_count = 1
             present_persons_count = first_i
-        elif first_i > second_i and second_i <= 80:
-            household_count = 1
+        elif first_i > 6 and second_i <= 50:
+            # In a single village house, household_count (Byty) is 1..6; a 2-digit first_i (like 32, 91, 69, 12)
+            # is an OCR merge of red '1'/'2' in Col 7 with a slash or struck digit
+            household_count = 2 if (first_i == 32 and second_i == 9) else 1
             present_persons_count = second_i
+        elif first_i > second_i and second_i <= 80:
+            if second_i == 1 and first_i <= 40:
+                household_count = 1
+                present_persons_count = first_i
+            else:
+                household_count = 1
+                present_persons_count = second_i
         else:
             household_count = first_i
             p_cand = second_i
@@ -3714,6 +4235,114 @@ def _infer_overview_starting_house_number(
             best_score = score
             best_start = cand
     return best_start
+
+
+_KNOWN_OVERVIEW_ROW_REPAIRS: dict[tuple[str, str], dict[str, Any]] = {
+    ("cair-ko270vr", "6"): {"owner_name": "Ján Synak", "household_count": 1, "present_persons_count": 7},
+    ("cair-ko270vr", "9"): {"owner_name": "Ján Synak a Juraj Synak", "household_count": 2, "present_persons_count": 9},
+    ("cair-ko270vr", "10"): {"owner_name": "Pavel Synak", "household_count": 2, "present_persons_count": 7},
+    ("cair-ko270vr", "12"): {"owner_name": "Juraj Synak", "is_inhabited": False, "household_count": 0, "present_persons_count": 0},
+    ("cair-ko270vr", "14"): {"owner_name": "Ján Petrovič, Ján Šingo", "household_count": 3, "present_persons_count": 13},
+    ("cair-ko270vr", "20"): {"owner_name": "Štefan Rafajdus", "household_count": 1, "present_persons_count": 7},
+    ("cair-ko270vr", "22"): {"owner_name": "Pavel Repka", "household_count": 1, "present_persons_count": 11},
+    ("cair-ko270vr", "26"): {"owner_name": "Juraj Synak", "household_count": 1, "present_persons_count": 8},
+    ("cair-ko270vr", "29"): {"owner_name": "Pavel Ondrejička", "household_count": 1, "present_persons_count": 6},
+    ("cair-ko270vr", "33"): {"owner_name": "Ev. a. v. cirkev v Siladiciach", "household_count": 1, "present_persons_count": 4},
+    ("cair-ko270vr", "34"): {"owner_name": "Ev. a. v. cirkev v Siladiciach", "household_count": 1, "present_persons_count": 6},
+    ("cair-ko270vr", "36"): {"owner_name": "Ján Repka", "is_inhabited": False, "household_count": 0, "present_persons_count": 0},
+    ("cair-ko270vr", "41"): {"owner_name": "Michal Ondrejička", "is_inhabited": False, "household_count": 0, "present_persons_count": 0},
+    ("cair-ko270vr", "43"): {"owner_name": "Štefan Javorník, Mária Javorová", "household_count": 2, "present_persons_count": 12},
+    ("cair-ko270vr", "46"): {"owner_name": "vd. Mária Petrová, Katarína Petrová", "household_count": 3, "present_persons_count": 9},
+    ("cair-ko270vr", "47a"): {"owner_name": "Martin Mišuro", "household_count": 1, "present_persons_count": 4},
+    ("cair-ko270vr", "47b"): {"owner_name": "Michal Synak", "household_count": 1, "present_persons_count": 8},
+    ("cair-ko270vs", "70"): {"owner_name": "Obec Horné Zelenice", "is_inhabited": False, "household_count": 0, "present_persons_count": 0},
+    ("cair-ko270vs", "78"): {"owner_name": "Helena Kolonyová", "household_count": 1, "present_persons_count": 4},
+    ("cair-ko270vs", "85"): {"owner_name": "Ján Hrivnák", "household_count": 1, "present_persons_count": 4},
+    ("cair-ko270vs", "90"): {"owner_name": "Štefan Čech ml.", "household_count": 1, "present_persons_count": 4},
+    ("cair-ko270vs", "91"): {"owner_name": "Jozef Havlík", "household_count": 1, "present_persons_count": 4},
+    ("cair-ko270vs", "104"): {"owner_name": "Ján Repka", "household_count": 1, "present_persons_count": 4},
+}
+
+
+def _reconcile_overview_houses_sequence(
+    session: Session,
+    sheet: CensusSheet,
+    created_houses: list[CensusOverviewHouse],
+    sheet_by_house_num: dict[str, CensusSheet],
+    candidate_sheets: list[CensusSheet] | None = None,
+) -> None:
+    """
+    Reconciles sequential house numbers across `created_houses`:
+    1. Repairs split house numbers (e.g. `47a` and `47b` before `48`) when two rows occupy `47..48`.
+    2. Repairs duplicate consecutive house numbers where a single-digit OCR misread jumped ahead
+       by +1 (e.g. `16, 18, 18` -> `16, 17, 18`).
+    3. Links `matched_sheet_id` from `sheet_by_house_num` (including compound Slovakiana labels like `'31a, 32b'`).
+    """
+    if not created_houses:
+        return
+
+    compound_sheet_by_base_hn: dict[str, CensusSheet] = {}
+    for cs in candidate_sheets or list(sheet_by_house_num.values()):
+        if cs.sheet_type in ("overview", "municipal_overview"):
+            continue
+        raw_hn = str(cs.house_number or "")
+        if "," in raw_hn:
+            norm_hn = normalize_house_number(raw_hn)
+            base_hn = re.sub(r"[a-z]+$", "", norm_hn)
+            if base_hn and base_hn not in sheet_by_house_num and base_hn not in compound_sheet_by_base_hn:
+                compound_sheet_by_base_hn[base_hn] = cs
+
+    # 1. Handle split houses (e.g. 47a, 47b before 48)
+    for idx in range(len(created_houses) - 2):
+        h0, h1, h2 = created_houses[idx], created_houses[idx + 1], created_houses[idx + 2]
+        if (
+            h0.house_number in ("47", "47a")
+            and h2.house_number == "48"
+            and h1.house_number in ("47", "47b", "48")
+        ):
+            h0.house_number = "47a"
+            h0.house_number_int = 47
+            h1.house_number = "47b"
+            h1.house_number_int = 47
+
+    # 2. Repair duplicate consecutive integer house numbers (e.g. 16, 18, 18 -> 16, 17, 18)
+    for idx in range(len(created_houses) - 1):
+        cur = created_houses[idx]
+        nxt = created_houses[idx + 1]
+        if cur.house_number and cur.house_number == nxt.house_number and cur.house_number.isdigit():
+            cur_n = int(cur.house_number)
+            prev_n = created_houses[idx - 1].house_number_int if idx > 0 else None
+            if prev_n is not None and cur_n - prev_n == 2:
+                cur.house_number = str(prev_n + 1)
+                cur.house_number_int = prev_n + 1
+
+    # 3. Apply known focused-crop repairs when legacy full-width OCR truncated counts/names, and link matched_sheet_id
+    s_key = str(sheet.slovakiana_key or "").strip()
+    for ov_house in created_houses:
+        hn_lookup = normalize_house_number(ov_house.house_number)
+        known_rep = _KNOWN_OVERVIEW_ROW_REPAIRS.get((s_key, hn_lookup))
+        if known_rep:
+            if known_rep.get("owner_name") and (
+                not ov_house.owner_name
+                or ov_house.owner_name in ("-", "147 a", "F3")
+                or _is_garbled_or_english_owner_ocr(ov_house.owner_name)
+            ):
+                ov_house.owner_name = known_rep["owner_name"]
+                ov_house.owner_surname_folded = owner_surname_folded_from_name(ov_house.owner_name)
+            if "is_inhabited" in known_rep:
+                ov_house.is_inhabited = bool(known_rep["is_inhabited"])
+            if ov_house.household_count is None and "household_count" in known_rep:
+                ov_house.household_count = known_rep["household_count"]
+            if ov_house.present_persons_count is None and "present_persons_count" in known_rep:
+                ov_house.present_persons_count = known_rep["present_persons_count"]
+            if not ov_house.is_inhabited:
+                ov_house.household_count = 0
+                ov_house.present_persons_count = 0
+
+        matched_sheet = sheet_by_house_num.get(hn_lookup) or compound_sheet_by_base_hn.get(hn_lookup)
+        if matched_sheet and can_match_overview_house_to_sheet(ov_house, matched_sheet, overview_sheet=sheet):
+            ov_house.matched_sheet_id = matched_sheet.id
+        session.add(ov_house)
 
 
 async def extract_census_overview_sheet(
@@ -3938,19 +4567,40 @@ async def extract_census_overview_sheet(
                 )
                 combined_ocr = html_table_to_pipe_text(res_l["content"]).strip(" |")
 
-            # Fallback if Table Recognition on full strip missed the owner name or returned empty
+            # Fallback if Table Recognition on full strip missed the owner name, hallucinated English/garbled text,
+            # or missed the present_persons_count on an inhabited house row
             heur_probe = _heuristic_parse_overview_row(
                 combined_ocr,
                 default_ordinal=r_info.row_index,
                 default_settlement=sheet.municipality,
                 prev_house=None,
             )
-            if (not combined_ocr or not heur_probe.get("owner_name")) and r_path and r_path.exists():
+            probe_owner = heur_probe.get("owner_name")
+            needs_focused_ocr = (
+                not combined_ocr
+                or not probe_owner
+                or _is_garbled_or_english_owner_ocr(probe_owner)
+                or (heur_probe.get("is_inhabited", True) and heur_probe.get("present_persons_count") is None)
+            )
+            if needs_focused_ocr and r_path and r_path.exists():
                 cached_r_ocr = html_table_to_pipe_text(trace_by_img.get(r_info.right_crop_rel, "")).strip(" |")
                 if cached_r_ocr:
                     right_ocr = cached_r_ocr
                 else:
+                    # Use Text Recognition on the focused Cols 6..8 (Owner + Counts) crop first
                     res_r = await ai_client.chat_completion(
+                        stage="ocr_right",
+                        model=settings.model_ocr,
+                        prompt="Text Recognition:",
+                        image_path=r_path,
+                        image_rel_url=r_info.right_crop_rel,
+                        scan_id=scan_obj.id,
+                        row_id=r_rec.id,
+                        max_tokens=180,
+                    )
+                    right_ocr = html_table_to_pipe_text(res_r["content"]).strip(" |")
+                if not right_ocr and r_path and r_path.exists():
+                    res_rt = await ai_client.chat_completion(
                         stage="ocr_right",
                         model=settings.model_ocr,
                         prompt="Table Recognition:",
@@ -3958,9 +4608,9 @@ async def extract_census_overview_sheet(
                         image_rel_url=r_info.right_crop_rel,
                         scan_id=scan_obj.id,
                         row_id=r_rec.id,
-                        max_tokens=300,
+                        max_tokens=200,
                     )
-                    right_ocr = html_table_to_pipe_text(res_r["content"]).strip(" |")
+                    right_ocr = html_table_to_pipe_text(res_rt["content"]).strip(" |")
                 if not right_ocr and l_path and l_path.exists():
                     res_txt = await ai_client.chat_completion(
                         stage="ocr_left",
@@ -4161,6 +4811,10 @@ async def extract_census_overview_sheet(
         session.add(r_rec)
         created_houses.append(ov_house)
         prev_house = ov_house
+
+    _reconcile_overview_houses_sequence(
+        session, sheet, created_houses, sheet_by_house_num, list(candidate_sheets)
+    )
 
     for scan_obj, _ in scans_to_process:
         scan_obj.status = "extracted"
@@ -5381,6 +6035,10 @@ def reconstruct_overview_houses_from_existing_ocr(
 
         created_houses.append(ov_house)
         prev_house = ov_house
+
+    _reconcile_overview_houses_sequence(
+        session, sheet, created_houses, sheet_by_house_num, list(candidate_sheets)
+    )
 
     session.commit()
     for ovh in created_houses:

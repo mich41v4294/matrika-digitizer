@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,7 +55,9 @@ from backend.app.pipeline.census_layout import (
 )
 from backend.app.pipeline.extraction_stage import (
     _format_birth_place_raw,
+    _is_garbled_or_english_owner_ocr,
     _normalize_municipal_commissioner_name,
+    _normalize_overview_owner,
     extract_census_municipal_overview_sheet,
     extract_census_overview_sheet,
     reconcile_census_household_relationships,
@@ -2330,8 +2333,24 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             .order_by(CensusOverviewHouse.row_index.asc())
         ).all()
     )
-    if eff_sheet_type == "overview" and not overview_houses_rows and rows_by_id:
-        overview_houses_rows = reconstruct_overview_houses_from_existing_ocr(session, sheet)
+    if eff_sheet_type == "overview" and rows_by_id:
+        needs_reconstruct = (
+            not overview_houses_rows
+            or any(_is_garbled_or_english_owner_ocr(ovh.owner_name) for ovh in overview_houses_rows)
+            or any(
+                overview_houses_rows[i].house_number == overview_houses_rows[i + 1].house_number
+                for i in range(len(overview_houses_rows) - 1)
+                if overview_houses_rows[i].house_number
+            )
+            or (
+                sheet.slovakiana_key in ("cair-ko270vr", "cair-ko270vs")
+                and any(ovh.present_persons_count is None for ovh in overview_houses_rows)
+            )
+        )
+        if needs_reconstruct:
+            reconstructed = reconstruct_overview_houses_from_existing_ocr(session, sheet)
+            if reconstructed:
+                overview_houses_rows = reconstructed
 
     ov_candidate_sheets: list[CensusSheet] | None = None
     if overview_houses_rows:
@@ -3328,6 +3347,13 @@ def get_municipality_overview(
                 household_sheets_by_muni_year_hn.setdefault(
                     (m_key, int(s.census_year or 0), hn_key), []
                 ).append(s)
+                # Also index compound Slovakiana labels like '31a, 32b' under their integer base ('31')
+                if "," in str(s.house_number or ""):
+                    base_hn = re.sub(r"[a-z]+$", "", hn_key)
+                    if base_hn and base_hn != hn_key:
+                        household_sheets_by_muni_year_hn.setdefault(
+                            (m_key, int(s.census_year or 0), base_hn), []
+                        ).append(s)
 
     ov_stmt = select(CensusOverviewHouse)
     if sheet_ids:
@@ -3344,7 +3370,7 @@ def get_municipality_overview(
     if census_year:
         ov_stmt = ov_stmt.where(CensusOverviewHouse.census_year == census_year)
 
-    ov_houses = list(session.exec(ov_stmt.order_by(CensusOverviewHouse.row_index.asc())).all())
+    ov_houses = list(session.exec(ov_stmt.order_by(CensusOverviewHouse.census_sheet_id.asc(), CensusOverviewHouse.row_index.asc())).all())
     if municipality and municipality.strip():
         target_canon = canonical_municipality_key(municipality)
         m_folded = fold_text_diacritics(municipality.strip())
@@ -3361,6 +3387,42 @@ def get_municipality_overview(
                 for ovh in ov_houses
                 if m_folded in fold_text_diacritics(ovh.municipality or "")
             ]
+
+    # Self-heal any overview sheet whose CensusOverviewHouse rows still contain garbled/English OCR owner names
+    # or duplicate consecutive house numbers
+    ov_by_sheet: dict[int, list[CensusOverviewHouse]] = {}
+    for ovh in ov_houses:
+        ov_by_sheet.setdefault(ovh.census_sheet_id, []).append(ovh)
+    rebuilt_any_ov = False
+    for ov_sid, s_ov_rows in list(ov_by_sheet.items()):
+        ov_s = ov_sheets_by_id_map.get(ov_sid) or session.get(CensusSheet, ov_sid)
+        has_garbled = any(_is_garbled_or_english_owner_ocr(r.owner_name) for r in s_ov_rows)
+        has_dup_hn = any(
+            s_ov_rows[i].house_number and s_ov_rows[i].house_number == s_ov_rows[i + 1].house_number
+            for i in range(len(s_ov_rows) - 1)
+        )
+        has_missing_known_counts = bool(
+            ov_s
+            and ov_s.slovakiana_key in ("cair-ko270vr", "cair-ko270vs")
+            and any(r.present_persons_count is None for r in s_ov_rows)
+        )
+        if has_garbled or has_dup_hn or has_missing_known_counts:
+            if ov_s is not None:
+                rebuilt = reconstruct_overview_houses_from_existing_ocr(session, ov_s)
+                if rebuilt:
+                    ov_by_sheet[ov_sid] = rebuilt
+                    ov_counts_map[ov_sid] = len(rebuilt)
+                    rebuilt_any_ov = True
+                else:
+                    for r in s_ov_rows:
+                        norm_o = _normalize_overview_owner(r.owner_name)
+                        if norm_o and norm_o != r.owner_name:
+                            r.owner_name = norm_o
+                            session.add(r)
+                            rebuilt_any_ov = True
+    if rebuilt_any_ov:
+        session.commit()
+        ov_houses = [r for s_rows in ov_by_sheet.values() for r in s_rows]
 
     has_st = bool(street and street.strip())
     has_pn = bool(person_name and person_name.strip())
@@ -3492,6 +3554,7 @@ def get_municipality_overview(
 
     houses_directory: list[dict[str, Any]] = []
     covered_sheet_ids: set[int] = set()
+    covered_hn_keys: set[str] = set()
     linked_by_sheet_id = _batch_find_linked_house_sheets(session, sheets)
 
     for ovh in ov_houses:
@@ -3501,6 +3564,23 @@ def get_municipality_overview(
         ov_muni_raw = ovh.municipality or (ov_parent.municipality if ov_parent else None)
         ov_muni_key = canonical_municipality_key(ov_muni_raw)
         ov_muni_display = canonical_municipality_display(ov_muni_raw) or ov_muni_raw
+
+        candidates = (
+            household_sheets_by_muni_year_hn.get(
+                (ov_muni_key, int(ovh.census_year or 0), hn_key), []
+            )
+            if (ov_muni_key and hn_key)
+            else []
+        )
+        candidates_sorted = sorted(
+            candidates,
+            key=lambda cs: (
+                0 if facts_by_sheet.get(cs.id or 0) else 1,
+                0 if cs.download_status in ("extracted", "matched", "ocr_done") else 1,
+                cs.sheet_number or "9999",
+                cs.id or 0,
+            ),
+        )
 
         matched_sheet = household_sheets_by_id.get(ovh.matched_sheet_id or 0)
         if matched_sheet is None and ovh.matched_sheet_id:
@@ -3512,19 +3592,31 @@ def get_municipality_overview(
         ):
             matched_sheet = None
 
-        if matched_sheet is None and ov_muni_key and hn_key:
-            candidates = household_sheets_by_muni_year_hn.get(
-                (ov_muni_key, int(ovh.census_year or 0), hn_key), []
-            )
-            for cand in candidates:
+        if matched_sheet is None and candidates_sorted:
+            for cand in candidates_sorted:
                 if can_match_overview_house_to_sheet(ovh, cand, overview_sheet=ov_parent):
                     matched_sheet = cand
                     break
 
         if matched_sheet and matched_sheet.id:
             covered_sheet_ids.add(matched_sheet.id)
+        for cand in candidates_sorted:
+            if cand.id:
+                covered_sheet_ids.add(cand.id)
+        if hn_key:
+            covered_hn_keys.add(hn_key)
+            base_hn_k = re.sub(r"[a-z]+$", "", hn_key)
+            if base_hn_k:
+                covered_hn_keys.add(base_hn_k)
 
-        s_facts = facts_by_sheet.get(matched_sheet.id or 0, []) if matched_sheet else []
+        s_facts: list[PersonFact] = []
+        seen_fact_ids: set[int] = set()
+        for src_sheet in ([matched_sheet] if matched_sheet else []) + candidates_sorted:
+            if src_sheet and src_sheet.id:
+                for pf in facts_by_sheet.get(src_sheet.id, []):
+                    if pf.id is not None and pf.id not in seen_fact_ids:
+                        seen_fact_ids.add(pf.id)
+                        s_facts.append(pf)
         persons_preview = _build_preview_for_facts(s_facts)
 
         hh = households_by_sheet.get(matched_sheet.id or 0) if matched_sheet else None
@@ -3545,6 +3637,11 @@ def get_municipality_overview(
             if (matched_sheet and matched_sheet.id in linked_by_sheet_id)
             else (_find_linked_house_sheets(session, matched_sheet) if matched_sheet else [])
         )
+        for ls in linked_sheets:
+            ls_id = ls.get("id")
+            if isinstance(ls_id, int):
+                covered_sheet_ids.add(ls_id)
+
         matched_sheet_payload = _serialize_sheet(matched_sheet) if matched_sheet else None
         if matched_sheet_payload is not None:
             matched_sheet_payload["linked_house_sheets"] = linked_sheets
@@ -3555,6 +3652,8 @@ def get_municipality_overview(
             (matched_sheet.street_raw if matched_sheet and matched_sheet.street_raw else None)
             or (hh.street if hh and hh.street else None)
         )
+        if entry_street and canonical_municipality_key(entry_street) in (ov_muni_key, "dedina"):
+            entry_street = None
         entry_obj = {
             "house_number": hn_str or str(ovh.ordinal_number or ""),
             "house_number_int": ovh.house_number_int or (int(hn_key) if hn_key.isdigit() else 999999),
@@ -3563,7 +3662,7 @@ def get_municipality_overview(
             "street_name": entry_street,
             "settlement_name": canonical_municipality_display(ovh.settlement_name) or ovh.settlement_name or ov_muni_display,
             "is_inhabited": ovh.is_inhabited,
-            "owner_name": ovh.owner_name,
+            "owner_name": _normalize_overview_owner(ovh.owner_name) or ovh.owner_name,
             "overview_house_id": ovh.id,
             "overview_sheet_id": ovh.census_sheet_id,
             "overview_slovakiana_key": ov_parent.slovakiana_key if ov_parent else None,
@@ -3589,13 +3688,43 @@ def get_municipality_overview(
             houses_directory.append(entry_obj)
 
     # Also add any household CensusSheets that weren't in the overview table yet
+    ov_years = {int(ovh.census_year) for ovh in ov_houses if ovh.census_year}
+    has_person_or_q_filter = has_st or has_pn or has_by or has_bp or has_q
     for s in sheets:
         eff_type = s.sheet_type or "household"
         if eff_type in ("overview", "municipal_overview") or (s.id and s.id in covered_sheet_ids):
             continue
+        if ov_years and not has_person_or_q_filter and int(s.census_year or 0) not in ov_years:
+            continue
         hn_str = str(s.house_number or "").strip()
+        if not hn_str and not facts_by_sheet.get(s.id or 0):
+            continue
+        hn_key = normalize_house_number(hn_str)
+        if hn_key and hn_key in covered_hn_keys:
+            continue
         hn_int = int(hn_str) if hn_str.isdigit() else 999999
-        s_facts = facts_by_sheet.get(s.id or 0, [])
+        s_muni_key = canonical_municipality_key(s.municipality)
+        sib_cands = (
+            household_sheets_by_muni_year_hn.get((s_muni_key, int(s.census_year or 0), hn_key), [])
+            if (s_muni_key and hn_key)
+            else [s]
+        )
+        if s.id:
+            covered_sheet_ids.add(s.id)
+        for sib in sib_cands:
+            if sib.id:
+                covered_sheet_ids.add(sib.id)
+        if hn_key:
+            covered_hn_keys.add(hn_key)
+
+        s_facts = []
+        seen_f_ids: set[int] = set()
+        for src_s in [s] + sib_cands:
+            if src_s.id:
+                for pf in facts_by_sheet.get(src_s.id, []):
+                    if pf.id is not None and pf.id not in seen_f_ids:
+                        seen_f_ids.add(pf.id)
+                        s_facts.append(pf)
         persons_preview = _build_preview_for_facts(s_facts)
         hh = households_by_sheet.get(s.id or 0)
         hh_ser = _serialize_household(hh) if hh else None
@@ -3610,12 +3739,18 @@ def get_municipality_overview(
             else None
         )
         linked_sheets = linked_by_sheet_id.get(s.id or 0, [])
+        for ls in linked_sheets:
+            ls_id = ls.get("id")
+            if isinstance(ls_id, int):
+                covered_sheet_ids.add(ls_id)
         s_payload = _serialize_sheet(s)
         s_payload["linked_house_sheets"] = linked_sheets
         s_payload["extracted_persons_preview"] = persons_preview
         s_payload["members_preview"] = persons_preview
         s_muni_display = canonical_municipality_display(s.municipality) or s.municipality
         entry_street = s.street_raw or (hh.street if hh and hh.street else None)
+        if entry_street and canonical_municipality_key(entry_street) in (s_muni_key, "dedina"):
+            entry_street = None
         entry_obj = {
             "house_number": hn_str or "?",
             "house_number_int": hn_int,

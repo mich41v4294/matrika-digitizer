@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   Activity,
   AlertCircle,
+  BarChart3,
   Check,
+  Clock,
+  Copy,
   Cpu,
+  Download,
   Eye,
+  FileText,
   Play,
   RefreshCw,
   Send,
@@ -13,7 +18,13 @@ import {
   Sliders,
   Sparkles,
   Terminal,
+  ThumbsDown,
+  ThumbsUp,
+  Trash2,
 } from "lucide-react";
+import OcrFeedbackControls, {
+  type OcrFeedbackItem,
+} from "../components/OcrFeedbackControls";
 import {
   FUNCTIONAL_FLAG_DESCRIPTORS,
   NAVIGATION_FLAG_DESCRIPTORS,
@@ -69,7 +80,91 @@ interface ScanDetail {
     angle_right_deg?: number;
     raw_ocr_combined: string | null;
     stitched_crop_url: string | null;
+    fact?: { id: number } | null;
+    ocr_feedback?: OcrFeedbackItem | null;
   }>;
+}
+
+interface ModelComboStat {
+  model_combo: string;
+  ocr_model: string;
+  decision_model: string | null;
+  extract_model: string;
+  layout_model: string | null;
+  is_active_combo: boolean;
+  total_rated: number;
+  correct_count: number;
+  incorrect_count: number;
+  correctness_rate_pct: number | null;
+  rows_processed: number;
+  avg_total_ms: number;
+  min_total_ms: number;
+  max_total_ms: number;
+  steps: {
+    layout_ms: number;
+    scan_layout_ms: number;
+    ocr_ms: number;
+    ocr_header_ms: number;
+    ocr_left_ms: number;
+    ocr_right_ms: number;
+    decision_ms: number;
+    extract_ms: number;
+    mcp_ms: number;
+  };
+  avg_tokens: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    reasoning_tokens: number;
+  };
+}
+
+interface IndividualStepStat {
+  stage: string;
+  canonical_stage: string;
+  model_or_tool: string;
+  calls_count: number;
+  ok_count: number;
+  error_count: number;
+  avg_duration_ms: number;
+  min_duration_ms: number;
+  max_duration_ms: number;
+  total_duration_ms: number;
+  avg_prompt_tokens: number;
+  avg_completion_tokens: number;
+  avg_reasoning_tokens: number;
+  rated_rows_count: number;
+  correct_rows_count: number;
+  incorrect_rows_count: number;
+  correctness_rate_pct: number | null;
+}
+
+interface FeedbackStatsState {
+  summary: {
+    total_feedback: number;
+    correct_count: number;
+    incorrect_count: number;
+    correctness_rate_pct: number | null;
+    total_rows_analyzed: number;
+    avg_total_duration_ms: number;
+    avg_steps_ms: {
+      layout_ms: number;
+      ocr_ms: number;
+      ocr_header_ms: number;
+      ocr_left_ms: number;
+      ocr_right_ms: number;
+      decision_ms: number;
+      extract_ms: number;
+      mcp_ms: number;
+    };
+    report_files?: {
+      markdown_path: string;
+      json_path: string;
+      relative_markdown_path: string;
+      relative_json_path: string;
+    };
+  };
+  model_combos: ModelComboStat[];
+  individual_steps: IndividualStepStat[];
 }
 
 export type PipelineStageKey = "ocr" | "decision" | "extract" | "layout";
@@ -368,6 +463,118 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
   const [customResult, setCustomResult] = useState<string | null>(null);
   const [customError, setCustomError] = useState<string | null>(null);
 
+  // OCR Feedback & Model Combo Statistics State
+  const [feedbackList, setFeedbackList] = useState<OcrFeedbackItem[]>([]);
+  const [feedbackStats, setFeedbackStats] = useState<FeedbackStatsState | null>(
+    null
+  );
+  const [feedbackVerdictFilter, setFeedbackVerdictFilter] = useState<
+    "" | "incorrect" | "correct"
+  >("");
+  const [selectedFeedbackItem, setSelectedFeedbackItem] =
+    useState<OcrFeedbackItem | null>(null);
+  const [reportMarkdown, setReportMarkdown] = useState<string>("");
+  const [showReportPreview, setShowReportPreview] = useState<boolean>(false);
+  const [copiedReport, setCopiedReport] = useState<boolean>(false);
+  const [editingFeedbackId, setEditingFeedbackId] = useState<number | null>(
+    null
+  );
+  const [editingCommentText, setEditingCommentText] = useState<string>("");
+
+  const loadFeedbackAndStats = async (
+    filterOverride?: "" | "incorrect" | "correct"
+  ) => {
+    const activeFilter =
+      filterOverride !== undefined ? filterOverride : feedbackVerdictFilter;
+    try {
+      const url = `/api/debug/feedback?limit=200${
+        activeFilter ? `&verdict=${encodeURIComponent(activeFilter)}` : ""
+      }`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        const items: OcrFeedbackItem[] = data.feedback || [];
+        setFeedbackList(items);
+        if (data.stats) {
+          setFeedbackStats(data.stats);
+        }
+        if (typeof data.report_markdown === "string") {
+          setReportMarkdown(data.report_markdown);
+        }
+        setSelectedFeedbackItem((prev) => {
+          if (!prev) return items[0] ?? null;
+          return items.find((i) => i.id === prev.id) ?? items[0] ?? null;
+        });
+      }
+    } catch {
+      // Ignore transient poll errors
+    }
+  };
+
+  const handleUpdateFeedbackItem = async (
+    item: OcrFeedbackItem,
+    nextVerdict: "correct" | "incorrect",
+    nextComment?: string
+  ) => {
+    try {
+      const res = await fetch("/api/debug/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          verdict: nextVerdict,
+          comment:
+            nextComment !== undefined ? nextComment.trim() || null : item.comment,
+          target_type: item.target_type,
+          row_id: item.row_id,
+          scan_id: item.scan_id,
+          census_sheet_id: item.census_sheet_id,
+          person_fact_id: item.person_fact_id,
+          overview_house_id: item.overview_house_id,
+          municipal_district_id: item.municipal_district_id,
+        }),
+      });
+      if (res.ok) {
+        setEditingFeedbackId(null);
+        await loadFeedbackAndStats();
+        if (selectedScanId) {
+          const scRes = await fetch(`/api/scans/${selectedScanId}`);
+          if (scRes.ok) setScanDetail(await scRes.json());
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDeleteFeedbackItem = async (feedbackId: number) => {
+    try {
+      const res = await fetch(`/api/debug/feedback/${feedbackId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        await loadFeedbackAndStats();
+        if (selectedScanId) {
+          const scRes = await fetch(`/api/scans/${selectedScanId}`);
+          if (scRes.ok) setScanDetail(await scRes.json());
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleCopyReportForLlm = async (textToCopy?: string) => {
+    const content = textToCopy || reportMarkdown;
+    if (!content) return;
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedReport(true);
+      window.setTimeout(() => setCopiedReport(false), 3000);
+    } catch {
+      // ignore clipboard error
+    }
+  };
+
   useEffect(() => {
     if (routeScanId) {
       const parsed = Number(routeScanId);
@@ -461,17 +668,20 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
 
   useEffect(() => {
     loadAiConfig();
+    void loadFeedbackAndStats();
     void fetchBackendFeatureFlags();
   }, []);
 
   useEffect(() => {
     loadDebug();
+    void loadFeedbackAndStats();
     const interval = setInterval(() => {
       if (document.visibilityState === "hidden") return;
       void loadDebug();
+      void loadFeedbackAndStats();
     }, 6000);
     return () => clearInterval(interval);
-  }, [stageFilter]);
+  }, [stageFilter, feedbackVerdictFilter]);
 
   useEffect(() => {
     if (!selectedScanId) return;
@@ -795,6 +1005,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
         }
       }
       await loadDebug();
+      await loadFeedbackAndStats();
       refreshStatus();
     } finally {
       setRerunningRowId(null);
@@ -953,6 +1164,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
               onClick={() => {
                 loadDebug();
                 loadAiConfig();
+                void loadFeedbackAndStats();
               }}
               className="px-3 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-700 border border-stone-600 font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
             >
@@ -1166,6 +1378,889 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Model Combo Statistics & Individual Step Timing Breakdown View */}
+      <div
+        data-testid="debug-model-combo-stats-card"
+        className="bg-white rounded-xl p-4 border-2 border-emerald-600/80 shadow-xs space-y-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3">
+          <div>
+            <h3 className="text-base font-bold text-stone-900 flex items-center gap-2">
+              <BarChart3 className="w-5 h-5 text-emerald-700" />
+              <span>
+                {lang === "sk"
+                  ? "Štatistiky úspešnosti kombinácií modelov a trvania krokov (Model Combo Statistics)"
+                  : "Model Combo Correctness Rate & Step Timing Breakdown"}
+              </span>
+            </h3>
+            <p className="text-xs text-stone-600 mt-0.5">
+              {lang === "sk"
+                ? "Porovnanie presnosti OCR podľa hodnotení používateľa (OCR ✓ / OCR ✗) a priemerného času spracovania riadku s rozpadom na jednotlivé kroky (Layout, OCR, Decision, Extract, MCP)."
+                : "Comparison of OCR accuracy based on user ratings (OCR ✓ / OCR ✗) and average row processing time broken down by individual pipeline steps (Layout, OCR, Decision, Extract, MCP)."}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <a
+              href={`/api/debug/feedback/export?format=md${
+                feedbackVerdictFilter ? `&verdict=${feedbackVerdictFilter}` : ""
+              }`}
+              download
+              data-testid="download-llm-report-md"
+              className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5 text-amber-400" />
+              <span>
+                {lang === "sk"
+                  ? "Stiahnuť súbor pre LLM (.md)"
+                  : "Download LLM Debug File (.md)"}
+              </span>
+            </a>
+            <a
+              href={`/api/debug/feedback/export?format=json${
+                feedbackVerdictFilter ? `&verdict=${feedbackVerdictFilter}` : ""
+              }`}
+              download
+              data-testid="download-llm-report-json"
+              className="px-3 py-1.5 rounded-lg bg-stone-200 hover:bg-stone-300 text-stone-900 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5 text-stone-700" />
+              <span>JSON (.json)</span>
+            </a>
+          </div>
+        </div>
+
+        {/* Summary KPI Cards */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-stone-50 rounded-xl p-3 border border-stone-200">
+            <div className="text-xs text-stone-600 font-semibold">
+              {lang === "sk"
+                ? "Celková úspešnosť (Correctness Rate)"
+                : "Overall Correctness Rate"}
+            </div>
+            <div
+              data-testid="stats-overall-correctness-rate"
+              className="text-xl font-bold text-stone-900 mt-1"
+            >
+              {feedbackStats?.summary.correctness_rate_pct !== null &&
+              feedbackStats?.summary.correctness_rate_pct !== undefined
+                ? `${feedbackStats.summary.correctness_rate_pct}%`
+                : "—"}
+            </div>
+            <div className="text-xs text-stone-500 mt-0.5">
+              {lang === "sk"
+                ? `Hodnotených riadkov: ${feedbackStats?.summary.total_feedback ?? 0}`
+                : `Rated rows: ${feedbackStats?.summary.total_feedback ?? 0}`}
+            </div>
+          </div>
+
+          <div className="bg-emerald-50/70 rounded-xl p-3 border border-emerald-200">
+            <div className="text-xs text-emerald-900 font-semibold flex items-center gap-1">
+              <ThumbsUp className="w-3.5 h-3.5 text-emerald-700" />
+              <span>{lang === "sk" ? "Správne OCR (✓)" : "Correct OCR (✓)"}</span>
+            </div>
+            <div
+              data-testid="stats-correct-count"
+              className="text-xl font-bold text-emerald-900 mt-1"
+            >
+              {feedbackStats?.summary.correct_count ?? 0}
+            </div>
+            <div className="text-xs text-emerald-800 mt-0.5">
+              {lang === "sk" ? "Potvrdené používateľom" : "Verified by user"}
+            </div>
+          </div>
+
+          <div className="bg-red-50/70 rounded-xl p-3 border border-red-200">
+            <div className="text-xs text-red-900 font-semibold flex items-center gap-1">
+              <ThumbsDown className="w-3.5 h-3.5 text-red-700" />
+              <span>{lang === "sk" ? "Chybné OCR (✗)" : "Incorrect OCR (✗)"}</span>
+            </div>
+            <div
+              data-testid="stats-incorrect-count"
+              className="text-xl font-bold text-red-900 mt-1"
+            >
+              {feedbackStats?.summary.incorrect_count ?? 0}
+            </div>
+            <div className="text-xs text-red-800 mt-0.5">
+              {lang === "sk" ? "Zahrnuté v súbore pre LLM" : "Included in LLM debug file"}
+            </div>
+          </div>
+
+          <div className="bg-amber-50/70 rounded-xl p-3 border border-amber-200">
+            <div className="text-xs text-amber-950 font-semibold flex items-center gap-1">
+              <Clock className="w-3.5 h-3.5 text-amber-700" />
+              <span>
+                {lang === "sk"
+                  ? "Priemerný čas na riadok"
+                  : "Avg Time per Row"}
+              </span>
+            </div>
+            <div
+              data-testid="stats-avg-total-ms"
+              className="text-xl font-bold text-amber-950 mt-1 font-mono"
+            >
+              {feedbackStats?.summary.avg_total_duration_ms ?? 0} ms
+            </div>
+            <div className="text-xs text-amber-900 mt-0.5 font-mono">
+              OCR: {feedbackStats?.summary.avg_steps_ms.ocr_ms ?? 0}ms · Ext:{" "}
+              {feedbackStats?.summary.avg_steps_ms.extract_ms ?? 0}ms
+            </div>
+          </div>
+        </div>
+
+        {/* Model Combo Correctness & Step Timing Table */}
+        <div className="space-y-2">
+          <div className="font-bold text-xs uppercase tracking-wider text-stone-700">
+            {lang === "sk"
+              ? "1. Úspešnosť a priemerný čas podľa kombinácie modelov (Model Combos)"
+              : "1. Correctness Rate & Average Time by Model Combination"}
+          </div>
+          <div className="overflow-x-auto border border-stone-200 rounded-xl">
+            <table
+              data-testid="model-combos-stats-table"
+              className="w-full text-left border-collapse text-xs"
+            >
+              <thead>
+                <tr className="bg-stone-100 border-b border-stone-200 text-stone-800 font-bold">
+                  <th className="py-2.5 px-3">
+                    {lang === "sk" ? "Kombinácia modelov (OCR + Extract)" : "Model Combo"}
+                  </th>
+                  <th className="py-2.5 px-3">
+                    {lang === "sk" ? "Úspešnosť (Correctness)" : "Correctness Rate"}
+                  </th>
+                  <th className="py-2.5 px-3 text-right">
+                    {lang === "sk" ? "Priem. čas spolu" : "Avg Total Time"}
+                  </th>
+                  <th className="py-2.5 px-3 text-right">Layout</th>
+                  <th className="py-2.5 px-3 text-right">
+                    {lang === "sk" ? "OCR (Ľavá / Pravá / Hlav.)" : "OCR (L / R / Hdr)"}
+                  </th>
+                  <th className="py-2.5 px-3 text-right">Decision</th>
+                  <th className="py-2.5 px-3 text-right">Extract</th>
+                  <th className="py-2.5 px-3 text-right">MCP</th>
+                  <th className="py-2.5 px-3 min-w-[160px]">
+                    {lang === "sk" ? "Pomer krokov" : "Step Breakdown"}
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-200">
+                {(feedbackStats?.model_combos || []).map((c) => {
+                  const totMs = Math.max(1, c.avg_total_ms || 1);
+                  const layPct = Math.round((100 * c.steps.layout_ms) / totMs);
+                  const ocrPct = Math.round((100 * c.steps.ocr_ms) / totMs);
+                  const decPct = Math.round((100 * c.steps.decision_ms) / totMs);
+                  const extPct = Math.round((100 * c.steps.extract_ms) / totMs);
+                  const mcpPct = Math.max(
+                    0,
+                    100 - layPct - ocrPct - decPct - extPct
+                  );
+                  return (
+                    <tr
+                      key={c.model_combo}
+                      className={
+                        c.is_active_combo ? "bg-amber-50/50" : "hover:bg-stone-50"
+                      }
+                    >
+                      <td className="py-2.5 px-3 align-middle">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-mono font-bold text-stone-900">
+                            {c.model_combo}
+                          </span>
+                          {c.is_active_combo && (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-200 text-amber-950 font-bold text-[11px]">
+                              {lang === "sk" ? "Aktívna" : "Active"}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-stone-500 font-mono mt-0.5">
+                          Layout: {c.layout_model || "opencv"} · Decision:{" "}
+                          {c.decision_model || "deterministic"}
+                        </div>
+                      </td>
+
+                      <td className="py-2.5 px-3 align-middle">
+                        {c.correctness_rate_pct !== null ? (
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`px-2 py-0.5 rounded-full font-bold text-xs ${
+                                  c.correctness_rate_pct >= 80
+                                    ? "bg-emerald-100 text-emerald-900"
+                                    : c.correctness_rate_pct >= 50
+                                    ? "bg-amber-100 text-amber-900"
+                                    : "bg-red-100 text-red-900"
+                                }`}
+                              >
+                                {c.correctness_rate_pct}%
+                              </span>
+                              <span className="text-stone-700 font-medium">
+                                <span className="text-emerald-700 font-bold">
+                                  {c.correct_count}✓
+                                </span>{" "}
+                                /{" "}
+                                <span className="text-red-700 font-bold">
+                                  {c.incorrect_count}✗
+                                </span>{" "}
+                                ({c.total_rated}{" "}
+                                {lang === "sk" ? "hodnotených" : "rated"})
+                              </span>
+                            </div>
+                            <div className="w-32 bg-red-200 rounded-full h-1.5 overflow-hidden">
+                              <div
+                                className="bg-emerald-600 h-full"
+                                style={{ width: `${c.correctness_rate_pct}%` }}
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-stone-500 italic">
+                            {lang === "sk"
+                              ? `Zatiaľ nehodnotené (${c.rows_processed} riadkov)`
+                              : `Unrated (${c.rows_processed} rows)`}
+                          </span>
+                        )}
+                      </td>
+
+                      <td className="py-2.5 px-3 align-middle text-right font-mono font-bold text-stone-900">
+                        <div>{c.avg_total_ms} ms</div>
+                        <div className="text-[11px] font-normal text-stone-500">
+                          {(c.avg_total_ms / 1000).toFixed(2)} s
+                        </div>
+                      </td>
+
+                      <td className="py-2.5 px-3 align-middle text-right font-mono text-stone-700">
+                        <div>{c.steps.layout_ms} ms</div>
+                        {c.steps.scan_layout_ms > 0 && (
+                          <div className="text-[11px] text-stone-500">
+                            scan: {c.steps.scan_layout_ms} ms
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="py-2.5 px-3 align-middle text-right font-mono text-stone-800">
+                        <div className="font-semibold">{c.steps.ocr_ms} ms</div>
+                        <div className="text-[11px] text-stone-500">
+                          L:{c.steps.ocr_left_ms} · R:{c.steps.ocr_right_ms} · H:
+                          {c.steps.ocr_header_ms}
+                        </div>
+                      </td>
+
+                      <td className="py-2.5 px-3 align-middle text-right font-mono text-stone-700">
+                        {c.steps.decision_ms} ms
+                      </td>
+
+                      <td className="py-2.5 px-3 align-middle text-right font-mono font-semibold text-stone-900">
+                        {c.steps.extract_ms} ms
+                      </td>
+
+                      <td className="py-2.5 px-3 align-middle text-right font-mono text-stone-700">
+                        {c.steps.mcp_ms} ms
+                      </td>
+
+                      <td className="py-2.5 px-3 align-middle">
+                        {c.avg_total_ms > 0 ? (
+                          <div className="space-y-1">
+                            <div className="w-full h-2.5 rounded-full bg-stone-200 overflow-hidden flex">
+                              {c.steps.layout_ms > 0 && (
+                                <div
+                                  className="bg-sky-500 h-full"
+                                  style={{ width: `${layPct}%` }}
+                                  title={`Layout: ${c.steps.layout_ms} ms (${layPct}%)`}
+                                />
+                              )}
+                              {c.steps.ocr_ms > 0 && (
+                                <div
+                                  className="bg-amber-500 h-full"
+                                  style={{ width: `${ocrPct}%` }}
+                                  title={`OCR: ${c.steps.ocr_ms} ms (${ocrPct}%)`}
+                                />
+                              )}
+                              {c.steps.decision_ms > 0 && (
+                                <div
+                                  className="bg-purple-500 h-full"
+                                  style={{ width: `${decPct}%` }}
+                                  title={`Decision: ${c.steps.decision_ms} ms (${decPct}%)`}
+                                />
+                              )}
+                              {c.steps.extract_ms > 0 && (
+                                <div
+                                  className="bg-emerald-600 h-full"
+                                  style={{ width: `${extPct}%` }}
+                                  title={`Extract: ${c.steps.extract_ms} ms (${extPct}%)`}
+                                />
+                              )}
+                              {c.steps.mcp_ms > 0 && (
+                                <div
+                                  className="bg-indigo-500 h-full"
+                                  style={{ width: `${mcpPct}%` }}
+                                  title={`MCP: ${c.steps.mcp_ms} ms (${mcpPct}%)`}
+                                />
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-1.5 text-[10px] font-mono text-stone-600">
+                              <span className="text-sky-800">Lay {layPct}%</span>
+                              <span className="text-amber-800">OCR {ocrPct}%</span>
+                              {c.steps.decision_ms > 0 && (
+                                <span className="text-purple-800">
+                                  Dec {decPct}%
+                                </span>
+                              )}
+                              <span className="text-emerald-800">
+                                Ext {extPct}%
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-stone-400">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Individual Pipeline Steps Breakdown Table */}
+        {(feedbackStats?.individual_steps?.length ?? 0) > 0 && (
+          <div className="space-y-2 pt-1">
+            <div className="font-bold text-xs uppercase tracking-wider text-stone-700">
+              {lang === "sk"
+                ? "2. Rozpad jednotlivých krokov spracovania (Individual Pipeline Steps)"
+                : "2. Individual Pipeline Steps Breakdown"}
+            </div>
+            <div className="overflow-x-auto border border-stone-200 rounded-xl">
+              <table
+                data-testid="individual-steps-stats-table"
+                className="w-full text-left border-collapse text-xs"
+              >
+                <thead>
+                  <tr className="bg-stone-100 border-b border-stone-200 text-stone-800 font-bold">
+                    <th className="py-2 px-3">
+                      {lang === "sk" ? "Krok / Fáza" : "Step / Stage"}
+                    </th>
+                    <th className="py-2 px-3">
+                      {lang === "sk" ? "Model / Nástroj" : "Model / Tool"}
+                    </th>
+                    <th className="py-2 px-3 text-right">
+                      {lang === "sk" ? "Volania" : "Calls"}
+                    </th>
+                    <th className="py-2 px-3 text-right">
+                      {lang === "sk" ? "Priemerný čas" : "Avg Time"}
+                    </th>
+                    <th className="py-2 px-3 text-right">Min / Max</th>
+                    <th className="py-2 px-3 text-right">
+                      {lang === "sk" ? "Priem. tokeny (In / Out)" : "Avg Tokens (In / Out)"}
+                    </th>
+                    <th className="py-2 px-3 text-right">
+                      {lang === "sk" ? "Úspešnosť riadkov" : "Rated Row Accuracy"}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-200">
+                  {feedbackStats?.individual_steps.map((s) => (
+                    <tr
+                      key={`${s.stage}:${s.model_or_tool}`}
+                      className="hover:bg-stone-50"
+                    >
+                      <td className="py-2 px-3 font-mono font-bold text-stone-900">
+                        <span className="px-1.5 py-0.5 rounded bg-stone-900 text-amber-300 uppercase text-[11px]">
+                          {s.stage}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3 font-mono text-stone-800">
+                        {s.model_or_tool}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-stone-700">
+                        {s.calls_count}
+                        {s.error_count > 0 && (
+                          <span className="text-red-600 ml-1">
+                            ({s.error_count} err)
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono font-bold text-stone-900">
+                        {s.avg_duration_ms} ms
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-stone-600">
+                        {s.min_duration_ms} / {s.max_duration_ms} ms
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-stone-600">
+                        {s.avg_prompt_tokens} / {s.avg_completion_tokens}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono">
+                        {s.correctness_rate_pct !== null ? (
+                          <span className="font-bold text-stone-900">
+                            {s.correctness_rate_pct}% ({s.correct_rows_count}/
+                            {s.rated_rows_count})
+                          </span>
+                        ) : (
+                          <span className="text-stone-400">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* OCR Feedback Log & LLM Debug File Export */}
+      <div
+        data-testid="debug-ocr-feedback-card"
+        className="bg-white rounded-xl p-4 border border-stone-300 space-y-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3">
+          <div>
+            <h3 className="text-base font-bold text-stone-900 flex items-center gap-2">
+              <FileText className="w-5 h-5 text-amber-600" />
+              <span>
+                {lang === "sk"
+                  ? `Spätná väzba OCR & Súbor pre LLM Debugging (${feedbackList.length})`
+                  : `OCR Feedback Log & LLM Debug File (${feedbackList.length})`}
+              </span>
+            </h3>
+            <p className="text-xs text-stone-600 mt-0.5">
+              {lang === "sk" ? (
+                <>
+                  Každé označenie riadku ako{" "}
+                  <strong className="text-emerald-800">OCR ✓ (Správne)</strong> alebo{" "}
+                  <strong className="text-red-800">OCR ✗ (Chybné)</strong> sa automaticky
+                  zapisuje do súboru{" "}
+                  <code className="font-mono bg-stone-100 px-1.5 py-0.5 rounded text-stone-900">
+                    data/ocr_feedback_debug_report.md
+                  </code>{" "}
+                  (aj <code className="font-mono">.json</code>) so všetkými detailmi o
+                  modeloch, trvaní krokov, výrezoch a promptoch pre LLM.
+                </>
+              ) : (
+                <>
+                  Every row marked as{" "}
+                  <strong className="text-emerald-800">OCR ✓ (Correct)</strong> or{" "}
+                  <strong className="text-red-800">OCR ✗ (Incorrect)</strong> is
+                  automatically written to{" "}
+                  <code className="font-mono bg-stone-100 px-1.5 py-0.5 rounded text-stone-900">
+                    data/ocr_feedback_debug_report.md
+                  </code>{" "}
+                  (and <code className="font-mono">.json</code>) with full model, timing,
+                  crop, and prompt details for LLM debugging.
+                </>
+              )}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(["", "incorrect", "correct"] as const).map((vf) => (
+              <button
+                key={vf}
+                type="button"
+                onClick={() => {
+                  setFeedbackVerdictFilter(vf);
+                  void loadFeedbackAndStats(vf);
+                }}
+                className={`px-2.5 py-1.5 min-h-[32px] rounded-lg text-xs font-semibold cursor-pointer ${
+                  feedbackVerdictFilter === vf
+                    ? "bg-stone-900 text-white"
+                    : "bg-stone-200 text-stone-800 hover:bg-stone-300"
+                }`}
+              >
+                {vf === ""
+                  ? lang === "sk"
+                    ? "Všetky"
+                    : "All"
+                  : vf === "incorrect"
+                  ? lang === "sk"
+                    ? "Iba chybné (✗)"
+                    : "Incorrect Only (✗)"
+                  : lang === "sk"
+                  ? "Iba správne (✓)"
+                  : "Correct Only (✓)"}
+              </button>
+            ))}
+
+            <button
+              type="button"
+              data-testid="copy-llm-report-btn"
+              onClick={() => void handleCopyReportForLlm()}
+              className="px-3 py-1.5 min-h-[32px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              {copiedReport ? (
+                <Check className="w-3.5 h-3.5" />
+              ) : (
+                <Copy className="w-3.5 h-3.5" />
+              )}
+              <span>
+                {copiedReport
+                  ? lang === "sk"
+                    ? "Skopírované pre LLM!"
+                    : "Copied for LLM!"
+                  : lang === "sk"
+                  ? "Skopírovať report pre LLM"
+                  : "Copy Report for LLM"}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="toggle-llm-report-preview-btn"
+              onClick={() => setShowReportPreview((v) => !v)}
+              className="px-3 py-1.5 min-h-[32px] rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-100 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <FileText className="w-3.5 h-3.5 text-amber-400" />
+              <span>
+                {showReportPreview
+                  ? lang === "sk"
+                    ? "Skryť súbor pre LLM"
+                    : "Hide LLM File"
+                  : lang === "sk"
+                  ? "Zobraziť súbor pre LLM"
+                  : "Preview LLM File"}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Live Preview of the LLM Debug File */}
+        {showReportPreview && (
+          <div
+            data-testid="llm-report-preview-box"
+            className="bg-stone-950 text-stone-100 rounded-xl p-4 border border-amber-500/50 space-y-2"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-800 pb-2 text-xs font-mono">
+              <span className="text-amber-400 font-bold">
+                data/ocr_feedback_debug_report.md
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleCopyReportForLlm()}
+                  className="px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 text-amber-300 font-sans font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>{lang === "sk" ? "Kopírovať" : "Copy"}</span>
+                </button>
+                <a
+                  href="/api/debug/feedback/export?format=md"
+                  download
+                  className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white font-sans font-semibold text-xs inline-flex items-center gap-1"
+                >
+                  <Download className="w-3 h-3" />
+                  <span>.md</span>
+                </a>
+              </div>
+            </div>
+            <pre className="text-xs font-mono text-stone-200 overflow-x-auto whitespace-pre-wrap max-h-96">
+              {reportMarkdown || "—"}
+            </pre>
+          </div>
+        )}
+
+        {/* Feedback Items List & Detail Inspector */}
+        {feedbackList.length === 0 ? (
+          <div className="p-6 text-center bg-stone-50 rounded-xl border border-stone-200 text-stone-600 text-xs sm:text-sm">
+            {lang === "sk"
+              ? "Zatiaľ neboli označené žiadne riadky. Kliknite na tlačidlá „OCR ✓“ (Správne) alebo „OCR ✗“ (Chybné) pri ľubovoľnej osobe alebo dome v Sčítacích hárkoch, Knihách a stranách alebo v Grid inspectore nižšie."
+              : "No rows have been rated yet. Click 'OCR ✓' (Correct) or 'OCR ✗' (Incorrect) on any row in Census Sheets, Books & Scans, or in the Grid Inspector below."}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            <div className="lg:col-span-5 max-h-[520px] overflow-y-auto space-y-2 pr-1">
+              {feedbackList.map((item) => {
+                const isSel = selectedFeedbackItem?.id === item.id;
+                const isCorrect = item.verdict === "correct";
+                return (
+                  <div
+                    key={item.id}
+                    onClick={() => setSelectedFeedbackItem(item)}
+                    className={`p-3 rounded-xl border transition cursor-pointer space-y-1.5 ${
+                      isSel
+                        ? "bg-amber-50 border-amber-500 shadow-2xs"
+                        : "bg-stone-50 border-stone-200 hover:border-stone-400"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-xs font-bold inline-flex items-center gap-1 ${
+                          isCorrect
+                            ? "bg-emerald-600 text-white"
+                            : "bg-red-600 text-white"
+                        }`}
+                      >
+                        {isCorrect ? (
+                          <ThumbsUp className="w-3 h-3" />
+                        ) : (
+                          <ThumbsDown className="w-3 h-3" />
+                        )}
+                        <span>{isCorrect ? "CORRECT" : "INCORRECT"}</span>
+                      </span>
+                      <span className="text-xs font-mono text-stone-600">
+                        {item.total_duration_ms} ms · #{item.row_id ?? item.id}
+                      </span>
+                    </div>
+
+                    <div className="font-bold text-stone-900 text-xs truncate">
+                      {item.display_label || `Row #${item.row_id ?? item.id}`}
+                    </div>
+
+                    <div className="text-[11px] font-mono text-stone-700 truncate">
+                      {item.model_combo}
+                    </div>
+
+                    {item.comment && (
+                      <div className="text-xs bg-amber-100/80 border border-amber-300 text-amber-950 px-2 py-1 rounded">
+                        “{item.comment}”
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="lg:col-span-7">
+              {selectedFeedbackItem ? (
+                <div className="bg-stone-900 text-stone-100 rounded-xl p-4 space-y-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-700 pb-2.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`px-2 py-0.5 rounded-full font-bold uppercase ${
+                          selectedFeedbackItem.verdict === "correct"
+                            ? "bg-emerald-600 text-white"
+                            : "bg-red-600 text-white"
+                        }`}
+                      >
+                        {selectedFeedbackItem.verdict}
+                      </span>
+                      <span className="font-bold text-amber-300 text-sm">
+                        {selectedFeedbackItem.display_label}
+                      </span>
+                      {selectedFeedbackItem.census_sheet_id && (
+                        <Link
+                          to={`/scitacie-harky/${selectedFeedbackItem.census_sheet_id}`}
+                          className="px-2 py-0.5 rounded bg-stone-800 hover:bg-stone-700 text-amber-300 border border-stone-600 font-semibold"
+                        >
+                          {lang === "sk" ? "→ Otvoriť hárok" : "→ Open Sheet"}
+                        </Link>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void handleUpdateFeedbackItem(
+                            selectedFeedbackItem,
+                            selectedFeedbackItem.verdict === "correct"
+                              ? "incorrect"
+                              : "correct"
+                          )
+                        }
+                        className="px-2.5 py-1 rounded bg-stone-800 hover:bg-stone-700 border border-stone-600 text-stone-200 font-semibold cursor-pointer"
+                      >
+                        {selectedFeedbackItem.verdict === "correct"
+                          ? lang === "sk"
+                            ? "Prepnúť na Chybné (✗)"
+                            : "Switch to Incorrect (✗)"
+                          : lang === "sk"
+                          ? "Prepnúť na Správne (✓)"
+                          : "Switch to Correct (✓)"}
+                      </button>
+                      <a
+                        href={`/api/debug/feedback/export?format=md&feedback_id=${selectedFeedbackItem.id}`}
+                        download
+                        className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white font-semibold inline-flex items-center gap-1"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>.md</span>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void handleDeleteFeedbackItem(selectedFeedbackItem.id)
+                        }
+                        className="p-1.5 rounded bg-stone-800 hover:bg-red-900 text-stone-300 hover:text-white border border-stone-700 cursor-pointer"
+                        title={lang === "sk" ? "Vymazať" : "Delete"}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* User Note / Comment Editor */}
+                  <div className="bg-stone-950 p-2.5 rounded-lg border border-stone-800 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-amber-300 font-bold uppercase">
+                        {lang === "sk"
+                          ? "Poznámka / Oprava pre LLM"
+                          : "User Note / Correction for LLM"}
+                      </span>
+                      {editingFeedbackId !== selectedFeedbackItem.id && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingFeedbackId(selectedFeedbackItem.id);
+                            setEditingCommentText(
+                              selectedFeedbackItem.comment || ""
+                            );
+                          }}
+                          className="text-amber-400 hover:underline font-semibold cursor-pointer"
+                        >
+                          {lang === "sk" ? "Upraviť poznámku" : "Edit note"}
+                        </button>
+                      )}
+                    </div>
+                    {editingFeedbackId === selectedFeedbackItem.id ? (
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={editingCommentText}
+                          onChange={(e) => setEditingCommentText(e.target.value)}
+                          placeholder={
+                            lang === "sk"
+                              ? "Popíšte chybu OCR alebo správnu hodnotu…"
+                              : "Describe the OCR error or expected value…"
+                          }
+                          className="flex-1 px-2.5 py-1 rounded bg-stone-900 border border-stone-700 text-stone-100"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleUpdateFeedbackItem(
+                              selectedFeedbackItem,
+                              selectedFeedbackItem.verdict,
+                              editingCommentText
+                            )
+                          }
+                          className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold cursor-pointer"
+                        >
+                          {lang === "sk" ? "Uložiť" : "Save"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="text-stone-200">
+                        {selectedFeedbackItem.comment || (
+                          <span className="text-stone-500 italic">
+                            {lang === "sk"
+                              ? "Bez poznámky"
+                              : "No note provided"}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Models & Timing Breakdown */}
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono">
+                    <div className="bg-stone-950 p-2 rounded border border-stone-800">
+                      <div className="text-stone-400 text-[10px] uppercase">
+                        Layout
+                      </div>
+                      <div className="text-sky-300 font-bold">
+                        {selectedFeedbackItem.layout_duration_ms} ms
+                      </div>
+                      <div className="text-stone-400 text-[10px] truncate">
+                        {selectedFeedbackItem.layout_model || "opencv"}
+                      </div>
+                    </div>
+                    <div className="bg-stone-950 p-2 rounded border border-stone-800">
+                      <div className="text-stone-400 text-[10px] uppercase">
+                        OCR
+                      </div>
+                      <div className="text-amber-300 font-bold">
+                        {selectedFeedbackItem.ocr_duration_ms} ms
+                      </div>
+                      <div className="text-stone-400 text-[10px] truncate">
+                        {selectedFeedbackItem.ocr_model}
+                      </div>
+                    </div>
+                    <div className="bg-stone-950 p-2 rounded border border-stone-800">
+                      <div className="text-stone-400 text-[10px] uppercase">
+                        Decision
+                      </div>
+                      <div className="text-purple-300 font-bold">
+                        {selectedFeedbackItem.decision_duration_ms} ms
+                      </div>
+                      <div className="text-stone-400 text-[10px] truncate">
+                        {selectedFeedbackItem.decision_model}
+                      </div>
+                    </div>
+                    <div className="bg-stone-950 p-2 rounded border border-stone-800">
+                      <div className="text-stone-400 text-[10px] uppercase">
+                        Extract
+                      </div>
+                      <div className="text-emerald-300 font-bold">
+                        {selectedFeedbackItem.extract_duration_ms} ms
+                      </div>
+                      <div className="text-stone-400 text-[10px] truncate">
+                        {selectedFeedbackItem.extract_model}
+                      </div>
+                    </div>
+                    <div className="bg-stone-950 p-2 rounded border border-stone-800">
+                      <div className="text-stone-400 text-[10px] uppercase">
+                        Total Time
+                      </div>
+                      <div className="text-white font-bold">
+                        {selectedFeedbackItem.total_duration_ms} ms
+                      </div>
+                      <div className="text-stone-400 text-[10px]">
+                        MCP: {selectedFeedbackItem.mcp_duration_ms} ms
+                      </div>
+                    </div>
+                  </div>
+
+                  {selectedFeedbackItem.crop_url && (
+                    <div className="bg-stone-950 p-2.5 rounded-lg border border-stone-800 space-y-1">
+                      <div className="text-stone-400 font-mono text-[11px]">
+                        Crop: {selectedFeedbackItem.crop_url}
+                      </div>
+                      <img
+                        src={`${selectedFeedbackItem.crop_url}?v=${cacheRev}`}
+                        alt="Feedback row crop"
+                        className="max-h-20 rounded border border-stone-700"
+                      />
+                    </div>
+                  )}
+
+                  {selectedFeedbackItem.raw_ocr_snapshot && (
+                    <div>
+                      <div className="text-stone-300 mb-1 uppercase font-bold font-mono text-[11px]">
+                        Raw OCR Snapshot
+                      </div>
+                      <pre className="bg-stone-950 p-2.5 rounded-lg overflow-x-auto whitespace-pre-wrap text-emerald-300 font-mono max-h-32">
+                        {selectedFeedbackItem.raw_ocr_snapshot}
+                      </pre>
+                    </div>
+                  )}
+
+                  {selectedFeedbackItem.extracted_snapshot && (
+                    <div>
+                      <div className="text-stone-300 mb-1 uppercase font-bold font-mono text-[11px]">
+                        Extracted Data Snapshot (JSON)
+                      </div>
+                      <pre className="bg-stone-950 p-2.5 rounded-lg overflow-x-auto whitespace-pre-wrap text-amber-300 font-mono max-h-40">
+                        {JSON.stringify(
+                          selectedFeedbackItem.extracted_snapshot.person_fact ||
+                            selectedFeedbackItem.extracted_snapshot
+                              .overview_house ||
+                            selectedFeedbackItem.extracted_snapshot
+                              .municipal_district ||
+                            selectedFeedbackItem.extracted_snapshot.row ||
+                            selectedFeedbackItem.extracted_snapshot,
+                          null,
+                          2
+                        )}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Feature Flags */}
@@ -1449,7 +2544,18 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
                         </span>
                       )}
                     </span>
-                    <div className="flex flex-wrap gap-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <OcrFeedbackControls
+                        lang={lang}
+                        targetType={row.fact?.id ? "person_fact" : "row"}
+                        rowId={row.id}
+                        scanId={scanDetail.scan.id}
+                        personFactId={row.fact?.id ?? null}
+                        initialFeedback={row.ocr_feedback}
+                        onFeedbackSaved={() => {
+                          void loadFeedbackAndStats();
+                        }}
+                      />
                       {(scanDetail.scan.detected_type === "census"
                         ? (["all", "ocr", "extract", "mcp"] as const)
                         : (["all", "ocr", "decision", "extract", "mcp"] as const)

@@ -397,6 +397,9 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
 
     // Edit member #1 (Ján Kováč) via PATCH /api/census/facts/{id}
     const janRow = page.locator("tbody tr").filter({ hasText: "hlava domácnosti" }).first();
+    await janRow.getByTestId("ocr-feedback-correct-btn").click();
+    const mariaRow = page.locator("tbody tr").filter({ hasText: "manželka" }).first();
+    await mariaRow.getByTestId("ocr-feedback-incorrect-btn").click();
     await janRow.getByRole("button", { name: "Upraviť" }).click();
     const occInput = page
       .locator("div")
@@ -442,8 +445,21 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await page.locator("tbody").getByRole("button", { name: "Vymazať", exact: true }).click();
     await expect(page.locator("tbody tr").filter({ hasText: "Dom č. 24" })).toHaveCount(0);
 
-    // C. Feature Flags in /debug: toggle manual_scan_zoom, hover_row_zoom, census_overview_sheets
+    // C. Feature Flags & OCR Feedback / Model Combo Statistics in /debug
     await page.goto("/debug", { waitUntil: "networkidle" });
+    await expect(page.getByTestId("debug-model-combo-stats-card")).toBeVisible();
+    await expect(page.getByTestId("stats-overall-correctness-rate")).toContainText("50%");
+    await expect(page.getByTestId("stats-correct-count")).toContainText("1");
+    await expect(page.getByTestId("stats-incorrect-count")).toContainText("1");
+    await expect(page.getByTestId("model-combos-stats-table")).toContainText(
+      "OCR: local:glm-ocr-g32-mixed_4_8-mlx + Extract: local:underdog-saluki-27b-1.0"
+    );
+    await expect(page.getByTestId("debug-ocr-feedback-card")).toContainText("cair-test001");
+    await page.getByTestId("toggle-llm-report-preview-btn").click();
+    await expect(page.getByTestId("llm-report-preview-box")).toContainText(
+      "Matrika & Census Digitizer — OCR Feedback & LLM Debugging Report"
+    );
+
     const manualZoomToggle = page
       .locator("button")
       .filter({ hasText: "Manuálny zoom skenu" })

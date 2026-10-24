@@ -12,6 +12,7 @@ from sqlmodel import select
 from backend.app.config import settings
 from backend.app.db.models import Batch, FamilySearchMatch, PersonFact, QuestionItem, RecordRow, ScanImage
 from backend.app.db.session import SessionDep
+from backend.app.pipeline.feedback import build_feedback_lookup_maps
 from backend.app.pipeline.orchestrator import (
     process_batch_stage_queued,
     process_single_scan_pipeline,
@@ -201,12 +202,19 @@ def get_scan_detail(scan_id: int, session: SessionDep) -> dict[str, Any]:
         for gr in grid_meta.get("rows", [])
         if isinstance(gr, dict) and gr.get("row_index") is not None
     }
+    fb_maps = build_feedback_lookup_maps(session, scan_ids=[scan_id])
+    fb_by_row = fb_maps["by_row"]
+    fb_by_fact = fb_maps["by_fact"]
 
     rows_payload = []
     for r in rows:
         fact = fact_by_row.get(r.id)
         fs_match = matches_by_fact.get(fact.id) if (fact and fact.id is not None) else None
         gr_info = grid_row_by_idx.get(r.row_index, {})
+        row_fb = (
+            (fb_by_fact.get(fact.id) if (fact and fact.id is not None) else None)
+            or (fb_by_row.get(r.id) if r.id is not None else None)
+        )
         rows_payload.append({
             "id": r.id,
             "row_index": r.row_index,
@@ -233,6 +241,7 @@ def get_scan_detail(scan_id: int, session: SessionDep) -> dict[str, Any]:
             "fact": fact,
             "fs_match": fs_match,
             "questions": q_by_row.get(r.id, []),
+            "ocr_feedback": row_fb,
         })
 
     return {

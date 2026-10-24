@@ -24,6 +24,7 @@ import {
   X,
 } from "lucide-react";
 import ZoomableScanViewer, { HoverZoomRowCrop } from "../components/ZoomableScanViewer";
+import OcrFeedbackControls, { type OcrFeedbackItem } from "../components/OcrFeedbackControls";
 import { useFeatureFlags } from "../featureFlags";
 import type { CensusSheetDetail, LinkedHouseSheet } from "../api";
 import { matchesPersonNameQuery, stripFemSuffix } from "../utils/fuzzyName";
@@ -269,6 +270,7 @@ interface ScanRowRecord {
   status?: string;
   page_side?: string | null;
   page_number?: number | null;
+  ocr_feedback?: OcrFeedbackItem | null;
 }
 
 interface CensusPersonMember {
@@ -353,6 +355,7 @@ interface CensusPersonMember {
       mother_name: string | null;
     } | null;
   }>;
+  ocr_feedback?: OcrFeedbackItem | null;
 }
 
 export interface CensusOverviewHouseRow {
@@ -392,6 +395,7 @@ export interface CensusOverviewHouseRow {
   confidence?: number;
   y_start?: number | null;
   y_end?: number | null;
+  ocr_feedback?: OcrFeedbackItem | null;
 }
 
 export interface CensusMunicipalOverviewDistrictRow {
@@ -426,6 +430,7 @@ export interface CensusMunicipalOverviewDistrictRow {
   confidence?: number;
   y_start?: number | null;
   y_end?: number | null;
+  ocr_feedback?: OcrFeedbackItem | null;
 }
 
 interface ScanDetailInfo {
@@ -3004,6 +3009,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                             </td>
                             <td className="py-2.5 px-2 align-middle text-right whitespace-nowrap">
                               <div className="inline-flex items-center gap-1.5">
+                                <OcrFeedbackControls
+                                  lang={lang}
+                                  targetType="municipal_district"
+                                  municipalDistrictId={d.id}
+                                  rowId={d.row_id ?? null}
+                                  scanId={d.scan_id ?? front_scan?.id ?? null}
+                                  censusSheetId={sheet.id}
+                                  initialFeedback={d.ocr_feedback}
+                                />
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -3635,6 +3649,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                           </td>
                           <td className="py-2.5 px-2 align-middle text-right whitespace-nowrap">
                             <div className="inline-flex items-center gap-1.5">
+                              <OcrFeedbackControls
+                                lang={lang}
+                                targetType="overview_house"
+                                overviewHouseId={h.id}
+                                rowId={h.row_id ?? null}
+                                scanId={h.scan_id ?? front_scan?.id ?? null}
+                                censusSheetId={sheet.id}
+                                initialFeedback={h.ocr_feedback}
+                              />
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -4334,6 +4357,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
                         <td className="py-2.5 px-2 align-middle text-right whitespace-nowrap">
                           <div className="inline-flex items-center gap-1.5">
+                            <OcrFeedbackControls
+                              lang={lang}
+                              targetType="person_fact"
+                              personFactId={f.id}
+                              rowId={f.row_id}
+                              scanId={f.scan_id}
+                              censusSheetId={sheet.id}
+                              initialFeedback={m.ocr_feedback}
+                            />
                             <button
                               type="button"
                               onClick={(e) => {

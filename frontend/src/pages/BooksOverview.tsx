@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import ZoomableScanViewer, { HoverZoomRowCrop } from "../components/ZoomableScanViewer";
+import OcrFeedbackControls, { type OcrFeedbackItem } from "../components/OcrFeedbackControls";
 import { useFeatureFlags } from "../featureFlags";
 
 interface ScanSummary {
@@ -54,6 +55,7 @@ interface ScanRowDetail {
   raw_ocr_combined: string | null;
   status: string;
   fact?: RecordItem["fact"] | null;
+  ocr_feedback?: OcrFeedbackItem | null;
 }
 
 interface SelectedScanDetail {
@@ -106,6 +108,7 @@ interface RecordItem {
   stitched_crop_url: string | null;
   scan_filename: string | null;
   scan_url?: string | null;
+  ocr_feedback?: OcrFeedbackItem | null;
 }
 
 interface CatalogSheetHit {
@@ -941,37 +944,55 @@ export default function BooksOverview({
 
               {selectedRow &&
                 (selectedRow.stitched_crop_path || selectedRow.stitched_crop_url) && (
-                  <HoverZoomRowCrop
-                    cropUrl={
-                      selectedRow.stitched_crop_path || selectedRow.stitched_crop_url || ""
-                    }
-                    headerCropUrl={selectedScanDetail?.header_crop_path}
-                    scanUrl={
-                      featureFlags.hover_row_zoom
-                        ? selectedScanDetail?.original_url ||
-                          selectedScanDetail?.scan?.original_url
-                        : null
-                    }
-                    yStart={featureFlags.hover_row_zoom ? selectedRow.y_start : null}
-                    yEnd={featureFlags.hover_row_zoom ? selectedRow.y_end : null}
-                    scanHeight={
-                      selectedScanDetail?.height || selectedScanDetail?.scan?.height
-                    }
-                    rowLabel={
-                      lang === "sk"
-                        ? `Výrez vybraného riadku #${selectedRow.row_index}${
-                            selectedRow.entry_number
-                              ? ` (záznam č. ${selectedRow.entry_number})`
-                              : ""
-                          }`
-                        : `Selected row crop #${selectedRow.row_index}${
-                            selectedRow.entry_number
-                              ? ` (entry #${selectedRow.entry_number})`
-                              : ""
-                          }`
-                    }
-                    lang={lang}
-                  />
+                  <div className="space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-stone-700">
+                        {lang === "sk"
+                          ? `Hodnotenie OCR pre riadok #${selectedRow.row_index}:`
+                          : `OCR feedback for row #${selectedRow.row_index}:`}
+                      </span>
+                      <OcrFeedbackControls
+                        lang={lang}
+                        targetType={selectedRow.fact?.id ? "person_fact" : "row"}
+                        rowId={selectedRow.id}
+                        scanId={selectedScanDetail.scan.id}
+                        personFactId={selectedRow.fact?.id ?? null}
+                        initialFeedback={selectedRow.ocr_feedback}
+                        compact={false}
+                      />
+                    </div>
+                    <HoverZoomRowCrop
+                      cropUrl={
+                        selectedRow.stitched_crop_path || selectedRow.stitched_crop_url || ""
+                      }
+                      headerCropUrl={selectedScanDetail?.header_crop_path}
+                      scanUrl={
+                        featureFlags.hover_row_zoom
+                          ? selectedScanDetail?.original_url ||
+                            selectedScanDetail?.scan?.original_url
+                          : null
+                      }
+                      yStart={featureFlags.hover_row_zoom ? selectedRow.y_start : null}
+                      yEnd={featureFlags.hover_row_zoom ? selectedRow.y_end : null}
+                      scanHeight={
+                        selectedScanDetail?.height || selectedScanDetail?.scan?.height
+                      }
+                      rowLabel={
+                        lang === "sk"
+                          ? `Výrez vybraného riadku #${selectedRow.row_index}${
+                              selectedRow.entry_number
+                                ? ` (záznam č. ${selectedRow.entry_number})`
+                                : ""
+                            }`
+                          : `Selected row crop #${selectedRow.row_index}${
+                              selectedRow.entry_number
+                                ? ` (entry #${selectedRow.entry_number})`
+                                : ""
+                            }`
+                      }
+                      lang={lang}
+                    />
+                  </div>
                 )}
             </div>
           )}
@@ -1416,6 +1437,16 @@ export default function BooksOverview({
                           </span>
                         );
                       })}
+
+                    <OcrFeedbackControls
+                      lang={lang}
+                      targetType="person_fact"
+                      personFactId={r.id}
+                      rowId={r.row_id}
+                      scanId={r.scan_id}
+                      censusSheetId={r.census_sheet_id ?? null}
+                      initialFeedback={item.ocr_feedback}
+                    />
 
                     <button
                       type="button"

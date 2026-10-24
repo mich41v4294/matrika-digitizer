@@ -455,3 +455,43 @@ class WorkflowTrace(SQLModel, table=True):
     completion_tokens: int = Field(default=0)
     reasoning_tokens: int = Field(default=0)
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class OCRFeedback(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    target_type: str = Field(default="row", index=True)
+    # row, person_fact, overview_house, municipal_district, scan, census_sheet
+    row_id: Optional[int] = Field(default=None, index=True)
+    scan_id: Optional[int] = Field(default=None, index=True)
+    census_sheet_id: Optional[int] = Field(default=None, index=True)
+    person_fact_id: Optional[int] = Field(default=None, index=True)
+    overview_house_id: Optional[int] = Field(default=None, index=True)
+    municipal_district_id: Optional[int] = Field(default=None, index=True)
+
+    verdict: str = Field(default="correct", index=True)  # "correct" | "incorrect"
+    comment: Optional[str] = Field(default=None)
+    expected_correction: Optional[str] = Field(default=None)
+
+    model_combo: str = Field(default="", index=True)
+    layout_model: Optional[str] = Field(default=None)
+    ocr_model: Optional[str] = Field(default=None, index=True)
+    decision_model: Optional[str] = Field(default=None, index=True)
+    extract_model: Optional[str] = Field(default=None, index=True)
+    mcp_model: Optional[str] = Field(default=None)
+
+    total_duration_ms: int = Field(default=0)
+    layout_duration_ms: int = Field(default=0)
+    ocr_duration_ms: int = Field(default=0)
+    decision_duration_ms: int = Field(default=0)
+    extract_duration_ms: int = Field(default=0)
+    mcp_duration_ms: int = Field(default=0)
+
+    raw_ocr_snapshot: Optional[str] = Field(default=None)
+    extracted_snapshot_json: str = Field(default="{}")
+    stage_breakdown_json: str = Field(default="{}")
+    traces_snapshot_json: str = Field(default="[]")
+    crop_url: Optional[str] = Field(default=None)
+
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+

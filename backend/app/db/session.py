@@ -107,6 +107,10 @@ def _ensure_sqlite_columns() -> None:
             "CREATE INDEX IF NOT EXISTS ix_censusmunicipaloverviewdistrict_sheet_row ON censusmunicipaloverviewdistrict (census_sheet_id, row_index)",
             "CREATE INDEX IF NOT EXISTS ix_workflowtrace_scan_id ON workflowtrace (scan_id, id)",
             "CREATE INDEX IF NOT EXISTS ix_questionitem_status_id ON questionitem (status, id)",
+            "CREATE INDEX IF NOT EXISTS ix_ocrfeedback_verdict_combo ON ocrfeedback (verdict, model_combo)",
+            "CREATE INDEX IF NOT EXISTS ix_ocrfeedback_row_id ON ocrfeedback (row_id, id)",
+            "CREATE INDEX IF NOT EXISTS ix_ocrfeedback_fact_id ON ocrfeedback (person_fact_id, id)",
+            "CREATE INDEX IF NOT EXISTS ix_ocrfeedback_sheet_id ON ocrfeedback (census_sheet_id, id)",
         ):
             conn.execute(text(idx_sql))
         # Remove any stale unmatched FamilySearchMatch rows (fs_person_id IS NULL or empty)

@@ -408,6 +408,212 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
             finally:
                 reset_fs_name_cache_for_tests(None)
 
+    def test_ocr_feedback_statistics_and_llm_debug_export(self) -> None:
+        from sqlmodel import Session, SQLModel, create_engine
+        from backend.app.db.models import (
+            CensusSheet,
+            OCRFeedback,
+            PersonFact,
+            RecordRow,
+            ScanImage,
+            WorkflowTrace,
+        )
+        from backend.app.pipeline.feedback import (
+            build_llm_debug_report_payload,
+            format_llm_debug_report_markdown,
+            get_feedback_statistics,
+            upsert_ocr_feedback,
+        )
+
+        mem_engine = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(mem_engine)
+
+        with Session(mem_engine) as session:
+            sheet = CensusSheet(
+                slovakiana_key="cair-fbtest01",
+                census_year=1930,
+                district="Trnava",
+                municipality="Horné Zelenice",
+                house_number="42",
+                sheet_type="household",
+            )
+            session.add(sheet)
+            session.flush()
+
+            scan = ScanImage(
+                census_sheet_id=sheet.id,
+                filename="cair-fbtest01_v.jpg",
+                original_path="/tmp/cair-fbtest01_v.jpg",
+                overlay_path="/media/crops/scan_10/overlay.jpg",
+                detected_year="1930",
+                detected_type="census",
+                status="extracted",
+            )
+            session.add(scan)
+            session.flush()
+
+            row1 = RecordRow(
+                scan_id=scan.id or 1,
+                row_index=1,
+                entry_number="1",
+                stitched_crop_path="/media/crops/scan_10/row_01_stitched.jpg",
+                raw_ocr_left="1 | Kováč | Ján | hlava domácnosti",
+                raw_ocr_right="Horné Zelenice | Hlohovec | Slovensko",
+                raw_ocr_combined="1 | Kováč | Ján | hlava domácnosti | Horné Zelenice",
+                record_type="census",
+                status="extracted",
+            )
+            row2 = RecordRow(
+                scan_id=scan.id or 1,
+                row_index=2,
+                entry_number="2",
+                stitched_crop_path="/media/crops/scan_10/row_02_stitched.jpg",
+                raw_ocr_left="2 | Koráčová | Mária | manželka",
+                raw_ocr_right="Trnava | Trnava | Slovensko",
+                raw_ocr_combined="2 | Koráčová | Mária | manželka | Trnava",
+                record_type="census",
+                status="extracted",
+            )
+            session.add_all([row1, row2])
+            session.flush()
+
+            fact1 = PersonFact(
+                row_id=row1.id or 1,
+                scan_id=scan.id or 1,
+                census_sheet_id=sheet.id,
+                record_type="census",
+                person_row_number="1",
+                surname_raw="Kováč",
+                given_name_raw="Ján",
+                relation_to_head="hlava domácnosti",
+            )
+            fact2 = PersonFact(
+                row_id=row2.id or 2,
+                scan_id=scan.id or 1,
+                census_sheet_id=sheet.id,
+                record_type="census",
+                person_row_number="2",
+                surname_raw="Koráčová",
+                given_name_raw="Mária",
+                relation_to_head="manželka",
+            )
+            session.add_all([fact1, fact2])
+            session.flush()
+
+            # Traces for scan & rows
+            session.add_all(
+                [
+                    WorkflowTrace(
+                        scan_id=scan.id,
+                        row_id=None,
+                        stage="layout",
+                        model_or_tool="opencv:census_sheet_slicer",
+                        duration_ms=200,
+                        status="ok",
+                    ),
+                    WorkflowTrace(
+                        scan_id=scan.id,
+                        row_id=row1.id,
+                        stage="ocr_left",
+                        model_or_tool="local:glm-ocr-g32-mixed_4_8-mlx",
+                        duration_ms=500,
+                        prompt_tokens=150,
+                        completion_tokens=30,
+                        status="ok",
+                    ),
+                    WorkflowTrace(
+                        scan_id=scan.id,
+                        row_id=row1.id,
+                        stage="ocr_right",
+                        model_or_tool="local:glm-ocr-g32-mixed_4_8-mlx",
+                        duration_ms=400,
+                        prompt_tokens=140,
+                        completion_tokens=25,
+                        status="ok",
+                    ),
+                    WorkflowTrace(
+                        scan_id=scan.id,
+                        row_id=row1.id,
+                        stage="extract",
+                        model_or_tool="local:underdog-saluki-27b-1.0",
+                        duration_ms=700,
+                        prompt_tokens=350,
+                        completion_tokens=90,
+                        status="ok",
+                    ),
+                    WorkflowTrace(
+                        scan_id=scan.id,
+                        row_id=row2.id,
+                        stage="ocr_left",
+                        model_or_tool="local:glm-ocr-g32-mixed_4_8-mlx",
+                        duration_ms=600,
+                        prompt_tokens=160,
+                        completion_tokens=35,
+                        status="ok",
+                    ),
+                    WorkflowTrace(
+                        scan_id=scan.id,
+                        row_id=row2.id,
+                        stage="extract",
+                        model_or_tool="local:underdog-saluki-27b-1.0",
+                        duration_ms=800,
+                        prompt_tokens=360,
+                        completion_tokens=95,
+                        status="ok",
+                    ),
+                ]
+            )
+            session.commit()
+
+            fb1 = upsert_ocr_feedback(
+                session,
+                verdict="correct",
+                person_fact_id=fact1.id,
+                row_id=row1.id,
+                scan_id=scan.id,
+                census_sheet_id=sheet.id,
+            )
+            fb2 = upsert_ocr_feedback(
+                session,
+                verdict="incorrect",
+                comment="Priezvisko má byť Kováčová, nie Koráčová",
+                person_fact_id=fact2.id,
+                row_id=row2.id,
+                scan_id=scan.id,
+                census_sheet_id=sheet.id,
+            )
+
+            self.assertEqual(fb1.verdict, "correct")
+            self.assertEqual(fb2.verdict, "incorrect")
+            self.assertEqual(fb1.layout_duration_ms, 100)  # 200ms / 2 rows
+            self.assertEqual(fb1.ocr_duration_ms, 900)  # 500 + 400
+            self.assertEqual(fb1.extract_duration_ms, 700)
+            self.assertEqual(fb1.total_duration_ms, 1700)
+
+            stats = get_feedback_statistics(session)
+            self.assertEqual(stats["summary"]["total_feedback"], 2)
+            self.assertEqual(stats["summary"]["correct_count"], 1)
+            self.assertEqual(stats["summary"]["incorrect_count"], 1)
+            self.assertEqual(stats["summary"]["correctness_rate_pct"], 50.0)
+
+            combo = stats["model_combos"][0]
+            self.assertEqual(
+                combo["model_combo"],
+                "OCR: local:glm-ocr-g32-mixed_4_8-mlx + Extract: local:underdog-saluki-27b-1.0",
+            )
+            self.assertEqual(combo["correctness_rate_pct"], 50.0)
+            self.assertEqual(combo["steps"]["layout_ms"], 100)
+            self.assertEqual(combo["steps"]["ocr_ms"], 750)  # avg(900, 600)
+            self.assertEqual(combo["steps"]["extract_ms"], 750)  # avg(700, 800)
+
+            report_payload = build_llm_debug_report_payload(session)
+            md_text = format_llm_debug_report_markdown(report_payload)
+            self.assertIn("Priezvisko má byť Kováčová, nie Koráčová", md_text)
+            self.assertIn("cair-fbtest01", md_text)
+            self.assertIn("[INCORRECT]", md_text)
+            self.assertIn("50.0%", md_text)
+
+
 
 if __name__ == "__main__":
     unittest.main()

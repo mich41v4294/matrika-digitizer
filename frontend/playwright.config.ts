@@ -25,6 +25,18 @@ function resolveChromiumExecutable(): string | undefined {
         );
         if (fs.existsSync(candidate)) return candidate;
       }
+      if (entry.startsWith("chromium-")) {
+        const candidate = path.join(
+          cacheDir,
+          entry,
+          "chrome-mac-arm64",
+          "Google Chrome for Testing.app",
+          "Contents",
+          "MacOS",
+          "Google Chrome for Testing"
+        );
+        if (fs.existsSync(candidate)) return candidate;
+      }
     }
   }
   const systemChrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";

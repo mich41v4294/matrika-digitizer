@@ -18,6 +18,7 @@ from backend.app.mcp.familysearch_client import (
     schedule_auto_fs_match,
     trigger_auto_fs_match_for_fact,
 )
+from backend.app.pipeline.feedback import build_feedback_lookup_maps
 from backend.app.pipeline.lexicon import (
     apply_person_fact_search_fields,
     compute_person_fact_search_fields,
@@ -107,9 +108,16 @@ def list_records(
         limit=limit,
         offset=offset,
     )
-    for item in res.get("records", []):
+    rec_items = res.get("records", [])
+    rec_fact_ids = [item["fact"].id for item in rec_items if item.get("fact") and item["fact"].id is not None]
+    fb_maps = build_feedback_lookup_maps(session, fact_ids=rec_fact_ids) if rec_fact_ids else {"by_fact": {}, "by_row": {}}
+    for item in rec_items:
         f = item["fact"]
         item["observationes_events"] = json.loads(f.observationes_events_json or "[]")
+        item["ocr_feedback"] = (
+            fb_maps["by_fact"].get(f.id or 0)
+            or fb_maps["by_row"].get(f.row_id or 0)
+        )
     res["catalog_sheets"] = [
         {
             **s.model_dump(),

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlmodel import select
@@ -12,6 +14,7 @@ from backend.app.api.ws import ws_manager
 from backend.app.config import settings
 from backend.app.db.models import (
     FamilySearchMatch,
+    OCRFeedback,
     PersonFact,
     QuestionItem,
     RecordRow,
@@ -31,9 +34,31 @@ from backend.app.pipeline.extraction_stage import (
     run_census_extraction_for_row,
     run_extraction_for_row,
 )
+from backend.app.pipeline.feedback import (
+    build_llm_debug_report_payload,
+    format_llm_debug_report_markdown,
+    get_feedback_statistics,
+    persist_llm_debug_report_files,
+    serialize_ocr_feedback,
+    upsert_ocr_feedback,
+)
 from backend.app.pipeline.ocr_stage import media_rel_to_path, run_ocr_for_row
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
+
+
+class SubmitFeedbackRequest(BaseModel):
+    verdict: str  # "correct" | "incorrect"
+    comment: str | None = None
+    expected_correction: str | None = None
+    target_type: str = "row"
+    row_id: int | None = None
+    scan_id: int | None = None
+    census_sheet_id: int | None = None
+    person_fact_id: int | None = None
+    overview_house_id: int | None = None
+    municipal_district_id: int | None = None
+
 
 
 class RerunStageRequest(BaseModel):
@@ -138,8 +163,136 @@ async def get_debug_overview(session: SessionDep) -> dict[str, Any]:
             "total_matches": total_matches,
             "traces_logged": len(traces),
         },
+        "feedback_stats": get_feedback_statistics(session),
         "recent_traces": traces,
     }
+
+
+@router.get("/feedback/stats")
+def get_debug_feedback_stats(session: SessionDep) -> dict[str, Any]:
+    return get_feedback_statistics(session)
+
+
+@router.get("/feedback")
+def list_debug_feedback(
+    session: SessionDep,
+    verdict: str | None = None,
+    scan_id: int | None = None,
+    row_id: int | None = None,
+    census_sheet_id: int | None = None,
+    model_combo: str | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    stmt = select(OCRFeedback).order_by(OCRFeedback.updated_at.desc(), OCRFeedback.id.desc())
+    if verdict in ("correct", "incorrect"):
+        stmt = stmt.where(OCRFeedback.verdict == verdict)
+    if scan_id is not None:
+        stmt = stmt.where(OCRFeedback.scan_id == scan_id)
+    if row_id is not None:
+        stmt = stmt.where(OCRFeedback.row_id == row_id)
+    if census_sheet_id is not None:
+        stmt = stmt.where(OCRFeedback.census_sheet_id == census_sheet_id)
+    if model_combo:
+        stmt = stmt.where(OCRFeedback.model_combo == model_combo)
+
+    rows = list(session.exec(stmt.limit(limit)).all())
+    report_payload = build_llm_debug_report_payload(
+        session,
+        verdict_filter=verdict if verdict in ("correct", "incorrect") else None,
+    )
+    report_md = format_llm_debug_report_markdown(report_payload)
+    report_files = persist_llm_debug_report_files(session)
+
+    return {
+        "feedback": [serialize_ocr_feedback(r, include_traces=True) for r in rows],
+        "stats": report_payload["statistics"],
+        "report_markdown": report_md,
+        "report_files": report_files,
+    }
+
+
+@router.post("/feedback")
+def submit_debug_feedback(
+    req: SubmitFeedbackRequest,
+    session: SessionDep,
+) -> dict[str, Any]:
+    fb = upsert_ocr_feedback(
+        session,
+        verdict=req.verdict,
+        comment=req.comment,
+        expected_correction=req.expected_correction,
+        target_type=req.target_type,
+        row_id=req.row_id,
+        scan_id=req.scan_id,
+        census_sheet_id=req.census_sheet_id,
+        person_fact_id=req.person_fact_id,
+        overview_house_id=req.overview_house_id,
+        municipal_district_id=req.municipal_district_id,
+    )
+    report_payload = build_llm_debug_report_payload(session)
+    report_md = format_llm_debug_report_markdown(report_payload)
+    return {
+        "status": "ok",
+        "feedback": serialize_ocr_feedback(fb, include_traces=True),
+        "stats": report_payload["statistics"],
+        "report_markdown": report_md,
+        "report_files": report_payload["statistics"]["summary"]["report_files"],
+    }
+
+
+@router.delete("/feedback/{feedback_id}")
+def delete_debug_feedback(
+    feedback_id: int,
+    session: SessionDep,
+) -> dict[str, Any]:
+    fb = session.get(OCRFeedback, feedback_id)
+    if not fb:
+        raise HTTPException(status_code=404, detail="Feedback not found")
+    session.delete(fb)
+    session.commit()
+    report_files = persist_llm_debug_report_files(session)
+    report_payload = build_llm_debug_report_payload(session)
+    return {
+        "status": "deleted",
+        "deleted_id": feedback_id,
+        "stats": report_payload["statistics"],
+        "report_markdown": format_llm_debug_report_markdown(report_payload),
+        "report_files": report_files,
+    }
+
+
+@router.get("/feedback/export")
+def export_debug_feedback_file(
+    session: SessionDep,
+    format: str = "md",
+    verdict: str | None = None,
+    feedback_id: int | None = None,
+) -> Response:
+    persist_llm_debug_report_files(session)
+    payload = build_llm_debug_report_payload(
+        session,
+        verdict_filter=verdict if verdict in ("correct", "incorrect") else None,
+        feedback_id=feedback_id,
+    )
+    fmt = format.strip().lower()
+    suffix = f"_{verdict}" if verdict in ("correct", "incorrect") else (f"_item_{feedback_id}" if feedback_id else "")
+    if fmt == "json":
+        content = json.dumps(payload, ensure_ascii=False, indent=2)
+        filename = f"ocr_feedback_debug_report{suffix}.json"
+        return Response(
+            content=content,
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    md_text = format_llm_debug_report_markdown(payload)
+    filename = f"ocr_feedback_debug_report{suffix}.md"
+    return PlainTextResponse(
+        content=md_text,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 
 @router.get("/traces")

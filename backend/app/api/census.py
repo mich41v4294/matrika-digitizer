@@ -40,6 +40,7 @@ from backend.app.db.models import (
     ScanImage,
 )
 from backend.app.db.session import SessionDep
+from backend.app.pipeline.feedback import build_feedback_lookup_maps
 from backend.app.mcp.familysearch_client import (
     match_census_to_local_matrika,
     schedule_auto_fs_match,
@@ -2678,6 +2679,42 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             }
         )
 
+    fb_maps = build_feedback_lookup_maps(session, census_sheet_id=sheet.id)
+    fb_by_row = fb_maps["by_row"]
+    fb_by_fact = fb_maps["by_fact"]
+    fb_by_house = fb_maps["by_house"]
+    fb_by_dist = fb_maps["by_dist"]
+
+    for m_item in members:
+        f_obj = m_item.get("fact") or {}
+        fid = f_obj.get("id")
+        rid = f_obj.get("row_id")
+        m_item["ocr_feedback"] = (
+            (fb_by_fact.get(fid) if fid else None)
+            or (fb_by_row.get(rid) if rid else None)
+        )
+    for p_item in persons:
+        fid = p_item.get("id")
+        rid = p_item.get("row_id")
+        p_item["ocr_feedback"] = (
+            (fb_by_fact.get(fid) if fid else None)
+            or (fb_by_row.get(rid) if rid else None)
+        )
+    for ovh_item in overview_houses:
+        hid = ovh_item.get("id")
+        rid = ovh_item.get("row_id")
+        ovh_item["ocr_feedback"] = (
+            (fb_by_house.get(hid) if hid else None)
+            or (fb_by_row.get(rid) if rid else None)
+        )
+    for md_item in municipal_overview_districts:
+        did = md_item.get("id")
+        rid = md_item.get("row_id")
+        md_item["ocr_feedback"] = (
+            (fb_by_dist.get(did) if did else None)
+            or (fb_by_row.get(rid) if rid else None)
+        )
+
     serialized_rows: list[dict[str, Any]] = []
     for r_obj in rows_by_id.values():
         r_sc = scans_by_id.get(r_obj.scan_id)
@@ -2694,6 +2731,7 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
                 **r_obj.model_dump(),
                 "page_side": r_side,
                 "page_number": r_pnum,
+                "ocr_feedback": fb_by_row.get(r_obj.id or 0),
             }
         )
 

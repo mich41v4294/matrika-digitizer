@@ -445,6 +445,23 @@ async def download_and_process_single_census_sheet(
         if not sheet:
             return {"error": f"CensusSheet {sheet_id} not found"}
         slovakiana_key = sheet.slovakiana_key
+        sheet_label = (
+            f"{sheet.municipality or ''} č. {sheet.house_number or sheet.sheet_number or slovakiana_key}".strip()
+        )
+        initial_scan_id = sheet.front_scan_id
+
+    await ws_manager.broadcast(
+        "state",
+        {
+            "active_stage": "census_download",
+            "active_model": "slovakiana-iiif",
+            "current_scan_id": initial_scan_id,
+            "current_row_id": None,
+            "progress_pct": 5,
+            "message_sk": f"Sťahujem metadátový záznam a skeny zo Slovakiany ({sheet_label})…",
+            "message_en": f"Fetching metadata and scans from Slovakiana ({sheet_label})…",
+        },
+    )
 
     detail = await slovakiana_client.fetch_sheet_detail(slovakiana_key)
 
@@ -463,6 +480,18 @@ async def download_and_process_single_census_sheet(
             sheet.has_images = False
             session.add(sheet)
             session.commit()
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "active_stage": "idle",
+                    "active_model": None,
+                    "current_scan_id": None,
+                    "current_row_id": None,
+                    "progress_pct": 100,
+                    "message_sk": f"Hárok {sheet_label} nemá v Slovakiane priradené skeny.",
+                    "message_en": f"Sheet {sheet_label} has no scan images on Slovakiana.",
+                },
+            )
             return {"sheet_id": sheet_id, "status": "no_images"}
 
         # Ensure a Batch exists for this municipality & census year
@@ -510,6 +539,18 @@ async def download_and_process_single_census_sheet(
         legacy_path = dest_dir / f"census_{census_year}_{slovakiana_key}_{side}.jpg"
         if legacy_path.exists() and not dest_path.exists():
             legacy_path.rename(dest_path)
+        await ws_manager.broadcast(
+            "state",
+            {
+                "active_stage": "census_download",
+                "active_model": "slovakiana-iiif",
+                "current_scan_id": initial_scan_id,
+                "current_row_id": None,
+                "progress_pct": 6 + int(6 * (idx + 1) / max(1, len(images))),
+                "message_sk": f"Overujem / sťahujem sken strany {idx + 1}/{len(images)} ({side}) pre {sheet_label}…",
+                "message_en": f"Checking / downloading scan page {idx + 1}/{len(images)} ({side}) for {sheet_label}…",
+            },
+        )
         await slovakiana_client.download_image_to_jpeg(img_desc, dest_path)
 
         with Session(engine) as session:
@@ -581,6 +622,18 @@ async def download_and_process_single_census_sheet(
             "pipeline": pipeline_res,
         }
 
+    await ws_manager.broadcast(
+        "state",
+        {
+            "active_stage": "idle",
+            "active_model": None,
+            "current_scan_id": downloaded_scan_ids[0] if downloaded_scan_ids else None,
+            "current_row_id": None,
+            "progress_pct": 100,
+            "message_sk": f"Hotovo: stiahnuté skeny pre hárok {sheet_label}.",
+            "message_en": f"Done: downloaded scans for sheet {sheet_label}.",
+        },
+    )
     return {
         "sheet_id": sheet_id,
         "slovakiana_key": slovakiana_key,

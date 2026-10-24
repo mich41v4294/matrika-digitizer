@@ -493,6 +493,31 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(page.locator("body")).toContainText("Dom č. 15");
     await expect(page.locator("body")).toContainText("Hlavná");
 
+    // Clicking "Znova spustiť AI OCR & párovanie" on a sheet shows live progress bar card
+    await page.goto("/scitacie-harky/cair-test001", { waitUntil: "networkidle" });
+    await page.route("**/api/census/sheets/*/download-and-process*", async (route) => {
+      await new Promise((r) => setTimeout(r, 350));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sheet_id: 1,
+          slovakiana_key: "cair-test001",
+          scan_ids: [2],
+          pipeline: { status: "ok", rows_processed: 3 },
+        }),
+      });
+    });
+    const rerunBtn = page.getByTestId("sheet-rerun-ocr-btn");
+    await rerunBtn.click();
+    await expect(page.getByTestId("sheet-ocr-progress-card")).toBeVisible();
+    await expect(page.getByTestId("sheet-ocr-progress-bar")).toBeVisible();
+    await expect(rerunBtn).toContainText("Prebieha AI OCR & párovanie");
+    await expect(page.getByTestId("sheet-ocr-progress-card")).toContainText(
+      "AI OCR čítanie a párovanie hárku bolo úspešne dokončené."
+    );
+    await page.unroute("**/api/census/sheets/*/download-and-process*");
+
     await page.goto("/hladanie", { waitUntil: "networkidle" });
     const unifiedStreetInput = page.getByLabel("Filtrovať podľa ulice");
     await expect(unifiedStreetInput).toBeVisible();

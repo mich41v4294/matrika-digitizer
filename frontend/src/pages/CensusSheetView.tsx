@@ -945,6 +945,27 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [switchingType, setSwitchingType] = useState(false);
+  const [sheetProgress, setSheetProgress] = useState<{
+    active: boolean;
+    completedJustNow: boolean;
+    active_stage: string;
+    active_model: string | null;
+    progress_pct: number;
+    message_sk: string;
+    message_en: string;
+    started_at_ms: number;
+    elapsed_sec: number;
+  }>({
+    active: false,
+    completedJustNow: false,
+    active_stage: "idle",
+    active_model: null,
+    progress_pct: 0,
+    message_sk: "",
+    message_en: "",
+    started_at_ms: 0,
+    elapsed_sec: 0,
+  });
 
   // Scan viewer controls: side (`front` = _v, `back` = _r, or `page_3`..N) & mode (`overlay` vs `original`)
   const [activeSide, setActiveSide] = useState<string>(() => {
@@ -1089,20 +1110,202 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   };
 
   useEffect(() => {
+    setSheetProgress((prev) => ({
+      ...prev,
+      active: false,
+      completedJustNow: false,
+      progress_pct: 0,
+    }));
     setLoading(true);
     loadDetail();
   }, [sheetId]);
 
+  // Listen for live pipeline state & FamilySearch matching broadcasts over /ws/pipeline
+  useEffect(() => {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${proto}//${window.location.host}/ws/pipeline`;
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "state" && msg.data) {
+            const d = msg.data;
+            const st = String(d.active_stage || "idle");
+            if (st !== "idle") {
+              setSheetProgress((prev) => {
+                if (!prev.active && !processing && !switchingType) return prev;
+                const incomingPct = Number(d.progress_pct ?? 12);
+                return {
+                  ...prev,
+                  active: true,
+                  active_stage: st,
+                  active_model: d.active_model ?? prev.active_model,
+                  progress_pct: Math.max(prev.progress_pct, Math.min(99, incomingPct)),
+                  message_sk: String(d.message_sk || prev.message_sk),
+                  message_en: String(d.message_en || prev.message_en),
+                };
+              });
+            }
+          } else if (msg.type === "fs_match_progress" && msg.data) {
+            const p = msg.data.progress || msg.data;
+            if (p && p.running) {
+              setSheetProgress((prev) => {
+                if (!prev.active && !processing && !switchingType) return prev;
+                const tot = Math.max(1, Number(p.total || 1));
+                const proc = Number(p.processed || 0);
+                const pct = Math.min(99, 88 + Math.round((11 * proc) / tot));
+                const person = String(p.current_person || "").trim();
+                return {
+                  ...prev,
+                  active: true,
+                  active_stage: "mcp_match",
+                  active_model: "familysearch-mcp",
+                  progress_pct: Math.max(prev.progress_pct, pct),
+                  message_sk: person
+                    ? `Párujem s matrikou a FamilySearch (${proc}/${tot}): ${person}…`
+                    : prev.message_sk,
+                  message_en: person
+                    ? `Matching with parish records & FamilySearch (${proc}/${tot}): ${person}…`
+                    : prev.message_en,
+                };
+              });
+            }
+          }
+        } catch {
+          // ignore
+        }
+      };
+    } catch {
+      // ignore ws errors; polling + ticker fallback below
+    }
+    return () => {
+      if (ws) ws.close();
+    };
+  }, [processing, switchingType]);
+
+  // Smooth client-side progress ticker + status poll while OCR & matching is running on this sheet
+  useEffect(() => {
+    if (!processing && !switchingType) return;
+    const ticker = setInterval(() => {
+      setSheetProgress((prev) => {
+        const elapsed = Math.max(
+          1,
+          Math.round((Date.now() - (prev.started_at_ms || Date.now())) / 1000)
+        );
+        const step = prev.progress_pct < 35 ? 2 : prev.progress_pct < 75 ? 1 : 0.5;
+        const nextPct = Math.min(94, Math.round((prev.progress_pct + step) * 10) / 10);
+        return {
+          ...prev,
+          active: true,
+          elapsed_sec: elapsed,
+          progress_pct: Math.max(prev.progress_pct, Math.floor(nextPct)),
+        };
+      });
+    }, 650);
+
+    const poller = setInterval(async () => {
+      try {
+        const r = await fetch("/api/status");
+        if (!r.ok) return;
+        const stData = await r.json();
+        const ps = stData?.pipeline_state;
+        if (ps && ps.active_stage && ps.active_stage !== "idle") {
+          setSheetProgress((prev) => ({
+            ...prev,
+            active: true,
+            active_stage: String(ps.active_stage),
+            active_model: ps.active_model ?? prev.active_model,
+            progress_pct: Math.max(
+              prev.progress_pct,
+              Math.min(99, Number(ps.progress_pct || 12))
+            ),
+            message_sk: String(ps.message_sk || prev.message_sk),
+            message_en: String(ps.message_en || prev.message_en),
+          }));
+        }
+      } catch {
+        // ignore transient poll error
+      }
+    }, 1500);
+
+    return () => {
+      clearInterval(ticker);
+      clearInterval(poller);
+    };
+  }, [processing, switchingType]);
+
   const handleDownloadAndProcess = async () => {
     if (!sheetId) return;
+    setActionError(null);
     setProcessing(true);
+    const startMs = Date.now();
+    const isReprocess =
+      detail?.sheet.download_status === "downloaded" ||
+      detail?.sheet.download_status === "extracted" ||
+      detail?.sheet.download_status === "matched";
+    setSheetProgress({
+      active: true,
+      completedJustNow: false,
+      active_stage: isReprocess ? "ocr" : "census_download",
+      active_model: isReprocess ? "glm-ocr" : "slovakiana-iiif",
+      progress_pct: 8,
+      message_sk: isReprocess
+        ? "Spúšťam opätovné AI OCR čítanie rukopisu, extrakciu a párovanie hárku…"
+        : "Sťahujem skeny (_v + _r) zo Slovakiany a spúšťam AI OCR hárku…",
+      message_en: isReprocess
+        ? "Starting handwriting AI OCR re-run, extraction, and sheet matching…"
+        : "Downloading scans (_v + _r) from Slovakiana and running AI OCR…",
+      started_at_ms: startMs,
+      elapsed_sec: 0,
+    });
     try {
-      await fetch(
+      const r = await fetch(
         `/api/census/sheets/${sheetId}/download-and-process?run_pipeline=true&run_mcp=true`,
         { method: "POST" }
       );
+      if (!r.ok) {
+        const errBody = await r.json().catch(() => ({}));
+        throw new Error(
+          errBody.detail ||
+            errBody.error ||
+            (lang === "sk"
+              ? `Chyba pri spracovaní hárku (HTTP ${r.status})`
+              : `Sheet processing failed (HTTP ${r.status})`)
+        );
+      }
+      const resData = await r.json().catch(() => ({}));
+      if (resData?.error || resData?.pipeline?.status === "error") {
+        throw new Error(resData?.error || resData?.pipeline?.error || "OCR error");
+      }
       await loadDetail();
       refreshStatus();
+      const totalElapsed = Math.max(1, Math.round((Date.now() - startMs) / 1000));
+      setSheetProgress((prev) => ({
+        ...prev,
+        active: false,
+        completedJustNow: true,
+        active_stage: "idle",
+        active_model: null,
+        progress_pct: 100,
+        elapsed_sec: totalElapsed,
+        message_sk: "AI OCR čítanie a párovanie hárku bolo úspešne dokončené.",
+        message_en: "AI OCR reading and sheet matching completed successfully.",
+      }));
+    } catch (err: any) {
+      setActionError(
+        err?.message ||
+          (lang === "sk"
+            ? "Nepodarilo sa dokončiť AI OCR a párovanie hárku."
+            : "Failed to complete AI OCR and sheet matching.")
+      );
+      setSheetProgress((prev) => ({
+        ...prev,
+        active: false,
+        completedJustNow: false,
+        active_stage: "idle",
+      }));
     } finally {
       setProcessing(false);
     }
@@ -1111,7 +1314,20 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const handleSetSheetType = async (nextType: "household" | "overview" | "municipal_overview") => {
     if (!detail) return;
     const sheetRef = detail.sheet.slovakiana_id || String(detail.sheet.id);
+    setActionError(null);
     setSwitchingType(true);
+    const startMs = Date.now();
+    setSheetProgress({
+      active: true,
+      completedJustNow: false,
+      active_stage: "layout",
+      active_model: "glm-ocr",
+      progress_pct: 10,
+      message_sk: "Mením typ hárku a spúšťam AI OCR extrakciu riadkov…",
+      message_en: "Switching sheet type and running AI OCR row extraction…",
+      started_at_ms: startMs,
+      elapsed_sec: 0,
+    });
     try {
       const r = await fetch(`/api/census/sheets/${sheetRef}/set-type`, {
         method: "POST",
@@ -1125,6 +1341,25 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       if (r.ok) {
         await loadDetail();
         refreshStatus();
+        const totalElapsed = Math.max(1, Math.round((Date.now() - startMs) / 1000));
+        setSheetProgress((prev) => ({
+          ...prev,
+          active: false,
+          completedJustNow: true,
+          active_stage: "idle",
+          active_model: null,
+          progress_pct: 100,
+          elapsed_sec: totalElapsed,
+          message_sk: "Typ hárku bol zmenený a AI OCR extrakcia bola dokončená.",
+          message_en: "Sheet type updated and AI OCR extraction completed.",
+        }));
+      } else {
+        setSheetProgress((prev) => ({
+          ...prev,
+          active: false,
+          completedJustNow: false,
+          active_stage: "idle",
+        }));
       }
     } finally {
       setSwitchingType(false);
@@ -2052,6 +2287,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             <button
               onClick={handleDownloadAndProcess}
               disabled={processing || switchingType}
+              data-testid="sheet-rerun-ocr-btn"
               className="px-3.5 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
             >
               {processing ? (
@@ -2060,9 +2296,13 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                 <Download className="w-4 h-4" />
               )}
               <span>
-                {sheet.download_status === "downloaded" ||
-                sheet.download_status === "extracted" ||
-                sheet.download_status === "matched"
+                {processing
+                  ? lang === "sk"
+                    ? `Prebieha AI OCR & párovanie (${Math.max(8, sheetProgress.progress_pct || 8)}%)…`
+                    : `Running AI OCR & matching (${Math.max(8, sheetProgress.progress_pct || 8)}%)…`
+                  : sheet.download_status === "downloaded" ||
+                    sheet.download_status === "extracted" ||
+                    sheet.download_status === "matched"
                   ? lang === "sk"
                     ? "Znova spustiť AI OCR & párovanie"
                     : "Re-run AI OCR & matching"
@@ -2073,6 +2313,164 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             </button>
           </div>
         </div>
+
+        {/* Live AI OCR & Matching Progress Bar Card */}
+        {(processing ||
+          switchingType ||
+          sheetProgress.active ||
+          sheetProgress.completedJustNow) &&
+          (() => {
+            const isRunning = processing || switchingType || sheetProgress.active;
+            const pct = isRunning
+              ? Math.max(8, Math.min(99, sheetProgress.progress_pct || 8))
+              : 100;
+            const stageOrder = [
+              "census_download",
+              "layout",
+              "ocr",
+              "extract",
+              "mcp_match",
+            ];
+            const currentStageIdx = isRunning
+              ? Math.max(0, stageOrder.indexOf(sheetProgress.active_stage))
+              : stageOrder.length;
+            const stages = [
+              {
+                key: "census_download",
+                labelSk: "1. Skeny",
+                labelEn: "1. Scans",
+              },
+              {
+                key: "layout",
+                labelSk: "2. Rozdelenie riadkov",
+                labelEn: "2. Row slicing",
+              },
+              {
+                key: "ocr",
+                labelSk: "3. AI OCR rukopisu",
+                labelEn: "3. AI OCR",
+              },
+              {
+                key: "extract",
+                labelSk: "4. Extrakcia údajov",
+                labelEn: "4. Extraction",
+              },
+              {
+                key: "mcp_match",
+                labelSk: "5. Párovanie (Matrika & FS)",
+                labelEn: "5. Matching",
+              },
+            ];
+
+            return (
+              <div
+                data-testid="sheet-ocr-progress-card"
+                className={`rounded-lg px-3.5 py-2.5 border space-y-2 transition-colors ${
+                  isRunning
+                    ? "bg-amber-50 border-amber-400 shadow-xs"
+                    : "bg-emerald-50/90 border-emerald-300"
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2 font-bold text-stone-900 min-w-0">
+                    {isRunning ? (
+                      <RefreshCw className="w-4 h-4 text-amber-700 animate-spin shrink-0" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                    )}
+                    <span className="truncate">
+                      {lang === "sk"
+                        ? sheetProgress.message_sk ||
+                          "Prebieha AI OCR čítanie rukopisu a párovanie hárku…"
+                        : sheetProgress.message_en ||
+                          "Running handwriting AI OCR and sheet matching…"}
+                    </span>
+                    {isRunning && sheetProgress.active_model && (
+                      <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 font-mono text-[11px] shrink-0">
+                        {sheetProgress.active_model}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {sheetProgress.elapsed_sec > 0 && (
+                      <span className="text-stone-600 font-medium">
+                        {sheetProgress.elapsed_sec} s
+                      </span>
+                    )}
+                    <span
+                      className={`px-2 py-0.5 rounded-full font-bold text-xs ${
+                        isRunning
+                          ? "bg-amber-600 text-white"
+                          : "bg-emerald-700 text-white"
+                      }`}
+                    >
+                      {pct}%
+                    </span>
+                    {!isRunning && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSheetProgress((prev) => ({
+                            ...prev,
+                            completedJustNow: false,
+                          }))
+                        }
+                        className="p-0.5 rounded hover:bg-emerald-200/70 text-stone-600 cursor-pointer"
+                        title={lang === "sk" ? "Skryť" : "Dismiss"}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div
+                  role="progressbar"
+                  aria-label={
+                    lang === "sk"
+                      ? "Priebeh AI OCR a párovania hárku"
+                      : "Sheet AI OCR and matching progress"
+                  }
+                  aria-valuenow={pct}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  data-testid="sheet-ocr-progress-bar"
+                  className={`w-full rounded-full h-2.5 overflow-hidden ${
+                    isRunning ? "bg-amber-200/80" : "bg-emerald-200"
+                  }`}
+                >
+                  <div
+                    className={`h-full transition-all duration-300 ${
+                      isRunning ? "bg-amber-600 animate-pulse" : "bg-emerald-600"
+                    }`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                  {stages.map((st, idx) => {
+                    const isDone = !isRunning || idx < currentStageIdx;
+                    const isCurrent = isRunning && idx === currentStageIdx;
+                    return (
+                      <span
+                        key={st.key}
+                        className={`px-2 py-0.5 rounded-md text-[11px] font-semibold inline-flex items-center gap-1 ${
+                          isCurrent
+                            ? "bg-amber-600 text-white shadow-2xs"
+                            : isDone
+                            ? "bg-emerald-100 text-emerald-900 border border-emerald-300"
+                            : "bg-stone-100 text-stone-500 border border-stone-200"
+                        }`}
+                      >
+                        <span>{lang === "sk" ? st.labelSk : st.labelEn}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
 
         {/* Slovakiana CC BY-NC-ND 4.0 Attribution & License Badge */}
         <div className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-stone-700">
@@ -4050,12 +4448,20 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                             <button
                               type="button"
                               onClick={handleDownloadAndProcess}
-                              disabled={processing}
+                              disabled={processing || switchingType}
                               className="px-3.5 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                             >
-                              <Download className="w-3.5 h-3.5" />
+                              {processing ? (
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Download className="w-3.5 h-3.5" />
+                              )}
                               <span>
-                                {lang === "sk"
+                                {processing
+                                  ? lang === "sk"
+                                    ? `Prebieha AI OCR (${Math.max(8, sheetProgress.progress_pct || 8)}%)…`
+                                    : `Running AI OCR (${Math.max(8, sheetProgress.progress_pct || 8)}%)…`
+                                  : lang === "sk"
                                   ? "Spustiť AI OCR hárku"
                                   : "Run AI OCR on sheet"}
                               </span>

@@ -1,9 +1,6 @@
-.git/*
-!.git/HEAD
-!.git/commondir
-!.git/refs
-!.git/refs/**
-!.git/packed-refs
+.git/objects
+.git/hooks
+.gitattributes
 .gitignore
 .github
 .venv

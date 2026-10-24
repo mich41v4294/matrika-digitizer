@@ -3,11 +3,24 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args:
+        - VITE_COMMIT_HASH=${VITE_COMMIT_HASH:-}
+        - BUILD_COMMIT_HASH=${BUILD_COMMIT_HASH:-}
+        - GIT_COMMIT=${GIT_COMMIT:-}
+        - SOURCE_COMMIT=${SOURCE_COMMIT:-}
+        - COMMIT_SHA=${COMMIT_SHA:-}
+        - GITHUB_SHA=${GITHUB_SHA:-}
     container_name: matrika-digitizer
     ports:
       - "${PORT:-8080}:8080"
     environment:
       - PANGOLIN_PUBLIC_URL=${PANGOLIN_PUBLIC_URL:-http://localhost:8080}
+      - VITE_COMMIT_HASH=${VITE_COMMIT_HASH:-}
+      - BUILD_COMMIT_HASH=${BUILD_COMMIT_HASH:-}
+      - GIT_COMMIT=${GIT_COMMIT:-}
+      - SOURCE_COMMIT=${SOURCE_COMMIT:-}
+      - COMMIT_SHA=${COMMIT_SHA:-}
+      - GITHUB_SHA=${GITHUB_SHA:-}
       - APP_API_KEY=${APP_API_KEY:-}
       - AI_PROVIDER=${AI_PROVIDER:-local}
       - AI_BASE_URL=${AI_BASE_URL:-http://host.docker.internal:1234/v1}

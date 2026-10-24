@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from functools import lru_cache
 import os
 from pathlib import Path
 import re
 import subprocess
 from typing import Any
+import urllib.request
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -113,6 +113,32 @@ app.include_router(debug.router)
 app.include_router(ws.router)
 
 
+_GITHUB_REPO = "mich41v4294/matrika-digitizer"
+_HEX_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_CACHED_BUILD_COMMIT: str | None = None
+
+
+def _normalize_commit_hash(raw: str | None) -> str | None:
+    val = (raw or "").strip()
+    if not val or val in ("dev", "unknown") or "$Format:" in val:
+        return None
+    if _HEX_SHA_RE.fullmatch(val):
+        return val[:7].lower()
+    return val
+
+
+def _extract_40_hex_from_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        m = re.search(r"\b([0-9a-fA-F]{40})\b", path.read_text(encoding="utf-8"))
+        if m:
+            return m.group(1)[:7].lower()
+    except OSError:
+        pass
+    return None
+
+
 def _resolve_git_commit_from_dir(start_dir: Path) -> str | None:
     current = start_dir.resolve()
     for _ in range(4):
@@ -136,28 +162,55 @@ def _resolve_git_commit_from_dir(start_dir: Path) -> str | None:
                 if head_file.is_file():
                     head = head_file.read_text(encoding="utf-8").strip()
                     if not head.startswith("ref:"):
-                        return head[:7] if head else None
-                    ref_path = head[len("ref:") :].strip()
-                    for base in (git_dir, common_dir):
-                        loose_ref = base / ref_path
-                        if loose_ref.is_file():
-                            sha = loose_ref.read_text(encoding="utf-8").strip()
-                            if sha:
-                                return sha[:7]
-                    for base in (common_dir, git_dir):
-                        packed_refs = base / "packed-refs"
-                        if packed_refs.is_file():
-                            for line in packed_refs.read_text(encoding="utf-8").splitlines():
-                                stripped = line.strip()
-                                if (
-                                    not stripped
-                                    or stripped.startswith("#")
-                                    or stripped.startswith("^")
-                                ):
-                                    continue
-                                parts = stripped.split()
-                                if len(parts) >= 2 and parts[1] == ref_path and parts[0]:
-                                    return parts[0][:7]
+                        norm = _normalize_commit_hash(head)
+                        if norm:
+                            return norm
+                    else:
+                        ref_path = head[len("ref:") :].strip()
+                        candidate_refs = [ref_path]
+                        if ref_path.startswith("refs/heads/"):
+                            branch = ref_path[len("refs/heads/") :]
+                            candidate_refs.append(f"refs/remotes/origin/{branch}")
+                        for ref in candidate_refs:
+                            for base in (git_dir, common_dir):
+                                loose_ref = base / ref
+                                if loose_ref.is_file():
+                                    norm = _normalize_commit_hash(
+                                        loose_ref.read_text(encoding="utf-8")
+                                    )
+                                    if norm:
+                                        return norm
+                            for base in (common_dir, git_dir):
+                                packed_refs = base / "packed-refs"
+                                if packed_refs.is_file():
+                                    for line in packed_refs.read_text(
+                                        encoding="utf-8"
+                                    ).splitlines():
+                                        stripped = line.strip()
+                                        if (
+                                            not stripped
+                                            or stripped.startswith("#")
+                                            or stripped.startswith("^")
+                                        ):
+                                            continue
+                                        parts = stripped.split()
+                                        if len(parts) >= 2 and parts[1] == ref and parts[0]:
+                                            norm = _normalize_commit_hash(parts[0])
+                                            if norm:
+                                                return norm
+                for base in (git_dir, common_dir):
+                    for fallback_name in ("ORIG_HEAD", "FETCH_HEAD"):
+                        sha = _extract_40_hex_from_file(base / fallback_name)
+                        if sha:
+                            return sha
+                    head_log = base / "logs" / "HEAD"
+                    if head_log.is_file():
+                        for line in reversed(
+                            head_log.read_text(encoding="utf-8").splitlines()
+                        ):
+                            parts = line.strip().split()
+                            if len(parts) >= 2 and _HEX_SHA_RE.fullmatch(parts[1]):
+                                return parts[1][:7].lower()
             except OSError:
                 pass
         if current.parent == current:
@@ -166,18 +219,57 @@ def _resolve_git_commit_from_dir(start_dir: Path) -> str | None:
     return None
 
 
-@lru_cache(maxsize=1)
+def _fetch_remote_github_commit_hash() -> str | None:
+    for url, headers, pattern in (
+        (
+            f"https://github.com/{_GITHUB_REPO}.git/info/refs?service=git-upload-pack",
+            {"User-Agent": "matrika-digitizer"},
+            r"([0-9a-fA-F]{40})\s+(?:refs/heads/main|HEAD)\b",
+        ),
+        (
+            f"https://api.github.com/repos/{_GITHUB_REPO}/commits/main",
+            {
+                "Accept": "application/vnd.github.sha",
+                "User-Agent": "matrika-digitizer",
+            },
+            r"\b([0-9a-fA-F]{40})\b",
+        ),
+    ):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                m = re.search(pattern, body)
+                if m:
+                    return m.group(1)[:7].lower()
+        except Exception:
+            continue
+    return None
+
+
 def get_build_commit_hash() -> str:
+    global _CACHED_BUILD_COMMIT
+    if _CACHED_BUILD_COMMIT:
+        return _CACHED_BUILD_COMMIT
+
     for key in (
         "BUILD_COMMIT_HASH",
         "VITE_COMMIT_HASH",
         "GIT_COMMIT",
+        "SOURCE_COMMIT",
         "COMMIT_SHA",
         "GITHUB_SHA",
+        "CI_COMMIT_SHA",
+        "COOLIFY_GIT_COMMIT_SHA",
+        "PORTAINER_GIT_COMMIT",
+        "RENDER_GIT_COMMIT",
+        "RAILWAY_GIT_COMMIT_SHA",
+        "VERCEL_GIT_COMMIT_SHA",
     ):
-        val = (os.environ.get(key) or "").strip()
-        if val and val not in ("dev", "unknown"):
-            return val[:7] if re.fullmatch(r"[0-9a-fA-F]{8,40}", val) else val
+        norm = _normalize_commit_hash(os.environ.get(key))
+        if norm:
+            _CACHED_BUILD_COMMIT = norm
+            return norm
 
     try:
         out = subprocess.check_output(
@@ -186,13 +278,49 @@ def get_build_commit_hash() -> str:
             stderr=subprocess.DEVNULL,
             text=True,
             timeout=2,
-        ).strip()
-        if out:
-            return out
+        )
+        norm = _normalize_commit_hash(out)
+        if norm:
+            _CACHED_BUILD_COMMIT = norm
+            return norm
     except Exception:
         pass
 
-    return _resolve_git_commit_from_dir(BASE_REPO_DIR) or "dev"
+    from_git_dir = _resolve_git_commit_from_dir(BASE_REPO_DIR)
+    if from_git_dir:
+        _CACHED_BUILD_COMMIT = from_git_dir
+        return from_git_dir
+
+    try:
+        from backend.app._build_info import ARCHIVE_COMMIT_HASH
+
+        norm = _normalize_commit_hash(ARCHIVE_COMMIT_HASH)
+        if norm:
+            _CACHED_BUILD_COMMIT = norm
+            return norm
+    except Exception:
+        pass
+
+    for commit_file in (
+        settings.frontend_dist_dir / ".build-commit",
+        BASE_REPO_DIR / "frontend" / "dist" / ".build-commit",
+        BASE_REPO_DIR / ".build-commit",
+    ):
+        if commit_file.is_file():
+            try:
+                norm = _normalize_commit_hash(commit_file.read_text(encoding="utf-8"))
+                if norm:
+                    _CACHED_BUILD_COMMIT = norm
+                    return norm
+            except OSError:
+                pass
+
+    from_remote = _fetch_remote_github_commit_hash()
+    if from_remote:
+        _CACHED_BUILD_COMMIT = from_remote
+        return from_remote
+
+    return "dev"
 
 
 @app.get("/api/health")

@@ -190,8 +190,11 @@ export default function App() {
     __BUILD_COMMIT_HASH__ &&
     __BUILD_COMMIT_HASH__ !== "dev"
       ? __BUILD_COMMIT_HASH__
-      : status?.build_commit ||
-        (typeof __BUILD_COMMIT_HASH__ !== "undefined" ? __BUILD_COMMIT_HASH__ : "")) || "dev";
+      : status?.build_commit && status.build_commit !== "dev"
+      ? status.build_commit
+      : typeof __BUILD_COMMIT_HASH__ !== "undefined" && __BUILD_COMMIT_HASH__
+      ? __BUILD_COMMIT_HASH__
+      : status?.build_commit) || "dev";
 
   return (
     <div className="min-h-screen flex flex-col bg-stone-100 text-stone-900 overflow-x-hidden">

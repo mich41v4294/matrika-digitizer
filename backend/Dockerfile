@@ -40,6 +40,10 @@ ENV VITE_COMMIT_HASH=${VITE_COMMIT_HASH} \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
+        build-essential \
+        pkg-config \
+        rustc \
+        cargo \
         libglib2.0-0 \
         libgomp1 \
         libgl1 \
@@ -49,9 +53,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /usr/local/bin/uv
 RUN chmod +x /usr/local/bin/uv && ln -sf /usr/local/bin/uv /usr/local/bin/uvx
 
 COPY vendor/familysearch-mcp /app/vendor/familysearch-mcp
+COPY backend/rust/matrika_db_rs /app/backend/rust/matrika_db_rs
 COPY backend/pyproject.toml /app/backend/pyproject.toml
 RUN mkdir -p /app/backend/app && touch /app/backend/app/__init__.py \
-    && uv pip install --system --no-cache /app/vendor/familysearch-mcp /app/backend
+    && uv pip install --system --no-cache /app/vendor/familysearch-mcp /app/backend/rust/matrika_db_rs /app/backend
 COPY backend /app/backend
 RUN uv pip install --system --no-cache --no-deps /app/backend
 

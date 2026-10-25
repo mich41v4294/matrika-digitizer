@@ -92,7 +92,7 @@ export default function App() {
     const interval = setInterval(() => {
       if (document.visibilityState === "hidden") return;
       void fetchStatus();
-    }, 4000);
+    }, 10000);
 
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${proto}//${window.location.host}/ws/pipeline`;

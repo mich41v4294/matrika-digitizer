@@ -16,6 +16,11 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    import matrika_db_rs as _rust_lex
+except ImportError:
+    _rust_lex = None
+
 # Known historical male given names (Latin, Hungarian, German/Slovak period forms + OCR variants)
 KNOWN_MALE_GIVEN_NAMES: set[str] = {
     "andreas", "andrás", "stephanus", "stephannus", "stephans", "seghames", "istván",
@@ -644,6 +649,7 @@ def reset_fs_name_cache_for_tests(path: Path | None = None) -> None:
         _MATCH_SURNAME_MEMO.clear()
         _MATCH_GIVEN_MEMO.clear()
         _CANDIDATE_WEIGHTS_MEMO.clear()
+        is_known_given_name.cache_clear()
 
 
 def _load_fs_name_cache() -> dict[str, Any]:
@@ -747,6 +753,7 @@ def record_observed_fs_names(
         _MATCH_SURNAME_MEMO.clear()
         _MATCH_GIVEN_MEMO.clear()
         _CANDIDATE_WEIGHTS_MEMO.clear()
+        is_known_given_name.cache_clear()
         _save_fs_name_cache(cache)
 
 
@@ -797,6 +804,8 @@ def _sub_cost(a: str, b: str) -> float:
 @lru_cache(maxsize=65536)
 def _paleographic_distance(left: str, right: str) -> float:
     """Weighted Levenshtein distance using Kurrent/cursive confusion costs."""
+    if _rust_lex is not None:
+        return float(_rust_lex.paleographic_distance_rs(left, right))
     a = _apply_digraphs(left)
     b = _apply_digraphs(right)
     n, m = len(a), len(b)
@@ -821,6 +830,8 @@ def _paleographic_distance(left: str, right: str) -> float:
 
 @lru_cache(maxsize=65536)
 def _paleographic_similarity(left: str, right: str) -> float:
+    if _rust_lex is not None:
+        return float(_rust_lex.paleographic_similarity_rs(left, right))
     a = _apply_digraphs(left)
     b = _apply_digraphs(right)
     if not a and not b:
@@ -883,6 +894,12 @@ def _score_against_lexicon(
     raw_clean = _clean_name_token(raw)
     if not raw_clean or len(raw_clean) < 3:
         return None, 0.0
+    if _rust_lex is not None:
+        return _rust_lex.batch_score_candidates_against_lexicon_rs(
+            raw_clean,
+            list(candidates.items()),
+            AUTO_CORRECT_THRESHOLD,
+        )
     raw_low = raw_clean.lower()
     raw_folded = _apply_digraphs(raw_clean)
     raw_skel = _phonetic_skeleton(raw_clean)
@@ -994,6 +1011,7 @@ def name_match_repair_notes(original: str | None, corrected: str | None) -> list
     return notes
 
 
+@lru_cache(maxsize=65536)
 def is_month_name(token: str | None) -> bool:
     """Returns True if token is a Latin, Hungarian, Slovak, or German month name (or known OCR variant)."""
     if not token:
@@ -1002,6 +1020,7 @@ def is_month_name(token: str | None) -> bool:
     return clean in HISTORICAL_MONTH_MAP
 
 
+@lru_cache(maxsize=65536)
 def normalize_month_name(token: str | None) -> str | None:
     """Returns canonical historical month name if token is a known month or month OCR misread."""
     if not token:
@@ -1010,6 +1029,7 @@ def normalize_month_name(token: str | None) -> str | None:
     return HISTORICAL_MONTH_MAP.get(clean)
 
 
+@lru_cache(maxsize=65536)
 def is_occupation_or_role_token(token: str | None) -> bool:
     """Returns True if token is an occupation, social status, or Latin relational keyword."""
     if not token:
@@ -1105,6 +1125,7 @@ def normalize_surname(
     return cleaned, cleaned
 
 
+@lru_cache(maxsize=65536)
 def is_known_given_name(token: str) -> bool:
     if not token:
         return False
@@ -1389,6 +1410,7 @@ def fold_text_diacritics(text: str | None) -> str:
 ascii_fold = fold_text_diacritics
 
 
+@lru_cache(maxsize=65536)
 def resolve_given_name_canonical_id(given_name: str | None) -> str | None:
     """Resolves a Latin, Hungarian, Slovak, or German given name to its canonical cross-language concept ID."""
     if not given_name:
@@ -1828,6 +1850,7 @@ _CENSUS_DITTO_STEM_RE = re.compile(
 )
 
 
+@lru_cache(maxsize=65536)
 def strip_slovak_feminine_suffix(surname: str | None) -> str | None:
     """
     Normalizes a Slovak/Czech/Hungarian surname to its canonical masculine stem:
@@ -2016,6 +2039,8 @@ _DIGRAPH_TO_DIGRAPH_COST: dict[frozenset[str], float] = {
 @lru_cache(maxsize=65536)
 def _ocr_dp_distance(a: str, b: str) -> float:
     """Weighted edit distance supporting 1-char and 2-char OCR/cursive confusions."""
+    if _rust_lex is not None:
+        return float(_rust_lex.ocr_dp_distance_rs(a, b))
     if a == b:
         return 0.0
     n, m = len(a), len(b)
@@ -2087,6 +2112,8 @@ def weighted_edit_similarity(left: str | None, right: str | None) -> float:
     """
     if not left or not right:
         return 0.0
+    if _rust_lex is not None:
+        return float(_rust_lex.weighted_edit_similarity_rs(left, right))
     a_raw = re.sub(r"[^a-z0-9]", "", fold_text_diacritics(left))
     b_raw = re.sub(r"[^a-z0-9]", "", fold_text_diacritics(right))
     if not a_raw or not b_raw:
@@ -2133,6 +2160,8 @@ def fuzzy_token_similarity(q_tok: str | None, cand_tok: str | None) -> float:
     """
     if not q_tok or not cand_tok:
         return 0.0
+    if _rust_lex is not None:
+        return float(_rust_lex.fuzzy_token_similarity_rs(q_tok, cand_tok))
     q_f = re.sub(r"[^a-z0-9]", "", fold_text_diacritics(q_tok))
     c_f = re.sub(r"[^a-z0-9]", "", fold_text_diacritics(cand_tok))
     if not q_f or not c_f:
@@ -2215,6 +2244,14 @@ def fuzzy_name_match_score(
     """
     if not query_text or not query_text.strip():
         return 1.0
+    if _rust_lex is not None:
+        return float(
+            _rust_lex.fuzzy_name_match_score_rs(
+                query_text,
+                [str(t) if t is not None else None for t in candidate_texts],
+                threshold,
+            )
+        )
 
     raw_q_tokens = _NAME_TOKEN_RE.findall(query_text.strip())
     q_tokens = [t for t in raw_q_tokens if fold_text_diacritics(t) not in _QUERY_STOP_TOKENS]
@@ -2596,6 +2633,7 @@ def normalize_census_relation(raw_text: str | None) -> str | None:
     return cleaned
 
 
+@lru_cache(maxsize=32768)
 def parse_house_number_int(house_no: str | None) -> int | None:
     """Extracts the primary integer house number (conscription or orientation number) for indexing."""
     if not house_no:
@@ -2686,6 +2724,7 @@ def canonical_municipality_key(municipality: str | None) -> str:
     return _CANONICAL_MUNICIPALITY_SYNONYMS.get(cleaned, cleaned)
 
 
+@lru_cache(maxsize=16384)
 def canonical_municipality_display(municipality: str | None) -> str | None:
     """Returns the canonical display name for a municipality (fixing missing diacritics like 'Horný Čepen' -> 'Horný Čepeň')."""
     if not municipality:
@@ -2697,6 +2736,16 @@ def canonical_municipality_display(municipality: str | None) -> str | None:
     return _CANONICAL_MUNICIPALITY_DISPLAY.get(m_key, s)
 
 
+_HN_PREFIX_RE = re.compile(
+    r"^(?:dom\s*)?(?:č\.?|c\.?|číslo|cislo|nro\.?|no\.?|№|#)\s*",
+    re.IGNORECASE,
+)
+_HN_EXACT_RE = re.compile(r"0*(\d+)\s*([a-z]?)")
+_HN_LEAD_RE = re.compile(r"0*(\d+[a-z]?)")
+_HN_LEAD_SPLIT_RE = re.compile(r"0*(\d+)([a-z]?)")
+
+
+@lru_cache(maxsize=32768)
 def normalize_house_number(house_no: str | int | None) -> str:
     """
     Deterministic normalizer for census house numbers ('Číslo domu' / conscription number).
@@ -2708,12 +2757,7 @@ def normalize_house_number(house_no: str | int | None) -> str:
     if not raw:
         return ""
     # Strip common prefixes like 'dom č.', 'č.', 'nro.', 'no.'
-    raw = re.sub(
-        r"^(?:dom\s*)?(?:č\.?|c\.?|číslo|cislo|nro\.?|no\.?|№|#)\s*",
-        "",
-        raw,
-        flags=re.IGNORECASE,
-    ).strip()
+    raw = _HN_PREFIX_RE.sub("", raw).strip()
     if "/" in raw:
         parts = [p.strip(" -.") for p in raw.split("/") if p.strip(" -.")]
         for p in reversed(parts):
@@ -2723,15 +2767,15 @@ def normalize_house_number(house_no: str | int | None) -> str:
     raw = raw.strip(" .,;-/").lower()
     if not any(ch.isdigit() for ch in raw):
         return ""
-    m = re.fullmatch(r"0*(\d+)\s*([a-z]?)", raw)
+    m = _HN_EXACT_RE.fullmatch(raw)
     if m:
         num_part = str(int(m.group(1)))
         suffix = m.group(2) or ""
         return f"{num_part}{suffix}"
-    m_lead = re.search(r"0*(\d+[a-z]?)", raw)
+    m_lead = _HN_LEAD_RE.search(raw)
     if m_lead:
         tok = m_lead.group(1)
-        m2 = re.fullmatch(r"0*(\d+)([a-z]?)", tok)
+        m2 = _HN_LEAD_SPLIT_RE.fullmatch(tok)
         if m2:
             return f"{int(m2.group(1))}{m2.group(2)}"
         return tok
@@ -2819,6 +2863,7 @@ def text_matches_street(
     return False
 
 
+@lru_cache(maxsize=16384)
 def is_compatible_settlement(
     overview_settlement: str | None,
     candidate_street: str | None,

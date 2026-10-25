@@ -31,6 +31,10 @@ __pycache__/
 dist/
 build/
 
+# Rust build artifacts
+target/
+**/target/
+
 # Frontend build & dependencies
 node_modules/
 frontend/node_modules

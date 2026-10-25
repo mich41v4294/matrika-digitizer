@@ -156,14 +156,16 @@ export default function QuestionCenter({ lang = "sk", refreshStatus }: Props) {
 
   const submitAnswer = async (answerText: string) => {
     if (!activeQ || !answerText.trim()) return;
+    const answeredId = activeQ.id;
+    const cleanAnswer = answerText.trim();
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      const r = await fetch(`/api/questions/${activeQ.id}/answer`, {
+      const r = await fetch(`/api/questions/${answeredId}/answer`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          answer: answerText.trim(),
+          answer: cleanAnswer,
           answered_by: filterStatus === "skipped_for_admin" ? "Admin" : "Reviewer",
         }),
       });
@@ -177,7 +179,33 @@ export default function QuestionCenter({ lang = "sk", refreshStatus }: Props) {
         );
         return;
       }
-      await loadQuestions(filterStatus);
+      // Confirmed DB commit: update local list and counts immediately, then sync silently
+      setCustomAnswer("");
+      if (filterStatus === "answered") {
+        setQuestions((prev) =>
+          prev.map((q) =>
+            q.id === answeredId
+              ? { ...q, status: "answered", selected_answer: cleanAnswer }
+              : q
+          )
+        );
+      } else {
+        setQuestions((prev) => {
+          const next = prev.filter((q) => q.id !== answeredId);
+          setCurrentIdx((idx) => Math.max(0, Math.min(idx, next.length - 1)));
+          return next;
+        });
+        setCounts((prev) => ({
+          ...prev,
+          open: filterStatus === "open" ? Math.max(0, prev.open - 1) : prev.open,
+          skipped_for_admin:
+            filterStatus === "skipped_for_admin"
+              ? Math.max(0, prev.skipped_for_admin - 1)
+              : prev.skipped_for_admin,
+          answered: prev.answered + 1,
+        }));
+      }
+      void loadQuestions(filterStatus, true);
       refreshStatus?.();
     } catch {
       setErrorMsg(
@@ -192,10 +220,11 @@ export default function QuestionCenter({ lang = "sk", refreshStatus }: Props) {
 
   const skipQuestion = async () => {
     if (!activeQ) return;
+    const skippedId = activeQ.id;
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      const r = await fetch(`/api/questions/${activeQ.id}/skip`, { method: "POST" });
+      const r = await fetch(`/api/questions/${skippedId}/skip`, { method: "POST" });
       if (!r.ok) {
         const errData = await r.json().catch(() => ({}));
         setErrorMsg(
@@ -206,7 +235,23 @@ export default function QuestionCenter({ lang = "sk", refreshStatus }: Props) {
         );
         return;
       }
-      await loadQuestions(filterStatus);
+      // Confirmed DB commit: update local list and counts immediately, then sync silently
+      setCustomAnswer("");
+      if (filterStatus !== "skipped_for_admin") {
+        setQuestions((prev) => {
+          const next = prev.filter((q) => q.id !== skippedId);
+          setCurrentIdx((idx) => Math.max(0, Math.min(idx, next.length - 1)));
+          return next;
+        });
+        setCounts((prev) => ({
+          ...prev,
+          open: filterStatus === "open" ? Math.max(0, prev.open - 1) : prev.open,
+          answered:
+            filterStatus === "answered" ? Math.max(0, prev.answered - 1) : prev.answered,
+          skipped_for_admin: prev.skipped_for_admin + 1,
+        }));
+      }
+      void loadQuestions(filterStatus, true);
       refreshStatus?.();
     } catch {
       setErrorMsg(

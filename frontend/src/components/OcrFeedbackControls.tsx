@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Check, MessageSquare, ThumbsDown, ThumbsUp, X } from "lucide-react";
 
 export interface OcrFeedbackItem {
@@ -56,7 +56,7 @@ interface Props {
   onFeedbackSaved?: (feedback: OcrFeedbackItem | null) => void;
 }
 
-export default function OcrFeedbackControls({
+function OcrFeedbackControlsInner({
   lang,
   targetType = "row",
   rowId = null,
@@ -74,6 +74,8 @@ export default function OcrFeedbackControls({
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [showNoteInput, setShowNoteInput] = useState<boolean>(false);
   const [noteText, setNoteText] = useState<string>(initialFeedback?.comment || "");
+  const onSavedRef = useRef(onFeedbackSaved);
+  onSavedRef.current = onFeedbackSaved;
 
   useEffect(() => {
     setFeedback(initialFeedback || null);
@@ -113,7 +115,7 @@ export default function OcrFeedbackControls({
     try {
       const commentVal =
         commentOverride !== undefined ? commentOverride : noteText;
-      const res = await fetch("/api/debug/feedback", {
+      const res = await fetch("/api/debug/feedback?light=1", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -138,7 +140,7 @@ export default function OcrFeedbackControls({
         } else if (commentOverride !== undefined) {
           setShowNoteInput(false);
         }
-        onFeedbackSaved?.(saved);
+        onSavedRef.current?.(saved);
       }
     } catch {
       // ignore network error
@@ -151,14 +153,14 @@ export default function OcrFeedbackControls({
     if (!feedback?.id) return;
     setSubmitting(true);
     try {
-      const res = await fetch(`/api/debug/feedback/${feedback.id}`, {
+      const res = await fetch(`/api/debug/feedback/${feedback.id}?light=1`, {
         method: "DELETE",
       });
       if (res.ok) {
         setFeedback(null);
         setNoteText("");
         setShowNoteInput(false);
-        onFeedbackSaved?.(null);
+        onSavedRef.current?.(null);
       }
     } catch {
       // ignore
@@ -313,3 +315,23 @@ export default function OcrFeedbackControls({
     </div>
   );
 }
+
+const OcrFeedbackControls = React.memo(
+  OcrFeedbackControlsInner,
+  (prev, next) =>
+    prev.lang === next.lang &&
+    prev.targetType === next.targetType &&
+    prev.rowId === next.rowId &&
+    prev.scanId === next.scanId &&
+    prev.censusSheetId === next.censusSheetId &&
+    prev.personFactId === next.personFactId &&
+    prev.overviewHouseId === next.overviewHouseId &&
+    prev.municipalDistrictId === next.municipalDistrictId &&
+    prev.resetVersion === next.resetVersion &&
+    prev.compact === next.compact &&
+    (prev.initialFeedback?.id ?? null) === (next.initialFeedback?.id ?? null) &&
+    (prev.initialFeedback?.verdict ?? null) === (next.initialFeedback?.verdict ?? null) &&
+    (prev.initialFeedback?.comment ?? null) === (next.initialFeedback?.comment ?? null)
+);
+
+export default OcrFeedbackControls;

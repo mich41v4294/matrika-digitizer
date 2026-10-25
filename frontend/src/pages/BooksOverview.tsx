@@ -313,6 +313,8 @@ export default function BooksOverview({
     if (!isSearching) return;
     const t0 = performance.now();
     const timer = window.setInterval(() => {
+      const elapsed = Math.round(performance.now() - t0);
+      if (elapsed < 220) return;
       setSearchProgress((prev) => {
         if (!prev.running) return prev;
         const nextPct = Math.min(92, prev.progress_pct + Math.max(2, Math.round((94 - prev.progress_pct) * 0.22)));
@@ -323,10 +325,10 @@ export default function BooksOverview({
           total: estTotal,
           processed: estProcessed,
           progress_pct: nextPct,
-          elapsed_ms: Math.round(performance.now() - t0),
+          elapsed_ms: elapsed,
         };
       });
-    }, 200);
+    }, 450);
     return () => window.clearInterval(timer);
   }, [isSearching, scannedTotal, totalRecords]);
 
@@ -475,7 +477,7 @@ export default function BooksOverview({
     const pollInterval = window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
       void loadData(true);
-    }, 8000);
+    }, 20000);
     return () => {
       window.clearTimeout(debounceTimer);
       window.clearInterval(pollInterval);
@@ -619,8 +621,31 @@ export default function BooksOverview({
         );
         return;
       }
+      const resData = await res.json().catch(() => ({}));
+      const savedFact = resData.fact;
       setEditingFactId(null);
-      await loadData();
+      if (savedFact) {
+        setRecords((prev) =>
+          prev.map((item) =>
+            item.fact.id === factId
+              ? { ...item, fact: { ...item.fact, ...savedFact } }
+              : item
+          )
+        );
+        setSelectedScanDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                rows: prev.rows.map((r) =>
+                  r.fact?.id === factId
+                    ? { ...r, fact: { ...r.fact, ...savedFact } }
+                    : r
+                ),
+              }
+            : prev
+        );
+      }
+      void loadData(true);
       refreshStatus();
     } catch {
       setActionError(
@@ -652,7 +677,9 @@ export default function BooksOverview({
       }
       setConfirmDeleteFactId(null);
       if (editingFactId === factId) setEditingFactId(null);
-      await loadData();
+      setRecords((prev) => prev.filter((item) => item.fact.id !== factId));
+      setTotalRecords((prev) => Math.max(0, prev - 1));
+      void loadData(true);
       refreshStatus();
     } catch {
       setActionError(

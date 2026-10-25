@@ -670,6 +670,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     if (!isSearchingCensus) return;
     const t0 = performance.now();
     const timer = window.setInterval(() => {
+      const elapsed = Math.round(performance.now() - t0);
+      if (elapsed < 220) return;
       setCensusSearchProgress((prev) => {
         if (!prev.running) return prev;
         const nextPct = Math.min(92, prev.progress_pct + Math.max(2, Math.round((94 - prev.progress_pct) * 0.22)));
@@ -686,10 +688,10 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
           total: estTotal,
           processed: estProcessed,
           progress_pct: nextPct,
-          elapsed_ms: Math.round(performance.now() - t0),
+          elapsed_ms: elapsed,
         };
       });
-    }, 200);
+    }, 450);
     return () => window.clearInterval(timer);
   }, [isSearchingCensus, scannedSheetsTotal, stats?.total_cataloged_sheets, totalSheets]);
 
@@ -749,13 +751,24 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       if (birthPlaceFilter.trim()) ovParams.set("birth_place", birthPlaceFilter.trim());
       if (workspaceSearch.trim()) ovParams.set("q", workspaceSearch.trim());
 
+      const shouldFetchMuniOverview = Boolean(
+        selectedMunicipality.trim() ||
+          activeTab === "overview" ||
+          streetFilter.trim() ||
+          personNameFilter.trim() ||
+          birthYearFilter.trim() ||
+          birthPlaceFilter.trim() ||
+          workspaceSearch.trim()
+      );
       const sig = controller ? { signal: controller.signal } : undefined;
       const [statsRes, jobsRes, sheetsRes, muniSumRes, ovRes] = await Promise.all([
         fetch("/api/census/stats", sig),
         fetch("/api/census/jobs", sig),
         fetch(`/api/census/sheets?${sheetParams.toString()}`, sig),
         fetch(`/api/census/municipalities-summary?${muniSummaryParams.toString()}`, sig),
-        fetch(`/api/census/municipality-overview?${ovParams.toString()}`, sig),
+        shouldFetchMuniOverview
+          ? fetch(`/api/census/municipality-overview?${ovParams.toString()}`, sig)
+          : Promise.resolve(null),
       ]);
       if (controller?.signal.aborted) return;
 
@@ -804,9 +817,11 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
         const md = await muniSumRes.json();
         setLocalMunicipalities(md.municipalities || []);
       }
-      if (ovRes.ok) {
+      if (ovRes && ovRes.ok) {
         const od = (await ovRes.json()) as MunicipalityOverviewResponse;
         setMuniOverview(od);
+      } else if (!shouldFetchMuniOverview) {
+        setMuniOverview(null);
       }
     } catch (err: any) {
       if (err?.name === "AbortError") {
@@ -859,7 +874,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
       void loadWorkspaceData(true);
-    }, 8000);
+    }, 18000);
     return () => {
       window.clearTimeout(debounceTimer);
       window.clearInterval(timer);

@@ -65,12 +65,23 @@ def list_questions(
             if pf.row_id not in facts_by_row_id:
                 facts_by_row_id[pf.row_id] = pf
 
-    # Pre-fetch all rows for the involved scans in one query and cache parsed contexts
+    # Pre-fetch all rows for the involved scans in one query and lazily cache parsed contexts
     scan_rows_map: dict[int, list[RecordRow]] = {}
-    parsed_ctx_cache: dict[int, dict[str, str]] = {}
-    if scan_ids:
-        from backend.app.pipeline.decision_stage import parse_row_ocr_context
+    parsed_ctx_cache: dict[tuple[int, str], dict[str, str]] = {}
+    from backend.app.pipeline.decision_stage import parse_row_ocr_context
 
+    def _get_row_ctx(r_obj: RecordRow) -> dict[str, str]:
+        if not r_obj.raw_ocr_combined and not r_obj.raw_ocr_left and not r_obj.raw_ocr_right:
+            return {}
+        ck = (int(r_obj.id or 0), r_obj.raw_ocr_combined or "")
+        if r_obj.id is not None and ck in parsed_ctx_cache:
+            return parsed_ctx_cache[ck]
+        ctx_val = parse_row_ocr_context(r_obj.raw_ocr_left, r_obj.raw_ocr_right, r_obj.raw_ocr_combined)
+        if r_obj.id is not None:
+            parsed_ctx_cache[ck] = ctx_val
+        return ctx_val
+
+    if scan_ids:
         all_scan_rows = session.exec(
             select(RecordRow)
             .where(RecordRow.scan_id.in_(scan_ids))
@@ -78,10 +89,6 @@ def list_questions(
         ).all()
         for sr in all_scan_rows:
             scan_rows_map.setdefault(sr.scan_id, []).append(sr)
-            if sr.id is not None and sr.raw_ocr_combined:
-                parsed_ctx_cache[sr.id] = parse_row_ocr_context(
-                    sr.raw_ocr_left, sr.raw_ocr_right, sr.raw_ocr_combined
-                )
 
     enriched: list[dict[str, Any]] = []
     for q in items:
@@ -99,6 +106,7 @@ def list_questions(
                 llm_reason=q.question_en,
                 llm_candidates=stored_cands,
                 has_ditto=bool(row.has_ditto_marks if row else False),
+                parsed_ctx=_get_row_ctx(row),
             )
             if row
             else {
@@ -120,7 +128,7 @@ def list_questions(
                     if c.get("key") == q.field_name:
                         crop_url = c.get("crop_url")
                         break
-                n_ctx = parsed_ctx_cache.get(n.id or 0) or {}
+                n_ctx = _get_row_ctx(n)
                 summary_parts = []
                 if n_ctx.get("entry_number"):
                     summary_parts.append(f"č. {n_ctx['entry_number']}")

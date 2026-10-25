@@ -36,11 +36,13 @@ from backend.app.pipeline.extraction_stage import (
 )
 from backend.app.pipeline.feedback import (
     build_llm_debug_report_payload,
+    delete_ocr_feedback_fast,
     format_llm_debug_report_markdown,
     get_feedback_statistics,
     persist_llm_debug_report_files,
     reset_ocr_feedback,
     serialize_ocr_feedback,
+    submit_ocr_feedback_fast,
     upsert_ocr_feedback,
 )
 from backend.app.pipeline.ocr_stage import media_rel_to_path, run_ocr_for_row
@@ -197,12 +199,12 @@ def list_debug_feedback(
         stmt = stmt.where(OCRFeedback.model_combo == model_combo)
 
     rows = list(session.exec(stmt.limit(limit)).all())
+    report_files = persist_llm_debug_report_files(session)
     report_payload = build_llm_debug_report_payload(
         session,
         verdict_filter=verdict if verdict in ("correct", "incorrect") else None,
     )
     report_md = format_llm_debug_report_markdown(report_payload)
-    report_files = persist_llm_debug_report_files(session)
 
     return {
         "feedback": [serialize_ocr_feedback(r, include_traces=True) for r in rows],
@@ -216,8 +218,9 @@ def list_debug_feedback(
 def submit_debug_feedback(
     req: SubmitFeedbackRequest,
     session: SessionDep,
+    light: bool = False,
 ) -> dict[str, Any]:
-    fb = upsert_ocr_feedback(
+    return submit_ocr_feedback_fast(
         session,
         verdict=req.verdict,
         comment=req.comment,
@@ -229,37 +232,20 @@ def submit_debug_feedback(
         person_fact_id=req.person_fact_id,
         overview_house_id=req.overview_house_id,
         municipal_district_id=req.municipal_district_id,
+        light=light,
     )
-    report_payload = build_llm_debug_report_payload(session)
-    report_md = format_llm_debug_report_markdown(report_payload)
-    return {
-        "status": "ok",
-        "feedback": serialize_ocr_feedback(fb, include_traces=True),
-        "stats": report_payload["statistics"],
-        "report_markdown": report_md,
-        "report_files": report_payload["statistics"]["summary"]["report_files"],
-    }
 
 
 @router.delete("/feedback/{feedback_id}")
 def delete_debug_feedback(
     feedback_id: int,
     session: SessionDep,
+    light: bool = False,
 ) -> dict[str, Any]:
-    fb = session.get(OCRFeedback, feedback_id)
-    if not fb:
+    res = delete_ocr_feedback_fast(session, feedback_id, light=light)
+    if res is None:
         raise HTTPException(status_code=404, detail="Feedback not found")
-    session.delete(fb)
-    session.commit()
-    report_files = persist_llm_debug_report_files(session)
-    report_payload = build_llm_debug_report_payload(session)
-    return {
-        "status": "deleted",
-        "deleted_id": feedback_id,
-        "stats": report_payload["statistics"],
-        "report_markdown": format_llm_debug_report_markdown(report_payload),
-        "report_files": report_files,
-    }
+    return res
 
 
 @router.get("/feedback/export")
@@ -278,7 +264,8 @@ def export_debug_feedback_file(
     fmt = format.strip().lower()
     suffix = f"_{verdict}" if verdict in ("correct", "incorrect") else (f"_item_{feedback_id}" if feedback_id else "")
     if fmt == "json":
-        content = json.dumps(payload, ensure_ascii=False, indent=2)
+        clean_payload = {k: v for k, v in payload.items() if k != "_cached_markdown"}
+        content = json.dumps(clean_payload, ensure_ascii=False, indent=2)
         filename = f"ocr_feedback_debug_report{suffix}.json"
         return Response(
             content=content,

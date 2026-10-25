@@ -106,6 +106,8 @@ def _ensure_sqlite_columns() -> None:
             "CREATE INDEX IF NOT EXISTS ix_censusoverviewhouse_sheet_row ON censusoverviewhouse (census_sheet_id, row_index)",
             "CREATE INDEX IF NOT EXISTS ix_censusmunicipaloverviewdistrict_sheet_row ON censusmunicipaloverviewdistrict (census_sheet_id, row_index)",
             "CREATE INDEX IF NOT EXISTS ix_workflowtrace_scan_id ON workflowtrace (scan_id, id)",
+            "CREATE INDEX IF NOT EXISTS ix_workflowtrace_row_id ON workflowtrace (row_id, id)",
+            "CREATE INDEX IF NOT EXISTS ix_workflowtrace_stats_cov ON workflowtrace (id, scan_id, row_id, stage, model_or_tool, status, duration_ms, prompt_tokens, completion_tokens, reasoning_tokens, image_path)",
             "CREATE INDEX IF NOT EXISTS ix_questionitem_status_id ON questionitem (status, id)",
             "CREATE INDEX IF NOT EXISTS ix_ocrfeedback_verdict_combo ON ocrfeedback (verdict, model_combo)",
             "CREATE INDEX IF NOT EXISTS ix_ocrfeedback_row_id ON ocrfeedback (row_id, id)",

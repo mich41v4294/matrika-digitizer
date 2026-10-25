@@ -20,6 +20,49 @@ from backend.app.db.models import (
     utcnow,
 )
 
+try:
+    import matrika_db_rs as _rust_db
+except ImportError:
+    _rust_db = None
+
+
+def _session_file_db_path(session: Session) -> str | None:
+    if _rust_db is None:
+        return None
+    try:
+        if session.new or session.dirty or session.deleted:
+            return None
+        bind = session.get_bind()
+        db_name = getattr(getattr(bind, "url", None), "database", None)
+        if not db_name or db_name == ":memory:" or str(db_name).startswith("file::memory:"):
+            return None
+        p = Path(str(db_name))
+        if p.exists():
+            return str(p)
+    except Exception:
+        pass
+    return None
+
+
+def _rust_model_defaults_args() -> tuple[str, str, str, str, list[str]]:
+    r_ocr = settings.resolve_stage_ai("ocr")
+    r_dec = settings.resolve_stage_ai("decision")
+    r_ext = settings.resolve_stage_ai("extract")
+    r_lay = settings.resolve_stage_ai("layout")
+    known = [
+        settings.local_model_ocr,
+        settings.local_model_decision,
+        settings.local_model_extract,
+        settings.local_model_layout,
+    ]
+    return (
+        f"{r_ocr['provider']}:{r_ocr['model']}",
+        f"{r_dec['provider']}:{r_dec['model']}",
+        f"{r_ext['provider']}:{r_ext['model']}",
+        f"{r_lay['provider']}:{r_lay['model']}",
+        known,
+    )
+
 
 def normalize_model_tag(raw: str | None, stage_hint: str = "extract") -> str:
     val = str(raw or "").strip()
@@ -685,6 +728,128 @@ def upsert_ocr_feedback(
     return existing
 
 
+def submit_ocr_feedback_fast(
+    session: Session,
+    *,
+    verdict: str,
+    comment: str | None = None,
+    expected_correction: str | None = None,
+    target_type: str = "row",
+    row_id: int | None = None,
+    scan_id: int | None = None,
+    census_sheet_id: int | None = None,
+    person_fact_id: int | None = None,
+    overview_house_id: int | None = None,
+    municipal_district_id: int | None = None,
+    light: bool = False,
+) -> dict[str, Any]:
+    db_p = _session_file_db_path(session)
+    if db_p and _rust_db is not None:
+        try:
+            d_ocr, d_dec, d_ext, d_lay, known = _rust_model_defaults_args()
+            raw = _rust_db.upsert_ocr_feedback_rs(
+                db_p,
+                str(settings.data_dir),
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(settings.get_ai_runtime_config(), ensure_ascii=False),
+                d_ocr,
+                d_dec,
+                d_ext,
+                d_lay,
+                known,
+                verdict,
+                comment=comment,
+                expected_correction=expected_correction,
+                target_type=target_type,
+                row_id=row_id,
+                scan_id=scan_id,
+                census_sheet_id=census_sheet_id,
+                person_fact_id=person_fact_id,
+                overview_house_id=overview_house_id,
+                municipal_district_id=municipal_district_id,
+            )
+            res = json.loads(raw)
+            if light:
+                res.pop("report_markdown", None)
+            return res
+        except Exception:
+            pass
+
+    fb = upsert_ocr_feedback(
+        session,
+        verdict=verdict,
+        comment=comment,
+        expected_correction=expected_correction,
+        target_type=target_type,
+        row_id=row_id,
+        scan_id=scan_id,
+        census_sheet_id=census_sheet_id,
+        person_fact_id=person_fact_id,
+        overview_house_id=overview_house_id,
+        municipal_district_id=municipal_district_id,
+    )
+    report_payload = build_llm_debug_report_payload(session)
+    report_md = format_llm_debug_report_markdown(report_payload)
+    out: dict[str, Any] = {
+        "status": "ok",
+        "feedback": serialize_ocr_feedback(fb, include_traces=True),
+        "stats": report_payload["statistics"],
+        "report_files": report_payload["statistics"]["summary"]["report_files"],
+    }
+    if not light:
+        out["report_markdown"] = report_md
+    return out
+
+
+def delete_ocr_feedback_fast(
+    session: Session,
+    feedback_id: int,
+    *,
+    light: bool = False,
+) -> dict[str, Any] | None:
+    db_p = _session_file_db_path(session)
+    if db_p and _rust_db is not None:
+        try:
+            d_ocr, d_dec, d_ext, d_lay, known = _rust_model_defaults_args()
+            raw_opt = _rust_db.delete_ocr_feedback_rs(
+                db_p,
+                str(settings.data_dir),
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(settings.get_ai_runtime_config(), ensure_ascii=False),
+                d_ocr,
+                d_dec,
+                d_ext,
+                d_lay,
+                known,
+                feedback_id,
+            )
+            if raw_opt is None:
+                return None
+            res = json.loads(raw_opt)
+            if light:
+                res.pop("report_markdown", None)
+            return res
+        except Exception:
+            pass
+
+    fb = session.get(OCRFeedback, feedback_id)
+    if not fb:
+        return None
+    session.delete(fb)
+    session.commit()
+    report_files = persist_llm_debug_report_files(session)
+    report_payload = build_llm_debug_report_payload(session)
+    out: dict[str, Any] = {
+        "status": "deleted",
+        "deleted_id": feedback_id,
+        "stats": report_payload["statistics"],
+        "report_files": report_files,
+    }
+    if not light:
+        out["report_markdown"] = format_llm_debug_report_markdown(report_payload)
+    return out
+
+
 def serialize_ocr_feedback(fb: OCRFeedback, *, include_traces: bool = True) -> dict[str, Any]:
     extracted_obj: dict[str, Any] = {}
     stage_breakdown: dict[str, Any] = {}
@@ -790,6 +955,35 @@ def reset_ocr_feedback(
     sheet, scan(s), row(s), person fact, overview house, or municipal overview district,
     and refreshes the workspace LLM debug report files.
     """
+    if commit:
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None:
+            try:
+                eff_scan_ids = list(set(scan_ids or []) | ({scan_id} if scan_id else set()))
+                eff_row_ids = list(set(row_ids or []) | ({row_id} if row_id else set()))
+                d_ocr, d_dec, d_ext, d_lay, known = _rust_model_defaults_args()
+                return int(
+                    _rust_db.reset_ocr_feedback_rs(
+                        db_p,
+                        str(settings.data_dir),
+                        datetime.now(timezone.utc).isoformat(),
+                        json.dumps(settings.get_ai_runtime_config(), ensure_ascii=False),
+                        d_ocr,
+                        d_dec,
+                        d_ext,
+                        d_lay,
+                        known,
+                        census_sheet_id=census_sheet_id,
+                        scan_ids=eff_scan_ids if eff_scan_ids else None,
+                        row_ids=eff_row_ids if eff_row_ids else None,
+                        person_fact_id=person_fact_id,
+                        overview_house_id=overview_house_id,
+                        municipal_district_id=municipal_district_id,
+                    )
+                )
+            except Exception:
+                pass
+
     target_sheet_ids: set[int] = {census_sheet_id} if census_sheet_id else set()
     target_scan_ids: set[int] = set(scan_ids or [])
     if scan_id:
@@ -894,6 +1088,8 @@ def reset_ocr_feedback(
                         target_dist_ids.add(md.id)
 
     all_fb = list(session.exec(select(OCRFeedback)).all())
+    if not all_fb:
+        return 0
     deleted_count = 0
     for fb in all_fb:
         should_delete = False
@@ -936,6 +1132,26 @@ def build_feedback_lookup_maps(
     row_ids: list[int] | None = None,
     fact_ids: list[int] | None = None,
 ) -> dict[str, dict[int, dict[str, Any]]]:
+    db_p = _session_file_db_path(session)
+    if db_p and _rust_db is not None:
+        try:
+            raw_json = _rust_db.build_feedback_lookup_maps_rs(
+                db_p,
+                census_sheet_id=census_sheet_id,
+                scan_ids=[int(x) for x in scan_ids if x is not None] if scan_ids else None,
+                row_ids=[int(x) for x in row_ids if x is not None] if row_ids else None,
+                fact_ids=[int(x) for x in fact_ids if x is not None] if fact_ids else None,
+            )
+            parsed = json.loads(raw_json)
+            return {
+                "by_row": {int(k): v for k, v in (parsed.get("by_row") or {}).items()},
+                "by_fact": {int(k): v for k, v in (parsed.get("by_fact") or {}).items()},
+                "by_house": {int(k): v for k, v in (parsed.get("by_house") or {}).items()},
+                "by_dist": {int(k): v for k, v in (parsed.get("by_dist") or {}).items()},
+            }
+        except Exception:
+            pass
+
     stmt = select(OCRFeedback).order_by(OCRFeedback.updated_at.desc(), OCRFeedback.id.desc())
     if census_sheet_id is not None and scan_ids:
         stmt = stmt.where(
@@ -977,6 +1193,23 @@ def build_feedback_lookup_maps(
 
 
 def get_feedback_statistics(session: Session) -> dict[str, Any]:
+    db_p = _session_file_db_path(session)
+    if db_p and _rust_db is not None:
+        try:
+            d_ocr, d_dec, d_ext, d_lay, known = _rust_model_defaults_args()
+            raw = _rust_db.get_feedback_statistics_rs(
+                db_p,
+                str(settings.data_dir),
+                d_ocr,
+                d_dec,
+                d_ext,
+                d_lay,
+                known,
+            )
+            return json.loads(raw)
+        except Exception:
+            pass
+
     all_feedback = list(
         session.exec(select(OCRFeedback).order_by(OCRFeedback.id.desc())).all()
     )
@@ -1387,6 +1620,31 @@ def build_llm_debug_report_payload(
     verdict_filter: str | None = None,
     feedback_id: int | None = None,
 ) -> dict[str, Any]:
+    db_p = _session_file_db_path(session)
+    if db_p and _rust_db is not None:
+        try:
+            d_ocr, d_dec, d_ext, d_lay, known = _rust_model_defaults_args()
+            raw = _rust_db.build_and_persist_llm_debug_report_rs(
+                db_p,
+                str(settings.data_dir),
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(settings.get_ai_runtime_config(), ensure_ascii=False),
+                d_ocr,
+                d_dec,
+                d_ext,
+                d_lay,
+                known,
+                verdict_filter=verdict_filter if verdict_filter in ("correct", "incorrect") else None,
+                feedback_id=feedback_id,
+                persist_files=False,
+            )
+            res = json.loads(raw)
+            payload = res["payload"]
+            payload["_cached_markdown"] = res["markdown"]
+            return payload
+        except Exception:
+            pass
+
     stmt = select(OCRFeedback).order_by(
         # Show incorrect items first so the LLM immediately sees failure cases
         OCRFeedback.verdict.desc(),
@@ -1412,6 +1670,8 @@ def build_llm_debug_report_payload(
 
 
 def format_llm_debug_report_markdown(payload: dict[str, Any]) -> str:
+    if isinstance(payload.get("_cached_markdown"), str):
+        return str(payload["_cached_markdown"])
     stats = payload.get("statistics") or {}
     summary = stats.get("summary") or {}
     combos = stats.get("model_combos") or []
@@ -1603,9 +1863,38 @@ def format_llm_debug_report_markdown(payload: dict[str, Any]) -> str:
 
 
 def persist_llm_debug_report_files(session: Session) -> dict[str, str]:
+    db_p = _session_file_db_path(session)
+    if db_p and _rust_db is not None:
+        try:
+            d_ocr, d_dec, d_ext, d_lay, known = _rust_model_defaults_args()
+            _rust_db.build_and_persist_llm_debug_report_rs(
+                db_p,
+                str(settings.data_dir),
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(settings.get_ai_runtime_config(), ensure_ascii=False),
+                d_ocr,
+                d_dec,
+                d_ext,
+                d_lay,
+                known,
+                verdict_filter=None,
+                feedback_id=None,
+                persist_files=True,
+            )
+            data_dir = Path(settings.data_dir)
+            return {
+                "markdown_path": str(data_dir / "ocr_feedback_debug_report.md"),
+                "json_path": str(data_dir / "ocr_feedback_debug_report.json"),
+                "relative_markdown_path": "data/ocr_feedback_debug_report.md",
+                "relative_json_path": "data/ocr_feedback_debug_report.json",
+            }
+        except Exception:
+            pass
+
     payload = build_llm_debug_report_payload(session)
     md_text = format_llm_debug_report_markdown(payload)
-    json_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    clean_payload = {k: v for k, v in payload.items() if k != "_cached_markdown"}
+    json_text = json.dumps(clean_payload, ensure_ascii=False, indent=2)
 
     data_dir = Path(settings.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)

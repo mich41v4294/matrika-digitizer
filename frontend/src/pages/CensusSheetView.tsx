@@ -1649,9 +1649,28 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         );
         return;
       }
+      const resData = await res.json().catch(() => ({}));
+      const savedFact = resData.fact;
       setActionError(null);
       setEditingMemberId(null);
-      await loadDetail();
+      if (savedFact) {
+        setDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                members: (prev.members || []).map((m) =>
+                  m.fact.id === factId
+                    ? {
+                        ...m,
+                        fact: { ...m.fact, ...savedFact },
+                      }
+                    : m
+                ),
+              }
+            : prev
+        );
+      }
+      void loadDetail();
       refreshStatus();
     } catch {
       setActionError(
@@ -1683,7 +1702,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       }
       setConfirmDeleteMemberId(null);
       if (editingMemberId === factId) setEditingMemberId(null);
-      await loadDetail();
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              members: (prev.members || []).filter((m) => m.fact.id !== factId),
+            }
+          : prev
+      );
+      void loadDetail();
       refreshStatus();
     } catch {
       setActionError(
@@ -1710,7 +1737,32 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       }),
     });
     if (r.ok) {
-      await loadDetail();
+      const resData = await r.json().catch(() => ({}));
+      const createdFact = resData.fact;
+      if (createdFact) {
+        setDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                members: [
+                  ...(prev.members || []),
+                  {
+                    fact: createdFact,
+                    row: null,
+                    dwelling_unit: "I",
+                    household_id: prev.household?.id ?? null,
+                    stitched_crop_url: null,
+                    cell_crops: {},
+                    fs_match: null,
+                    local_matches: [],
+                    ocr_feedback: null,
+                  },
+                ],
+              }
+            : prev
+        );
+      }
+      void loadDetail();
       refreshStatus();
     }
   };
@@ -1774,8 +1826,22 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         );
         return;
       }
+      const resData = await res.json().catch(() => ({}));
+      const savedHouse = resData.overview_house;
       setEditingHouseId(null);
-      await loadDetail();
+      if (savedHouse) {
+        setDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                overview_houses: (prev.overview_houses || []).map((h) =>
+                  h.id === houseId ? { ...h, ...savedHouse } : h
+                ),
+              }
+            : prev
+        );
+      }
+      void loadDetail();
       refreshStatus();
     } catch {
       setActionError(
@@ -1807,7 +1873,17 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       }
       setConfirmDeleteHouseId(null);
       if (editingHouseId === houseId) setEditingHouseId(null);
-      await loadDetail();
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              overview_houses: (prev.overview_houses || []).filter(
+                (h) => h.id !== houseId
+              ),
+            }
+          : prev
+      );
+      void loadDetail();
       refreshStatus();
     } catch {
       setActionError(
@@ -1876,8 +1952,24 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         );
         return;
       }
+      const resData = await res.json().catch(() => ({}));
+      const savedDistrict = resData.municipal_overview_district;
       setEditingDistrictRowId(null);
-      await loadDetail();
+      if (savedDistrict) {
+        setDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                municipal_overview_districts: (
+                  prev.municipal_overview_districts || []
+                ).map((d) =>
+                  d.id === districtId ? { ...d, ...savedDistrict } : d
+                ),
+              }
+            : prev
+        );
+      }
+      void loadDetail();
       refreshStatus();
     } catch {
       setActionError(
@@ -1909,7 +2001,17 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       }
       setConfirmDeleteDistrictRowId(null);
       if (editingDistrictRowId === districtId) setEditingDistrictRowId(null);
-      await loadDetail();
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              municipal_overview_districts: (
+                prev.municipal_overview_districts || []
+              ).filter((d) => d.id !== districtId),
+            }
+          : prev
+      );
+      void loadDetail();
       refreshStatus();
     } catch {
       setActionError(
@@ -1970,6 +2072,23 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     }
     return out;
   }, [detail?.overview_houses, highlightPersonQuery]);
+
+  const { rowsById, rowsByCrop } = useMemo(() => {
+    const byId = new Map<number, ScanRowRecord>();
+    const byCrop = new Map<string, ScanRowRecord>();
+    for (const r of detail?.rows || []) {
+      byId.set(r.id, r);
+      if (r.stitched_crop_path) {
+        byCrop.set(r.stitched_crop_path, r);
+      }
+    }
+    for (const m of detail?.members || []) {
+      if (m.row && m.row.id) {
+        byId.set(m.row.id, m.row);
+      }
+    }
+    return { rowsById: byId, rowsByCrop: byCrop };
+  }, [detail?.rows, detail?.members]);
 
   if (loading) {
     return (
@@ -2062,21 +2181,6 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     : activeOriginalUrl;
   const activeViewerSrc =
     activeScanMode === "overlay" ? activeOverlayUrl : activeOriginalUrl;
-
-  // Map rows by id and crop path for quick lookup
-  const rowsById = new Map<number, ScanRowRecord>();
-  const rowsByCrop = new Map<string, ScanRowRecord>();
-  for (const r of rows) {
-    rowsById.set(r.id, r);
-    if (r.stitched_crop_path) {
-      rowsByCrop.set(r.stitched_crop_path, r);
-    }
-  }
-  for (const m of members) {
-    if (m.row && m.row.id) {
-      rowsById.set(m.row.id, m.row);
-    }
-  }
 
   const resolveOverviewHouseRow = (h: CensusOverviewHouseRow): ScanRowRecord | null => {
     if (h.row_id && rowsById.has(h.row_id)) {

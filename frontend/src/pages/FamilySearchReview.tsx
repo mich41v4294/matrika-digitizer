@@ -545,9 +545,17 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
       return;
     }
     const resData = await r.json().catch(() => null);
+    const confirmedReviewed =
+      typeof resData?.reviewed_by_user === "boolean"
+        ? resData.reviewed_by_user
+        : !currentReviewed;
+    setMatches((prev) =>
+      prev.map((m) =>
+        m.id === matchId ? { ...m, reviewed_by_user: confirmedReviewed } : m
+      )
+    );
     const prog = extractFsProgress(resData);
     if (prog) setProgress(prog);
-    await loadAll(true);
     refreshStatus?.();
   };
 

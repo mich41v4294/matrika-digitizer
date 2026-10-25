@@ -118,11 +118,32 @@ def _serialize_scan(scan: ScanImage | None) -> dict[str, Any] | None:
     }
 
 
+_THUMBNAIL_CACHE: dict[str, tuple[float, set[str]]] = {}
+
+
+def _get_existing_thumbs_set(thumb_dir: Path) -> set[str]:
+    key = str(thumb_dir)
+    now = time.monotonic()
+    cached = _THUMBNAIL_CACHE.get(key)
+    if cached is not None and (now - cached[0]) < 15.0:
+        return cached[1]
+    existing: set[str] = set()
+    try:
+        if thumb_dir.is_dir():
+            existing = {p.name for p in thumb_dir.iterdir() if p.is_file()}
+    except OSError:
+        pass
+    _THUMBNAIL_CACHE[key] = (now, existing)
+    return existing
+
+
 def _census_thumbnail_url(slovakiana_key: str, census_root: Path) -> str | None:
-    local_thumb_path = census_root / "thumbnails" / f"{slovakiana_key}.jpg"
-    fallback_thumb_path = Path(settings.upload_dir) / "slovakiana" / "thumbnails" / f"{slovakiana_key}.jpg"
-    if local_thumb_path.exists() or fallback_thumb_path.exists():
-        return f"/media/uploads/slovakiana/thumbnails/{slovakiana_key}.jpg"
+    fname = f"{slovakiana_key}.jpg"
+    if fname in _get_existing_thumbs_set(census_root / "thumbnails"):
+        return f"/media/uploads/slovakiana/thumbnails/{fname}"
+    fallback_dir = Path(settings.upload_dir) / "slovakiana" / "thumbnails"
+    if fname in _get_existing_thumbs_set(fallback_dir):
+        return f"/media/uploads/slovakiana/thumbnails/{fname}"
     return None
 
 
@@ -347,10 +368,20 @@ def _fact_matches_person_name(
 ) -> bool:
     if not person_name or not person_name.strip():
         return True
-    candidates = extract_person_fact_name_candidates(pf, ocr_text=ocr_text)
+    p_clean = person_name.strip()
+    struct_cands = extract_person_fact_name_candidates(pf, ocr_text=None)
+    if _text_matches_person_name(struct_cands, p_clean):
+        return True
+    p_fold = fold_text_diacritics(p_clean)
     if pf.observationes_raw:
-        candidates.append(pf.observationes_raw)
-    return _text_matches_person_name(candidates, person_name)
+        if p_fold and p_fold in fold_text_diacritics(pf.observationes_raw):
+            return True
+    if ocr_text:
+        if p_fold and p_fold in fold_text_diacritics(ocr_text):
+            return True
+        if not struct_cands and _text_matches_person_name([ocr_text], p_clean):
+            return True
+    return False
 
 
 def _overview_house_matches_person_query(
@@ -359,15 +390,16 @@ def _overview_house_matches_person_query(
 ) -> bool:
     if not person_query or not person_query.strip():
         return True
-    return _text_matches_person_name(
-        [
-            ovh.owner_name,
-            ovh.owner_surname_folded,
-            ovh.raw_ocr_text,
-            ovh.remarks,
-        ],
-        person_query,
-    )
+    p_clean = person_query.strip()
+    if _text_matches_person_name([ovh.owner_name, ovh.owner_surname_folded, ovh.remarks], p_clean):
+        return True
+    if ovh.raw_ocr_text:
+        p_fold = fold_text_diacritics(p_clean)
+        if p_fold and p_fold in fold_text_diacritics(ovh.raw_ocr_text):
+            return True
+        if not ovh.owner_name and _text_matches_person_name([ovh.raw_ocr_text], p_clean):
+            return True
+    return False
 
 
 def _fact_matches_birth_place(pf: PersonFact, birth_place: str | None) -> bool:
@@ -711,6 +743,15 @@ async def get_census_facets(
 
 @router.get("/stats")
 def get_census_stats(session: SessionDep) -> dict[str, Any]:
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None:
+            return json.loads(_rust_db.get_census_stats_rs(db_p))
+    except Exception:
+        pass
+
     total_sheets = session.exec(select(func.count()).select_from(CensusSheet)).one()
     sheets_1930 = session.exec(
         select(func.count()).select_from(CensusSheet).where(CensusSheet.census_year == 1930)
@@ -1072,7 +1113,7 @@ def list_census_sheets(
             if ovh.matched_sheet_id:
                 if ovh.settlement_name:
                     matched_ovh_settlements_by_sheet.setdefault(ovh.matched_sheet_id, []).append(ovh.settlement_name)
-                for tx in (ovh.owner_name, ovh.raw_ocr_text, ovh.remarks):
+                for tx in (ovh.owner_name, ovh.remarks):
                     if tx:
                         matched_ovh_owners_by_sheet.setdefault(ovh.matched_sheet_id, []).append(tx)
         for md in session.exec(
@@ -1109,9 +1150,9 @@ def list_census_sheets(
                 *matched_ovh_owners_by_sheet.get(sid, []),
             ]
             for ovh_item in s_ovhs:
-                name_parts.extend([ovh_item.owner_name, ovh_item.raw_ocr_text, ovh_item.remarks])
+                name_parts.extend([ovh_item.owner_name, ovh_item.remarks])
             for md_item in muni_districts_by_sheet.get(sid, []):
-                name_parts.extend([md_item.commissioner_name, md_item.raw_ocr_text, md_item.remarks])
+                name_parts.extend([md_item.commissioner_name, md_item.remarks])
             for hh_item in s_hhs:
                 hh_ser = _serialize_household(hh_item)
                 if hh_ser:
@@ -1466,14 +1507,16 @@ def _build_linked_house_sheet_entry(
     other_sheet: CensusSheet,
     hh: CensusHousehold | None = None,
     facts: list[PersonFact] | None = None,
+    *,
+    skip_db_lookup: bool = False,
 ) -> dict[str, Any]:
-    if hh is None and other_sheet.id:
+    if hh is None and not skip_db_lookup and other_sheet.id:
         hh = session.exec(
             select(CensusHousehold)
             .where(CensusHousehold.census_sheet_id == other_sheet.id)
             .order_by(CensusHousehold.id.asc())
         ).first()
-    if facts is None and other_sheet.id:
+    if facts is None and not skip_db_lookup and other_sheet.id:
         facts = list(
             session.exec(
                 select(PersonFact)
@@ -1702,6 +1745,7 @@ def _batch_find_linked_house_sheets(
                     o,
                     hh=hh_by_other_id.get(oid),
                     facts=facts_by_other_id.get(oid, []),
+                    skip_db_lookup=True,
                 )
             entries.append(entry_cache[oid])
         out[sid] = entries
@@ -1730,6 +1774,54 @@ def _find_same_year_house_sheets(
     return [_build_linked_house_sheet_entry(session, o) for o in same_year]
 
 
+def _prefetch_sheets_hh_and_facts(
+    session: SessionDep,
+    sheets: list[CensusSheet],
+) -> tuple[dict[int, CensusHousehold], dict[int, list[PersonFact]]]:
+    sids = list({cs.id for cs in sheets if cs.id is not None})
+    if not sids:
+        return {}, {}
+    hh_map: dict[int, CensusHousehold] = {}
+    for hh in session.exec(
+        select(CensusHousehold)
+        .where(CensusHousehold.census_sheet_id.in_(sids))  # type: ignore[union-attr]
+        .order_by(CensusHousehold.id.asc())
+    ).all():
+        if hh.census_sheet_id not in hh_map or (hh.dwelling_unit or "I") == "I":
+            if hh.census_sheet_id not in hh_map:
+                hh_map[hh.census_sheet_id] = hh
+    facts_map: dict[int, list[PersonFact]] = {sid: [] for sid in sids}
+    for pf in session.exec(
+        select(PersonFact)
+        .where(PersonFact.census_sheet_id.in_(sids))  # type: ignore[union-attr]
+        .order_by(PersonFact.id.asc())
+    ).all():
+        if pf.census_sheet_id is not None:
+            facts_map.setdefault(pf.census_sheet_id, []).append(pf)
+    return hh_map, facts_map
+
+
+def _build_candidate_sheets_index(
+    sheets: list[CensusSheet],
+) -> tuple[dict[int, CensusSheet], dict[tuple[str, str], list[CensusSheet]]]:
+    by_id: dict[int, CensusSheet] = {}
+    by_muni_hn: dict[tuple[str, str], list[CensusSheet]] = {}
+    for cs in sheets:
+        if cs.id is not None:
+            by_id[cs.id] = cs
+        if (cs.sheet_type or "household") in ("overview", "municipal_overview"):
+            continue
+        m_key = canonical_municipality_key(cs.municipality)
+        hn_key = normalize_house_number(cs.house_number)
+        if m_key and hn_key:
+            by_muni_hn.setdefault((m_key, hn_key), []).append(cs)
+            if "," in str(cs.house_number or ""):
+                base_hn = re.sub(r"[a-z]+$", "", hn_key)
+                if base_hn and base_hn != hn_key:
+                    by_muni_hn.setdefault((m_key, base_hn), []).append(cs)
+    return by_id, by_muni_hn
+
+
 def _serialize_overview_house(
     session: SessionDep,
     ovh: CensusOverviewHouse,
@@ -1740,11 +1832,26 @@ def _serialize_overview_house(
     row_obj: RecordRow | None = None,
     scan_obj: ScanImage | None = None,
     candidate_sheets: list[CensusSheet] | None = None,
+    candidate_hh_by_sheet: dict[int, CensusHousehold] | None = None,
+    candidate_facts_by_sheet: dict[int, list[PersonFact]] | None = None,
+    candidate_by_id: dict[int, CensusSheet] | None = None,
+    candidate_by_muni_hn: dict[tuple[str, str], list[CensusSheet]] | None = None,
+    candidate_entry_cache: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if overview_sheet is None and ovh.census_sheet_id:
         overview_sheet = session.get(CensusSheet, ovh.census_sheet_id)
     if scan_obj is None and ovh.scan_id:
         scan_obj = session.get(ScanImage, ovh.scan_id)
+
+    cand_by_id: dict[int, CensusSheet] = (
+        candidate_by_id
+        if candidate_by_id is not None
+        else (
+            {cs.id: cs for cs in candidate_sheets if cs.id is not None}
+            if candidate_sheets is not None
+            else {}
+        )
+    )
 
     # Validate any passed or stored matched_sheet strictly against same-village + same-year + same-house rules
     if matched_sheet is not None and not can_match_overview_house_to_sheet(ovh, matched_sheet, overview_sheet=overview_sheet):
@@ -1753,7 +1860,7 @@ def _serialize_overview_house(
         matched_members_count = 0
 
     if matched_sheet is None and ovh.matched_sheet_id:
-        cand = session.get(CensusSheet, ovh.matched_sheet_id)
+        cand = cand_by_id.get(ovh.matched_sheet_id) or session.get(CensusSheet, ovh.matched_sheet_id)
         if cand and can_match_overview_house_to_sheet(ovh, cand, overview_sheet=overview_sheet):
             matched_sheet = cand
 
@@ -1764,7 +1871,9 @@ def _serialize_overview_house(
     # Find all sheets in the exact same canonical village + exact same normalized house number across years (1930 & 1940)
     all_village_house_sheets: list[CensusSheet] = []
     if target_muni and target_hn:
-        if candidate_sheets is None:
+        if candidate_by_muni_hn is not None:
+            sheets_iter = candidate_by_muni_hn.get((target_muni, target_hn), [])
+        elif candidate_sheets is None:
             stmt = select(CensusSheet).where(
                 CensusSheet.house_number.is_not(None),
                 CensusSheet.sheet_type.notin_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
@@ -1781,7 +1890,7 @@ def _serialize_overview_house(
             eff_type = cs.sheet_type or "household"
             if eff_type in ("overview", "municipal_overview"):
                 continue
-            if canonical_municipality_key(cs.municipality) != target_muni:
+            if candidate_by_muni_hn is None and canonical_municipality_key(cs.municipality) != target_muni:
                 continue
             if (
                 overview_sheet is not None
@@ -1807,13 +1916,19 @@ def _serialize_overview_house(
     )
 
     if matched_sheet and matched_hh is None:
-        matched_hh = session.exec(
-            select(CensusHousehold).where(CensusHousehold.census_sheet_id == matched_sheet.id)
-        ).first()
+        if candidate_hh_by_sheet is not None and matched_sheet.id is not None:
+            matched_hh = candidate_hh_by_sheet.get(matched_sheet.id)
+        else:
+            matched_hh = session.exec(
+                select(CensusHousehold).where(CensusHousehold.census_sheet_id == matched_sheet.id)
+            ).first()
         if not matched_members_count:
-            matched_members_count = session.exec(
-                select(func.count()).select_from(PersonFact).where(PersonFact.census_sheet_id == matched_sheet.id)
-            ).one()
+            if candidate_facts_by_sheet is not None and matched_sheet.id in candidate_facts_by_sheet:
+                matched_members_count = len(candidate_facts_by_sheet[matched_sheet.id])
+            else:
+                matched_members_count = session.exec(
+                    select(func.count()).select_from(PersonFact).where(PersonFact.census_sheet_id == matched_sheet.id)
+                ).one()
     head_name = None
     if matched_hh and matched_hh.house_owner_name:
         head_name = matched_hh.house_owner_name
@@ -1855,13 +1970,31 @@ def _serialize_overview_house(
     ovh_dump["municipality"] = canonical_municipality_display(ovh.municipality) or ovh.municipality
     ovh_dump["matched_sheet_id"] = matched_sheet.id if matched_sheet else None
 
+    def _entry_for(cs_obj: CensusSheet, explicit_hh: CensusHousehold | None = None) -> dict[str, Any]:
+        cid = cs_obj.id or 0
+        if cid and candidate_entry_cache is not None and cid in candidate_entry_cache:
+            return candidate_entry_cache[cid]
+        has_prefetched = candidate_hh_by_sheet is not None and candidate_facts_by_sheet is not None and cid in candidate_facts_by_sheet
+        hh_arg = explicit_hh or (candidate_hh_by_sheet.get(cid) if candidate_hh_by_sheet is not None else None)
+        facts_arg = candidate_facts_by_sheet.get(cid) if (candidate_facts_by_sheet is not None and cid in candidate_facts_by_sheet) else None
+        built = _build_linked_house_sheet_entry(
+            session,
+            cs_obj,
+            hh=hh_arg,
+            facts=facts_arg,
+            skip_db_lookup=has_prefetched,
+        )
+        if cid and candidate_entry_cache is not None:
+            candidate_entry_cache[cid] = built
+        return built
+
     matched_sheet_entry = (
-        _build_linked_house_sheet_entry(session, matched_sheet, hh=matched_hh)
+        _entry_for(matched_sheet, explicit_hh=matched_hh)
         if matched_sheet
         else None
     )
     matched_sheets_entries = [
-        _build_linked_house_sheet_entry(session, cs)
+        _entry_for(cs)
         for cs in all_village_house_sheets
     ]
 
@@ -2057,6 +2190,10 @@ def _repair_misclassified_district_overview_sheet(
     return existing_ov_houses
 
 
+_CLEAN_OV_SIGNATURES: dict[int, tuple[Any, ...]] = {}
+_CLEAN_MUNI_OV_SIGNATURES: dict[int, tuple[Any, ...]] = {}
+
+
 def _deduplicate_and_repair_overview_houses(
     session: SessionDep,
     sheet: CensusSheet,
@@ -2071,6 +2208,14 @@ def _deduplicate_and_repair_overview_houses(
     """
     if not ov_rows:
         return []
+    sig = (
+        sheet.id,
+        sheet.updated_at,
+        len(ov_rows),
+        tuple((r.id, r.row_index, r.house_number, r.owner_name, r.household_count, r.present_persons_count) for r in ov_rows),
+    )
+    if sheet.id is not None and _CLEAN_OV_SIGNATURES.get(sheet.id) == sig:
+        return ov_rows
     dirty = False
     s_key = str(sheet.slovakiana_key or "").strip()
 
@@ -2296,6 +2441,13 @@ def _deduplicate_and_repair_overview_houses(
         session.commit()
         for ovh in kept:
             session.refresh(ovh)
+    if sheet.id is not None:
+        _CLEAN_OV_SIGNATURES[sheet.id] = (
+            sheet.id,
+            sheet.updated_at,
+            len(kept),
+            tuple((r.id, r.row_index, r.house_number, r.owner_name, r.household_count, r.present_persons_count) for r in kept),
+        )
     return kept
 
 
@@ -2311,6 +2463,15 @@ def _deduplicate_and_repair_municipal_overview(
     from misread header OCR), reconciles arithmetic sums across district and 'Spolu' rows, and ensures
     linked child district sheets have `sheet_type = 'overview'` with normalized `obvod_number` and `commissioner_name`.
     """
+    sig = (
+        sheet.id,
+        sheet.updated_at,
+        sheet.commissioner_name,
+        len(md_rows),
+        tuple((r.id, r.row_index, r.obvod_number, r.commissioner_name, r.houses_total, r.present_persons_count) for r in md_rows),
+    )
+    if sheet.id is not None and _CLEAN_MUNI_OV_SIGNATURES.get(sheet.id) == sig:
+        return md_rows
     dirty = False
     if not is_valid_commissioner_or_revisor_name(
         sheet.commissioner_name,
@@ -2395,6 +2556,14 @@ def _deduplicate_and_repair_municipal_overview(
         session.refresh(sheet)
         for md in kept:
             session.refresh(md)
+    if sheet.id is not None:
+        _CLEAN_MUNI_OV_SIGNATURES[sheet.id] = (
+            sheet.id,
+            sheet.updated_at,
+            sheet.commissioner_name,
+            len(kept),
+            tuple((r.id, r.row_index, r.obvod_number, r.commissioner_name, r.houses_total, r.present_persons_count) for r in kept),
+        )
     return kept
 
 
@@ -2727,6 +2896,8 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             )
 
     ov_candidate_sheets: list[CensusSheet] | None = None
+    ov_cand_hh_map: dict[int, CensusHousehold] = {}
+    ov_cand_facts_map: dict[int, list[PersonFact]] = {}
     if overview_houses_rows:
         ov_hn_ints = {ovh.house_number_int for ovh in overview_houses_rows if ovh.house_number_int is not None}
         ov_hn_strs = {str(ovh.house_number).strip() for ovh in overview_houses_rows if ovh.house_number}
@@ -2744,6 +2915,11 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
         elif ov_hn_strs:
             cand_stmt = cand_stmt.where(CensusSheet.house_number.in_(ov_hn_strs))  # type: ignore[union-attr]
         ov_candidate_sheets = list(session.exec(cand_stmt).all())
+        ov_cand_hh_map, ov_cand_facts_map = _prefetch_sheets_hh_and_facts(session, ov_candidate_sheets)
+        ov_cand_by_id, ov_cand_by_muni_hn = _build_candidate_sheets_index(ov_candidate_sheets)
+        ov_entry_cache: dict[int, dict[str, Any]] = {}
+    else:
+        ov_cand_by_id, ov_cand_by_muni_hn, ov_entry_cache = {}, {}, {}
     overview_houses: list[dict[str, Any]] = []
     for ovh in overview_houses_rows:
         matched_row = rows_by_crop.get(ovh.stitched_crop_path or "")
@@ -2763,6 +2939,11 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
                 row_obj=matched_row,
                 scan_obj=scans_by_id.get(ovh.scan_id or 0),
                 candidate_sheets=ov_candidate_sheets,
+                candidate_hh_by_sheet=ov_cand_hh_map,
+                candidate_facts_by_sheet=ov_cand_facts_map,
+                candidate_by_id=ov_cand_by_id,
+                candidate_by_muni_hn=ov_cand_by_muni_hn,
+                candidate_entry_cache=ov_entry_cache,
             )
         )
 
@@ -2902,6 +3083,9 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             elif j_hn_strs:
                 j_cand_stmt = j_cand_stmt.where(CensusSheet.house_number.in_(j_hn_strs))  # type: ignore[union-attr]
             j_cand_sheets = list(session.exec(j_cand_stmt).all())
+            j_cand_hh_map, j_cand_facts_map = _prefetch_sheets_hh_and_facts(session, j_cand_sheets)
+            j_cand_by_id, j_cand_by_muni_hn = _build_candidate_sheets_index(j_cand_sheets)
+            j_entry_cache: dict[int, dict[str, Any]] = {}
             seen_joined_keys: set[tuple[int, str]] = set()
             for jh in joined_ovh_rows:
                 j_key = (
@@ -2918,6 +3102,11 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
                         jh,
                         overview_sheet=parent_ov,
                         candidate_sheets=j_cand_sheets,
+                        candidate_hh_by_sheet=j_cand_hh_map,
+                        candidate_facts_by_sheet=j_cand_facts_map,
+                        candidate_by_id=j_cand_by_id,
+                        candidate_by_muni_hn=j_cand_by_muni_hn,
+                        candidate_entry_cache=j_entry_cache,
                     )
                 )
             joined_overview_houses.sort(
@@ -2966,6 +3155,16 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
             ]
             sibling_ov_sheets.sort(key=lambda cs: (cs.sheet_number or "9999", cs.id or 0))
             sib_by_id = {cs.id: cs for cs in sibling_ov_sheets if cs.id is not None}
+            sib_sids = list(sib_by_id.keys())
+            sib_house_counts: dict[int, int] = {sid: 0 for sid in sib_sids}
+            if sib_sids:
+                for ov_sid, cnt in session.exec(
+                    select(CensusOverviewHouse.census_sheet_id, func.count(CensusOverviewHouse.id))
+                    .where(CensusOverviewHouse.census_sheet_id.in_(sib_sids))  # type: ignore[union-attr]
+                    .group_by(CensusOverviewHouse.census_sheet_id)
+                ).all():
+                    if ov_sid is not None:
+                        sib_house_counts[int(ov_sid)] = int(cnt)
             linked_municipal_overview = {
                 **_serialize_sheet(
                     parent_ms,
@@ -2978,11 +3177,14 @@ async def get_census_sheet_detail(sheet_ref: str, session: SessionDep) -> dict[s
                         md,
                         municipal_sheet=parent_ms,
                         overview_sheets_by_id=sib_by_id,
+                        overview_house_counts=sib_house_counts,
                     )
                     for md in md_rows_parent
                 ],
                 "sibling_overview_sheets": [
-                    _serialize_sheet(cs) for cs in sibling_ov_sheets if cs.id != sheet.id
+                    _serialize_sheet(cs, overview_houses_count=sib_house_counts.get(cs.id or 0, 0))
+                    for cs in sibling_ov_sheets
+                    if cs.id != sheet.id
                 ],
             }
 
@@ -4219,7 +4421,7 @@ def get_municipality_overview(
             entry.get("remarks"),
         ]
         if ovh_obj is not None:
-            name_parts.extend([ovh_obj.owner_name, ovh_obj.owner_surname_folded, ovh_obj.raw_ocr_text, ovh_obj.remarks])
+            name_parts.extend([ovh_obj.owner_name, ovh_obj.owner_surname_folded, ovh_obj.remarks])
         hh_dict = entry.get("household")
         if isinstance(hh_dict, dict):
             name_parts.extend(
@@ -4372,8 +4574,8 @@ def get_municipality_overview(
         )
 
         linked_sheets = (
-            linked_by_sheet_id.get(matched_sheet.id or 0)
-            if (matched_sheet and matched_sheet.id in linked_by_sheet_id)
+            linked_by_sheet_id.get(matched_sheet.id or 0, [])
+            if (matched_sheet and matched_sheet.id in sheets_by_id)
             else (_find_linked_house_sheets(session, matched_sheet) if matched_sheet else [])
         )
         for ls in linked_sheets:
@@ -4619,6 +4821,8 @@ def list_overview_houses(
     total = len(houses)
     paged = houses[offset : offset + limit]
     candidate_sheets: list[CensusSheet] | None = None
+    p_cand_hh_map: dict[int, CensusHousehold] = {}
+    p_cand_facts_map: dict[int, list[PersonFact]] = {}
     if paged:
         p_hn_ints = {h.house_number_int for h in paged if h.house_number_int is not None}
         p_hn_strs = {str(h.house_number).strip() for h in paged if h.house_number}
@@ -4636,10 +4840,24 @@ def list_overview_houses(
         elif p_hn_strs:
             cand_stmt = cand_stmt.where(CensusSheet.house_number.in_(p_hn_strs))  # type: ignore[union-attr]
         candidate_sheets = list(session.exec(cand_stmt).all())
+        p_cand_hh_map, p_cand_facts_map = _prefetch_sheets_hh_and_facts(session, candidate_sheets)
+        p_cand_by_id, p_cand_by_muni_hn = _build_candidate_sheets_index(candidate_sheets)
+        p_entry_cache: dict[int, dict[str, Any]] = {}
+    else:
+        p_cand_by_id, p_cand_by_muni_hn, p_entry_cache = {}, {}, {}
     return {
         "total": total,
         "overview_houses": [
-            _serialize_overview_house(session, h, candidate_sheets=candidate_sheets)
+            _serialize_overview_house(
+                session,
+                h,
+                candidate_sheets=candidate_sheets,
+                candidate_hh_by_sheet=p_cand_hh_map,
+                candidate_facts_by_sheet=p_cand_facts_map,
+                candidate_by_id=p_cand_by_id,
+                candidate_by_muni_hn=p_cand_by_muni_hn,
+                candidate_entry_cache=p_entry_cache,
+            )
             for h in paged
         ],
     }

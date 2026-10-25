@@ -336,37 +336,59 @@ def health_check() -> dict[str, str]:
 async def system_status() -> dict[str, Any]:
     ai_info = await ai_client.get_models_status()
     fs_env = read_fs_env()
-    with Session(engine) as session:
-        scans_count = session.exec(select(func.count()).select_from(ScanImage)).one()
-        rows_count = session.exec(select(func.count()).select_from(RecordRow)).one()
-        facts_count = session.exec(select(func.count()).select_from(PersonFact)).one()
-        open_q_count = session.exec(
-            select(func.count())
-            .select_from(QuestionItem)
-            .where(QuestionItem.status == "open")
-        ).one()
-        matched_fs_filter = (
-            FamilySearchMatch.fs_person_id.is_not(None),  # type: ignore[union-attr]
-            func.trim(FamilySearchMatch.fs_person_id) != "",
-            FamilySearchMatch.confidence_score > 0,
-        )
-        fs_row = session.exec(
-            select(
-                func.count(FamilySearchMatch.id),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (FamilySearchMatch.reviewed_by_user == False, 1),  # noqa: E712
-                            else_=0,
-                        )
+    counts_payload: dict[str, int] | None = None
+    try:
+        import json as _json
+        import matrika_db_rs as _rust_db
+
+        if settings.db_path and Path(settings.db_path).exists():
+            counts_payload = _json.loads(_rust_db.system_status_counts_rs(str(settings.db_path)))
+    except Exception:
+        counts_payload = None
+
+    if counts_payload is None:
+        with Session(engine) as session:
+            scans_count = session.exec(select(func.count()).select_from(ScanImage)).one()
+            rows_count = session.exec(select(func.count()).select_from(RecordRow)).one()
+            facts_count = session.exec(select(func.count()).select_from(PersonFact)).one()
+            open_q_count = session.exec(
+                select(func.count())
+                .select_from(QuestionItem)
+                .where(QuestionItem.status == "open")
+            ).one()
+            matched_fs_filter = (
+                FamilySearchMatch.fs_person_id.is_not(None),  # type: ignore[union-attr]
+                func.trim(FamilySearchMatch.fs_person_id) != "",
+                FamilySearchMatch.confidence_score > 0,
+            )
+            fs_row = session.exec(
+                select(
+                    func.count(FamilySearchMatch.id),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (FamilySearchMatch.reviewed_by_user == False, 1),  # noqa: E712
+                                else_=0,
+                            )
+                        ),
+                        0,
                     ),
-                    0,
-                ),
-            ).where(*matched_fs_filter)
-        ).one()
-        new_fs_count = int(fs_row[0] or 0)
-        unreviewed_fs_count = int(fs_row[1] or 0)
-        census_sheets_count = session.exec(select(func.count()).select_from(CensusSheet)).one()
+                ).where(*matched_fs_filter)
+            ).one()
+            new_fs_count = int(fs_row[0] or 0)
+            unreviewed_fs_count = int(fs_row[1] or 0)
+            census_sheets_count = session.exec(select(func.count()).select_from(CensusSheet)).one()
+            counts_payload = {
+                "scans": scans_count,
+                "rows": rows_count,
+                "facts": facts_count,
+                "open_questions": open_q_count,
+                "new_to_familysearch": new_fs_count,
+                "unreviewed_matches": unreviewed_fs_count,
+                "fs_pending_matches": unreviewed_fs_count,
+                "fs_matched": new_fs_count,
+                "census_sheets": census_sheets_count,
+            }
 
     return {
         "pangolin_public_url": settings.pangolin_public_url,
@@ -376,17 +398,7 @@ async def system_status() -> dict[str, Any]:
             "has_token": bool(fs_env.get("FS_ACCESS_TOKEN")),
             "environment": fs_env.get("FS_ENVIRONMENT", "production"),
         },
-        "counts": {
-            "scans": scans_count,
-            "rows": rows_count,
-            "facts": facts_count,
-            "open_questions": open_q_count,
-            "new_to_familysearch": new_fs_count,
-            "unreviewed_matches": unreviewed_fs_count,
-            "fs_pending_matches": unreviewed_fs_count,
-            "fs_matched": new_fs_count,
-            "census_sheets": census_sheets_count,
-        },
+        "counts": counts_payload,
         "pipeline_state": ws.ws_manager.latest_state,
     }
 

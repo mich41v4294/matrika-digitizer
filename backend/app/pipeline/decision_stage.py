@@ -322,6 +322,9 @@ def _repair_paleographic_variants(raw_text: str, field_name: str, ctx: dict[str,
     return candidates[:4] if candidates else ["Potvrdiť zápis podľa výrezu", "Nečitateľné / poškodené miesto"]
 
 
+_QUESTION_DETAILS_MEMO: dict[tuple[Any, ...], dict[str, Any]] = {}
+
+
 def build_slovak_question_details(
     scan: ScanImage | None,
     row: RecordRow,
@@ -330,13 +333,30 @@ def build_slovak_question_details(
     llm_reason: str | None = None,
     llm_candidates: list[str] | None = None,
     has_ditto: bool = False,
+    parsed_ctx: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Produces a rich Slovak question title (`question_sk`), detailed Slovak explanation
     (`description_sk`), structured `row_context`, and verified paleographic `candidates`.
     Never allows English or Slovak prompt template placeholders to leak to the UI.
     """
-    ctx = parse_row_ocr_context(row.raw_ocr_left, row.raw_ocr_right, row.raw_ocr_combined)
+    memo_key = (
+        row.id,
+        row.raw_ocr_combined,
+        row.raw_ocr_left,
+        row.raw_ocr_right,
+        scan.detected_type if scan else None,
+        row.record_type,
+        uncertain_field,
+        llm_question_sk,
+        llm_reason,
+        tuple(llm_candidates or []),
+        has_ditto,
+    )
+    if row.id is not None and memo_key in _QUESTION_DETAILS_MEMO:
+        return dict(_QUESTION_DETAILS_MEMO[memo_key])
+
+    ctx = parsed_ctx or parse_row_ocr_context(row.raw_ocr_left, row.raw_ocr_right, row.raw_ocr_combined)
     is_census = bool((scan and scan.detected_type == "census") or row.record_type == "census")
     if is_census and uncertain_field in ("parents", "none", None):
         field = "identity_relation"
@@ -461,7 +481,7 @@ def build_slovak_question_details(
             seen_cand_keys.add(norm_key)
             merged_candidates.append(c)
 
-    return {
+    out_details = {
         "field_name": field,
         "question_sk": question_sk,
         "description_sk": description_sk,
@@ -477,6 +497,11 @@ def build_slovak_question_details(
             "officiant_text": ctx["officiant_text"] or "—",
         },
     }
+    if row.id is not None:
+        if len(_QUESTION_DETAILS_MEMO) > 2048:
+            _QUESTION_DETAILS_MEMO.clear()
+        _QUESTION_DETAILS_MEMO[memo_key] = out_details
+    return dict(out_details)
 
 
 def _collect_neighbor_crops(session: Session, scan_id: int, current_row_id: int, field_key: str) -> list[dict[str, Any]]:

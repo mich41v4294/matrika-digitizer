@@ -362,7 +362,7 @@ class LocalAIClient:
         self._local_models_url = settings.ai_models_url
         try:
             client = self._get_http_client()
-            resp = await client.get(self._local_models_url, timeout=2.0)
+            resp = await client.get(self._local_models_url, timeout=0.8)
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, dict):
@@ -411,7 +411,7 @@ class LocalAIClient:
             not force_refresh
             and self._cached_local_probe is not None
             and self._cached_freellm_probe is not None
-            and (now - self._probe_cache_ts) < 12.0
+            and (now - self._probe_cache_ts) < 30.0
         ):
             local_online, local_models, local_err = self._cached_local_probe
             freellm_online, freellm_models, freellm_err = self._cached_freellm_probe

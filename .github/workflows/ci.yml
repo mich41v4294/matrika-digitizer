@@ -18,12 +18,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      - name: Install vendor/familysearch-mcp and backend dependencies
+      - name: Install vendor/familysearch-mcp, Rust DB extension, and backend dependencies
         run: |
-          uv pip install --system ./vendor/familysearch-mcp "./backend[dev]"
+          uv pip install --system ./vendor/familysearch-mcp ./backend/rust/matrika_db_rs "./backend[dev]"
 
       - name: Run backend test suite
         env:

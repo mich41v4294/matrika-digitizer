@@ -566,43 +566,10 @@ def search_unified(
             elapsed_ms=int(round((time.perf_counter() - t_start) * 1000)),
         )
     else:
-        all_candidates = list(session.exec(stmt.order_by(PersonFact.id.desc())).all())
-        total_candidates_count = len(all_candidates)
-        update_search_progress(
-            running=True,
-            scope="unified",
-            query=query_label,
-            processed=0,
-            total=max(1, total_candidates_count),
-            matched_records=0,
-            matched_sheets=0,
-            progress_pct=10,
-            stage_sk="Prehľadávam matriky a sčítacie hárky…",
-            stage_en="Searching registers and census sheets…",
-            elapsed_ms=0,
-        )
-
-        if surname and surname.strip() and fuzzy:
-            s_query = surname.strip()
-            surname_filtered: list[PersonFact] = []
-            for f in all_candidates:
-                s_cands = [
-                    f.surname_raw,
-                    f.surname_normalized,
-                    f.mother_maiden_surname,
-                    *extract_person_fact_name_candidates(f),
-                ]
-                sc = fuzzy_name_match_score(s_query, s_cands, threshold=0.76)
-                if sc >= 0.76:
-                    surname_filtered.append(f)
-                    if f.id is not None:
-                        fact_scores[f.id] = sc
-            all_candidates = surname_filtered
-
+        fts_person_ids: list[int] = []
         if q and q.strip():
             q_clean = q.strip()
             fts_expr = build_fts_match_expression(q_clean, fuzzy=fuzzy)
-            fts_person_ids: list[int] = []
             if fts_expr:
                 try:
                     rows_fts = session.exec(
@@ -627,128 +594,262 @@ def search_unified(
                 except Exception:
                     pass
 
-            cand_row_ids = list({f.row_id for f in all_candidates if f.row_id})
-            row_ocr_map: dict[int, str] = {}
-            for chunk_start in range(0, len(cand_row_ids), 500):
-                chunk_rids = cand_row_ids[chunk_start : chunk_start + 500]
-                for r_obj in session.exec(select(RecordRow).where(RecordRow.id.in_(chunk_rids))).all():  # type: ignore[union-attr]
-                    if r_obj.id is not None:
-                        ocr_txt = " ".join(
-                            p for p in (r_obj.raw_ocr_combined, r_obj.raw_ocr_left, r_obj.raw_ocr_right) if p
-                        )
-                        if ocr_txt:
-                            row_ocr_map[r_obj.id] = ocr_txt
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
 
-            needle = fold_text_diacritics(q_clean)
-            fts_id_set = set(fts_person_ids)
-            threshold = 0.76 if fuzzy else 0.90
-            scored_candidates: list[tuple[float, int, PersonFact]] = []
-            step_size = max(1, len(all_candidates) // 8)
-
-            for idx_cand, f in enumerate(all_candidates, start=1):
-                ocr_txt = row_ocr_map.get(f.row_id)
-                name_cands = extract_person_fact_name_candidates(f, ocr_text=ocr_txt)
-                haystack_parts = [
-                    *name_cands,
-                    f.village_raw or "",
-                    f.village_sk or "",
-                    f.village_hu or "",
-                    f.fs_place_standardized or "",
-                    f.birth_place_raw or "",
-                    f.birth_place_sk or "",
-                    f.birth_place_municipality or "",
-                    f.home_jurisdiction or "",
-                    f.social_status_or_occupation or "",
-                    f.occupation_position or "",
-                    f.religion or "",
-                    f.observationes_raw or "",
-                    f.house_number or "",
-                    str(f.event_year or ""),
-                    str(f.birth_year_est or ""),
-                ]
-                haystack = fold_text_diacritics(" ".join(p for p in haystack_parts if p))
-
-                score = 0.0
-                if needle and needle in haystack:
-                    score = 1.0
-                else:
-                    f_score = fuzzy_name_match_score(
-                        q_clean,
-                        [
-                            *name_cands,
-                            f.village_raw,
-                            f.village_sk,
-                            f.birth_place_raw,
-                            f.birth_place_sk,
-                            f.birth_place_municipality,
-                            f.social_status_or_occupation,
-                            f.house_number,
-                        ],
-                        threshold=threshold,
-                    )
-                    if f_score >= threshold:
-                        score = f_score
-                    elif f.id in fts_id_set:
-                        # Matched via FTS5 non-name columns (notes, occupation, etc.)
-                        q_toks = [
-                            fold_text_diacritics(t)
-                            for t in re.findall(r"[A-Za-z0-9áéíóöőúüűÁÉÍÓÖŐÚÜŰäëÄËčďľĺňŕřšťžČĎĽĹŇŔŘŠŤŽýÝôÔ]+", q_clean)
-                            if t
-                        ]
-                        if q_toks and all(any(qt in w for w in haystack.split()) for qt in q_toks):
-                            score = 0.88
-
-                if score >= threshold:
-                    if f.id is not None:
-                        fact_scores[f.id] = score
-                    if f.census_sheet_id and f.census_sheet_id not in matched_Id_set:
-                        matched_Id_set.add(f.census_sheet_id)
-                        matched_sheet_ids.append(f.census_sheet_id)
-                    scored_candidates.append((score, f.id or 0, f))
-
-                if idx_cand % step_size == 0 or idx_cand == len(all_candidates):
-                    pct = min(85, max(15, int(round((idx_cand / max(len(all_candidates), 1)) * 80))))
-                    update_search_progress(
-                        running=True,
-                        scope="unified",
-                        query=query_label,
-                        processed=idx_cand,
-                        total=max(1, len(all_candidates)),
-                        matched_records=len(scored_candidates),
-                        matched_sheets=len(matched_sheet_ids),
-                        progress_pct=pct,
-                        stage_sk="Porovnávam fonetické a OCR varianty mien…",
-                        stage_en="Comparing phonetic and OCR name variants…",
-                        elapsed_ms=int(round((time.perf_counter() - t_start) * 1000)),
-                    )
-
-            scored_candidates.sort(key=lambda item: (round(item[0], 3), item[1]), reverse=True)
-            facts = [item[2] for item in scored_candidates]
-        else:
-            facts = all_candidates
-
-        if needs_fs_filter:
-            all_fact_ids = [f.id for f in facts if f.id is not None]
-            fs_matches_all: list[FamilySearchMatch] = []
-            for chunk_start in range(0, len(all_fact_ids), 500):
-                chunk_fids = all_fact_ids[chunk_start : chunk_start + 500]
-                fs_matches_all.extend(
-                    session.exec(select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id.in_(chunk_fids))).all()  # type: ignore[union-attr]
+        db_p = _session_file_db_path(session)
+        used_rust_search = False
+        if db_p and _rust_db is not None and hasattr(_rust_db, "score_person_facts_search_rs"):
+            try:
+                has_sql_where = bool(
+                    (record_type and record_type != "all")
+                    or scan_id is not None
+                    or census_sheet_id is not None
+                    or year_from is not None
+                    or year_to is not None
+                    or birth_year_from is not None
+                    or birth_year_to is not None
+                    or (municipality and municipality.strip())
+                    or (street and street.strip())
+                    or (house_number and house_number.strip())
+                    or (occupation and occupation.strip())
+                    or (religion and religion.strip())
+                    or (surname and surname.strip() and not fuzzy)
                 )
-            fs_map_all = {
-                m.person_fact_id: m
-                for m in fs_matches_all
-                if m.fs_person_id and str(m.fs_person_id).strip() and (m.confidence_score or 0.0) > 0
-            }
-            facts = [
-                f
-                for f in facts
-                if f.id is not None
-                and ((fs_map_all.get(f.id).match_status if fs_map_all.get(f.id) else "unmatched") == fs_status)
-            ]
+                cand_fids: list[int] | None = None
+                if has_sql_where:
+                    id_stmt = stmt.with_only_columns(PersonFact.id)
+                    cand_fids = [int(r) for r in session.exec(id_stmt).all() if r is not None]
 
-        total_facts = len(facts)
-        paged_facts = facts[offset : offset + limit]
+                total_candidates_count, scored_tuples = _rust_db.score_person_facts_search_rs(
+                    db_p,
+                    candidate_fact_ids=cand_fids,
+                    surname_query=surname if (surname and surname.strip() and fuzzy) else None,
+                    q_query=q if (q and q.strip()) else None,
+                    fts_person_ids=fts_person_ids,
+                    fuzzy=fuzzy,
+                )
+                matched_fids: list[int] = []
+                for fid_val, sc_val, csid_val in scored_tuples:
+                    fid_int = int(fid_val)
+                    matched_fids.append(fid_int)
+                    fact_scores[fid_int] = float(sc_val)
+                    if q and q.strip() and csid_val is not None:
+                        csid_int = int(csid_val)
+                        if csid_int not in matched_Id_set:
+                            matched_Id_set.add(csid_int)
+                            matched_sheet_ids.append(csid_int)
+
+                if needs_fs_filter and matched_fids:
+                    fs_matches_all_rs: list[FamilySearchMatch] = []
+                    for chunk_start in range(0, len(matched_fids), 500):
+                        chunk_fids = matched_fids[chunk_start : chunk_start + 500]
+                        fs_matches_all_rs.extend(
+                            session.exec(
+                                select(FamilySearchMatch).where(
+                                    FamilySearchMatch.person_fact_id.in_(chunk_fids)  # type: ignore[union-attr]
+                                )
+                            ).all()
+                        )
+                    fs_map_rs = {
+                        m.person_fact_id: m
+                        for m in fs_matches_all_rs
+                        if m.fs_person_id and str(m.fs_person_id).strip() and (m.confidence_score or 0.0) > 0
+                    }
+                    matched_fids = [
+                        fid
+                        for fid in matched_fids
+                        if (fs_map_rs.get(fid).match_status if fs_map_rs.get(fid) else "unmatched") == fs_status
+                    ]
+
+                total_facts = len(matched_fids)
+                page_fids = matched_fids[offset : offset + limit]
+                if page_fids:
+                    loaded_page_facts = {
+                        pf.id: pf
+                        for pf in session.exec(
+                            select(PersonFact).where(PersonFact.id.in_(page_fids))  # type: ignore[union-attr]
+                        ).all()
+                        if pf.id is not None
+                    }
+                    paged_facts = [loaded_page_facts[fid] for fid in page_fids if fid in loaded_page_facts]
+                else:
+                    paged_facts = []
+                used_rust_search = True
+            except Exception:
+                used_rust_search = False
+
+        if not used_rust_search:
+            all_candidates = list(session.exec(stmt.order_by(PersonFact.id.desc())).all())
+            total_candidates_count = len(all_candidates)
+            update_search_progress(
+                running=True,
+                scope="unified",
+                query=query_label,
+                processed=0,
+                total=max(1, total_candidates_count),
+                matched_records=0,
+                matched_sheets=0,
+                progress_pct=10,
+                stage_sk="Prehľadávam matriky a sčítacie hárky…",
+                stage_en="Searching registers and census sheets…",
+                elapsed_ms=0,
+            )
+
+            if surname and surname.strip() and fuzzy:
+                s_query = surname.strip()
+                surname_filtered: list[PersonFact] = []
+                for f in all_candidates:
+                    s_cands = [
+                        f.surname_raw,
+                        f.surname_normalized,
+                        f.mother_maiden_surname,
+                        *extract_person_fact_name_candidates(f),
+                    ]
+                    sc = fuzzy_name_match_score(s_query, s_cands, threshold=0.76)
+                    if sc >= 0.76:
+                        surname_filtered.append(f)
+                        if f.id is not None:
+                            fact_scores[f.id] = sc
+                all_candidates = surname_filtered
+
+            if q and q.strip():
+                q_clean = q.strip()
+                cand_row_ids = list({f.row_id for f in all_candidates if f.row_id})
+                row_ocr_map: dict[int, str] = {}
+                for chunk_start in range(0, len(cand_row_ids), 500):
+                    chunk_rids = cand_row_ids[chunk_start : chunk_start + 500]
+                    for r_id_val, ocr_comb, ocr_l, ocr_r in session.exec(
+                        select(
+                            RecordRow.id,
+                            RecordRow.raw_ocr_combined,
+                            RecordRow.raw_ocr_left,
+                            RecordRow.raw_ocr_right,
+                        ).where(RecordRow.id.in_(chunk_rids))  # type: ignore[union-attr]
+                    ).all():
+                        if r_id_val is not None:
+                            ocr_txt = " ".join(p for p in (ocr_comb, ocr_l, ocr_r) if p)
+                            if ocr_txt:
+                                row_ocr_map[int(r_id_val)] = ocr_txt
+
+                needle = fold_text_diacritics(q_clean)
+                q_toks = [
+                    fold_text_diacritics(t)
+                    for t in re.findall(r"[A-Za-z0-9áéíóöőúüűÁÉÍÓÖŐÚÜŰäëÄËčďľĺňŕřšťžČĎĽĹŇŔŘŠŤŽýÝôÔ]+", q_clean)
+                    if t
+                ]
+                fts_id_set = set(fts_person_ids)
+                threshold = 0.76 if fuzzy else 0.90
+                scored_candidates: list[tuple[float, int, PersonFact]] = []
+                step_size = max(1, len(all_candidates) // 8)
+
+                for idx_cand, f in enumerate(all_candidates, start=1):
+                    ocr_txt = row_ocr_map.get(f.row_id)
+                    struct_name_cands = extract_person_fact_name_candidates(f, ocr_text=None)
+                    haystack_parts = [
+                        *struct_name_cands,
+                        ocr_txt or "",
+                        f.village_raw or "",
+                        f.village_sk or "",
+                        f.village_hu or "",
+                        f.fs_place_standardized or "",
+                        f.birth_place_raw or "",
+                        f.birth_place_sk or "",
+                        f.birth_place_municipality or "",
+                        f.home_jurisdiction or "",
+                        f.social_status_or_occupation or "",
+                        f.occupation_position or "",
+                        f.religion or "",
+                        f.observationes_raw or "",
+                        f.house_number or "",
+                        str(f.event_year or ""),
+                        str(f.birth_year_est or ""),
+                    ]
+                    haystack = fold_text_diacritics(" ".join(p for p in haystack_parts if p))
+
+                    score = 0.0
+                    if needle and needle in haystack:
+                        score = 1.0
+                    else:
+                        f_score = fuzzy_name_match_score(
+                            q_clean,
+                            [
+                                *struct_name_cands,
+                                f.village_raw,
+                                f.village_sk,
+                                f.birth_place_raw,
+                                f.birth_place_sk,
+                                f.birth_place_municipality,
+                                f.social_status_or_occupation,
+                                f.house_number,
+                            ],
+                            threshold=threshold,
+                        )
+                        if f_score >= threshold:
+                            score = f_score
+                        elif f.id in fts_id_set:
+                            # Matched via FTS5 non-name columns (notes, occupation, raw OCR, etc.)
+                            if q_toks and all(any(qt in w for w in haystack.split()) for qt in q_toks):
+                                score = 0.88
+                            elif ocr_txt:
+                                ocr_score = fuzzy_name_match_score(q_clean, [ocr_txt], threshold=threshold)
+                                if ocr_score >= threshold:
+                                    score = ocr_score
+                        elif ocr_txt and not struct_name_cands:
+                            ocr_score = fuzzy_name_match_score(q_clean, [ocr_txt], threshold=threshold)
+                            if ocr_score >= threshold:
+                                score = ocr_score
+
+                    if score >= threshold:
+                        if f.id is not None:
+                            fact_scores[f.id] = score
+                        if f.census_sheet_id and f.census_sheet_id not in matched_Id_set:
+                            matched_Id_set.add(f.census_sheet_id)
+                            matched_sheet_ids.append(f.census_sheet_id)
+                        scored_candidates.append((score, f.id or 0, f))
+
+                    if idx_cand % step_size == 0 or idx_cand == len(all_candidates):
+                        pct = min(85, max(15, int(round((idx_cand / max(len(all_candidates), 1)) * 80))))
+                        update_search_progress(
+                            running=True,
+                            scope="unified",
+                            query=query_label,
+                            processed=idx_cand,
+                            total=max(1, len(all_candidates)),
+                            matched_records=len(scored_candidates),
+                            matched_sheets=len(matched_sheet_ids),
+                            progress_pct=pct,
+                            stage_sk="Porovnávam fonetické a OCR varianty mien…",
+                            stage_en="Comparing phonetic and OCR name variants…",
+                            elapsed_ms=int(round((time.perf_counter() - t_start) * 1000)),
+                        )
+
+                scored_candidates.sort(key=lambda item: (round(item[0], 3), item[1]), reverse=True)
+                facts = [item[2] for item in scored_candidates]
+            else:
+                facts = all_candidates
+
+            if needs_fs_filter:
+                all_fact_ids = [f.id for f in facts if f.id is not None]
+                fs_matches_all: list[FamilySearchMatch] = []
+                for chunk_start in range(0, len(all_fact_ids), 500):
+                    chunk_fids = all_fact_ids[chunk_start : chunk_start + 500]
+                    fs_matches_all.extend(
+                        session.exec(select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id.in_(chunk_fids))).all()  # type: ignore[union-attr]
+                    )
+                fs_map_all = {
+                    m.person_fact_id: m
+                    for m in fs_matches_all
+                    if m.fs_person_id and str(m.fs_person_id).strip() and (m.confidence_score or 0.0) > 0
+                }
+                facts = [
+                    f
+                    for f in facts
+                    if f.id is not None
+                    and ((fs_map_all.get(f.id).match_status if fs_map_all.get(f.id) else "unmatched") == fs_status)
+                ]
+
+            total_facts = len(facts)
+            paged_facts = facts[offset : offset + limit]
 
     paged_fact_ids = [f.id for f in paged_facts if f.id is not None]
     fs_matches = (
@@ -905,28 +1006,39 @@ def search_unified(
             q_fold = fold_text_diacritics(q_clean)
             if fuzzy:
                 # Check CensusOverviewHouse owners & CensusSheet household_owner for fuzzy matches (scoped by active filters)
-                ovh_stmt = select(CensusOverviewHouse)
+                ovh_stmt = select(
+                    CensusOverviewHouse.census_sheet_id,
+                    CensusOverviewHouse.matched_sheet_id,
+                    CensusOverviewHouse.owner_name,
+                    CensusOverviewHouse.remarks,
+                    CensusOverviewHouse.raw_ocr_text,
+                )
                 if year_from is not None:
                     ovh_stmt = ovh_stmt.where(CensusOverviewHouse.census_year >= year_from)
                 if year_to is not None:
                     ovh_stmt = ovh_stmt.where(CensusOverviewHouse.census_year <= year_to)
                 if municipality and municipality.strip():
                     ovh_stmt = ovh_stmt.where(CensusOverviewHouse.municipality.ilike(f"%{municipality.strip()}%"))  # type: ignore[union-attr]
-                for ovh in session.exec(ovh_stmt).all():
-                    if fuzzy_name_matches(q_clean, [ovh.owner_name, ovh.raw_ocr_text, ovh.remarks], threshold=0.76):
-                        if ovh.census_sheet_id and ovh.census_sheet_id not in matched_Id_set:
-                            matched_Id_set.add(ovh.census_sheet_id)
-                            matched_sheet_ids.append(ovh.census_sheet_id)
-                        if ovh.matched_sheet_id and ovh.matched_sheet_id not in matched_Id_set:
-                            matched_Id_set.add(ovh.matched_sheet_id)
-                            matched_sheet_ids.append(ovh.matched_sheet_id)
+                for ov_csid, ov_msid, ov_owner, ov_rem, ov_ocr in session.exec(ovh_stmt).all():
+                    matched_ovh = fuzzy_name_matches(q_clean, [ov_owner, ov_rem], threshold=0.76) or (
+                        bool(ov_ocr and q_fold and q_fold in fold_text_diacritics(ov_ocr))
+                    ) or (not ov_owner and bool(ov_ocr) and fuzzy_name_matches(q_clean, [ov_ocr], threshold=0.76))
+                    if matched_ovh:
+                        if ov_csid and ov_csid not in matched_Id_set:
+                            matched_Id_set.add(ov_csid)
+                            matched_sheet_ids.append(ov_csid)
+                        if ov_msid and ov_msid not in matched_Id_set:
+                            matched_Id_set.add(ov_msid)
+                            matched_sheet_ids.append(ov_msid)
 
-                cs_owner_stmt = sheet_stmt.where(CensusSheet.household_owner.is_not(None))  # type: ignore[union-attr]
-                for cs_cand in session.exec(cs_owner_stmt).all():
-                    if cs_cand.id and cs_cand.id not in matched_Id_set:
-                        if fuzzy_name_matches(q_clean, [cs_cand.household_owner], threshold=0.76):
-                            matched_Id_set.add(cs_cand.id)
-                            matched_sheet_ids.append(cs_cand.id)
+                cs_owner_stmt = sheet_stmt.where(CensusSheet.household_owner.is_not(None)).with_only_columns(  # type: ignore[union-attr]
+                    CensusSheet.id, CensusSheet.household_owner
+                )
+                for cs_id_val, cs_owner_val in session.connection().execute(cs_owner_stmt).all():
+                    if cs_id_val and cs_id_val not in matched_Id_set:
+                        if fuzzy_name_matches(q_clean, [cs_owner_val], threshold=0.76):
+                            matched_Id_set.add(cs_id_val)
+                            matched_sheet_ids.append(cs_id_val)
 
             if matched_sheet_ids:
                 sheet_stmt = sheet_stmt.where(

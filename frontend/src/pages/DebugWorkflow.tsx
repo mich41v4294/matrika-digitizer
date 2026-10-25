@@ -542,11 +542,35 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
         }),
       });
       if (res.ok) {
+        const data = await res.json();
+        const saved: OcrFeedbackItem | undefined = data.feedback;
         setEditingFeedbackId(null);
-        await loadFeedbackAndStats();
-        if (selectedScanId) {
-          const scRes = await fetch(`/api/scans/${selectedScanId}`);
-          if (scRes.ok) setScanDetail(await scRes.json());
+        if (data.stats) setFeedbackStats(data.stats);
+        if (typeof data.report_markdown === "string") {
+          setReportMarkdown(data.report_markdown);
+        }
+        if (saved) {
+          setFeedbackList((prev) => {
+            const updated = prev.some((i) => i.id === saved.id)
+              ? prev.map((i) => (i.id === saved.id ? saved : i))
+              : [saved, ...prev];
+            return feedbackVerdictFilter
+              ? updated.filter((i) => i.verdict === feedbackVerdictFilter)
+              : updated;
+          });
+          setSelectedFeedbackItem((prev) =>
+            prev?.id === saved.id ? saved : prev
+          );
+          setScanDetail((prev) =>
+            prev && saved.row_id
+              ? {
+                  ...prev,
+                  rows: prev.rows.map((r) =>
+                    r.id === saved.row_id ? { ...r, ocr_feedback: saved } : r
+                  ),
+                }
+              : prev
+          );
         }
       }
     } catch {
@@ -560,11 +584,30 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
         method: "DELETE",
       });
       if (res.ok) {
-        await loadFeedbackAndStats();
-        if (selectedScanId) {
-          const scRes = await fetch(`/api/scans/${selectedScanId}`);
-          if (scRes.ok) setScanDetail(await scRes.json());
+        const data = await res.json();
+        if (data.stats) setFeedbackStats(data.stats);
+        if (typeof data.report_markdown === "string") {
+          setReportMarkdown(data.report_markdown);
         }
+        setFeedbackList((prev) => {
+          const remaining = prev.filter((i) => i.id !== feedbackId);
+          setSelectedFeedbackItem((sel) =>
+            sel?.id === feedbackId ? remaining[0] ?? null : sel
+          );
+          return remaining;
+        });
+        setScanDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                rows: prev.rows.map((r) =>
+                  r.ocr_feedback?.id === feedbackId
+                    ? { ...r, ocr_feedback: null }
+                    : r
+                ),
+              }
+            : prev
+        );
       }
     } catch {
       // ignore
@@ -687,7 +730,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
       if (document.visibilityState === "hidden") return;
       void loadDebug();
       void loadFeedbackAndStats();
-    }, 6000);
+    }, 15000);
     return () => clearInterval(interval);
   }, [stageFilter, feedbackVerdictFilter]);
 

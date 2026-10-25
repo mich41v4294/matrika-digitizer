@@ -15,6 +15,9 @@ frontend/dist
 **/*.pyc
 **/*.pyo
 **/*.pyd
+**/*.so
+**/*.dylib
+**/target
 **/.DS_Store
 .pytest_cache
 **/.pytest_cache

@@ -664,15 +664,15 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
 
   return (
     <div className="space-y-4">
-      <div className="bg-stone-900 text-amber-50 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+      <div className="bg-white border border-stone-200 shadow-2xs rounded-xl px-4 py-3.5 flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-lg font-bold flex items-center gap-2">
-            <Globe2 className="w-5 h-5 text-amber-400 shrink-0" />
+          <h1 className="text-lg font-bold text-stone-900 flex items-center gap-2">
+            <Globe2 className="w-5 h-5 text-amber-600 shrink-0" />
             {lang === "sk"
               ? "FamilySearch MCP – Spárované osoby"
               : "FamilySearch MCP – Matched People"}
           </h1>
-          <p className="text-stone-400 text-xs mt-0.5">
+          <p className="text-stone-600 text-xs mt-0.5">
             {lang === "sk"
               ? "Zobrazujú sa iba osoby spárované vo FamilySearch MCP. Párovanie sa spúšťa automaticky pri pridaní alebo úprave osoby."
               : "Showing only people matched in FamilySearch MCP. Matching runs automatically whenever a new person is added or updated."}
@@ -682,7 +682,7 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
         <div className="flex flex-wrap items-center gap-2">
           {fsStatus && (
             <div
-              className="px-2.5 py-1 rounded-lg bg-stone-800 text-xs"
+              className="px-2.5 py-1.5 rounded-lg bg-stone-100 border border-stone-200 text-xs"
               title={
                 fsStatus.authenticated
                   ? lang === "sk"
@@ -695,7 +695,9 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
             >
               <span
                 className={
-                  fsStatus.connected ? "text-emerald-300 font-semibold" : "text-red-300"
+                  fsStatus.connected
+                    ? "text-emerald-700 font-semibold"
+                    : "text-red-700 font-semibold"
                 }
               >
                 {fsStatus.connected ? "MCP" : "MCP offline"}
@@ -705,7 +707,7 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
           <button
             onClick={syncAllMatches}
             disabled={syncingAll || Boolean(progress?.running)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-700 hover:bg-stone-600 text-amber-100 font-semibold text-xs cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-800 font-semibold text-xs cursor-pointer transition"
           >
             <RefreshCw
               className={`w-3.5 h-3.5 ${
@@ -722,7 +724,7 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
           </button>
           <button
             onClick={() => setShowTokenModal(!showTokenModal)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-stone-950 font-semibold text-xs cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs cursor-pointer transition"
           >
             <KeyRound className="w-3.5 h-3.5" />
             Token

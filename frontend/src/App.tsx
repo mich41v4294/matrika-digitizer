@@ -438,7 +438,6 @@ export default function App() {
       label: lang === "sk" ? "Sčítacie hárky" : "Census Sheets",
       icon: FileSpreadsheet,
       badge: status?.counts.census_sheets || null,
-      badgeColor: "bg-purple-700 text-white",
       enabled: featureFlags.tab_census,
     },
     {
@@ -453,7 +452,6 @@ export default function App() {
       label: lang === "sk" ? "Otázky" : "Questions",
       icon: HelpCircle,
       badge: status?.counts.open_questions || null,
-      badgeColor: "bg-amber-600 text-white",
       enabled: featureFlags.tab_questions,
     },
     {
@@ -461,7 +459,6 @@ export default function App() {
       label: lang === "sk" ? "Knihy a strany" : "Books & Scans",
       icon: BookOpen,
       badge: status?.counts.scans || null,
-      badgeColor: "bg-stone-700 text-white",
       enabled: featureFlags.tab_records,
     },
     {
@@ -469,7 +466,6 @@ export default function App() {
       label: lang === "sk" ? "Vyhľadávanie" : "Search",
       icon: Search,
       badge: status?.counts.facts || null,
-      badgeColor: "bg-stone-700 text-white",
       enabled: featureFlags.tab_search,
     },
     {
@@ -477,7 +473,6 @@ export default function App() {
       label: "FamilySearch",
       icon: CheckCircle2,
       badge: status?.counts.unreviewed_matches || null,
-      badgeColor: "bg-emerald-700 text-white",
       enabled: featureFlags.tab_familysearch,
     },
     {
@@ -514,26 +509,34 @@ export default function App() {
   const activePct = Math.max(8, Math.min(99, ps?.progress_pct || 15));
 
   return (
-    <div className="min-h-screen flex flex-col bg-stone-100 text-stone-900 overflow-x-hidden">
-      <header className="bg-stone-900 text-stone-50 border-b border-stone-800 shadow-2xs">
-        <div className="w-full max-w-none mx-auto px-3 lg:px-5 py-2 flex flex-wrap lg:flex-nowrap items-center justify-between gap-2">
-          <Link
-            to={featureFlags.tab_matrika ? "/" : "/scitacie-harky"}
-            className="flex items-center gap-2.5 shrink-0"
-          >
-            <div className="w-8 h-8 rounded-lg bg-amber-600 flex items-center justify-center font-bold text-base text-white shadow-2xs">
-              M
-            </div>
-            <div className="leading-tight">
-              <h1 className="text-sm xl:text-base font-bold tracking-tight whitespace-nowrap text-white">
-                {lang === "sk"
-                  ? "Čítačka matrík a sčítacích hárkov"
-                  : "Matrika & Census Digitizer"}
-              </h1>
-            </div>
-          </Link>
+    <div className="min-h-screen flex flex-col lg:flex-row bg-stone-100 text-stone-900 overflow-x-hidden">
+      {/* Mockup B: Clean Nordic Left Navigation Rail (Desktop) & Crisp White Top Bar (Mobile) */}
+      <header className="w-full lg:w-56 xl:w-60 shrink-0 bg-white border-b lg:border-b-0 lg:border-r border-stone-200 flex flex-col justify-between lg:sticky lg:top-0 lg:h-screen z-30">
+        <div className="flex flex-col">
+          {/* Brand Row */}
+          <div className="px-3.5 py-3 flex items-center justify-between gap-2 border-b border-stone-100">
+            <Link
+              to={featureFlags.tab_matrika ? "/" : "/scitacie-harky"}
+              className="flex items-center gap-2.5 min-w-0"
+            >
+              <div className="w-7 h-7 rounded-lg bg-amber-600 flex items-center justify-center font-bold text-sm text-white shrink-0 shadow-2xs">
+                M
+              </div>
+              <div className="leading-tight min-w-0">
+                <h1 className="text-xs xl:text-sm font-bold tracking-tight text-stone-900 truncate">
+                  {lang === "sk"
+                    ? "Čítačka matrík a sčítacích hárkov"
+                    : "Matrika & Census Digitizer"}
+                </h1>
+                <span className="hidden lg:block text-[11px] text-stone-500 truncate">
+                  {lang === "sk" ? "Archív 1930 / 1940 & Matriky" : "1930 / 1940 Archive"}
+                </span>
+              </div>
+            </Link>
+          </div>
 
-          <nav className="w-full lg:w-auto lg:flex-1 order-3 lg:order-none flex flex-wrap lg:flex-nowrap items-center gap-1 min-w-0 pt-1.5 lg:pt-0 border-t border-stone-800 lg:border-t-0 overflow-x-auto">
+          {/* Primary Navigation */}
+          <nav className="px-2.5 py-2 lg:py-3 flex flex-wrap lg:flex-col items-center lg:items-stretch gap-1">
             {navItems.map((item) => {
               const Icon = item.icon;
               const active =
@@ -557,18 +560,26 @@ export default function App() {
                 <Link
                   key={item.to}
                   to={item.to}
-                  className={`flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] rounded-lg font-semibold text-xs xl:text-sm whitespace-nowrap transition shrink-0 ${
+                  className={`flex items-center justify-between gap-2 px-2.5 py-1.5 min-h-[34px] rounded-lg font-medium text-xs xl:text-sm whitespace-nowrap transition ${
                     active
-                      ? "bg-amber-600 text-white shadow-2xs"
-                      : "text-stone-300 hover:bg-stone-800 hover:text-white"
+                      ? "bg-amber-50 text-amber-700 font-semibold ring-1 ring-amber-200/80"
+                      : "text-stone-600 hover:bg-stone-100 hover:text-stone-900"
                   }`}
                 >
-                  <Icon className="w-4 h-4 shrink-0" />
-                  <span>{item.label}</span>
+                  <span className="flex items-center gap-2 min-w-0">
+                    <Icon
+                      className={`w-4 h-4 shrink-0 ${
+                        active ? "text-amber-600" : "text-stone-400"
+                      }`}
+                    />
+                    <span className="truncate">{item.label}</span>
+                  </span>
                   {item.badge !== null && item.badge > 0 && (
                     <span
-                      className={`ml-0.5 px-1.5 py-0 rounded-full text-xs font-bold leading-5 ${
-                        active ? "bg-stone-950/60 text-white" : item.badgeColor
+                      className={`px-1.5 py-0.5 rounded-md text-[11px] font-semibold leading-none ${
+                        active
+                          ? "bg-amber-600 text-white"
+                          : "bg-stone-100 text-stone-600"
                       }`}
                     >
                       {item.badge}
@@ -578,45 +589,47 @@ export default function App() {
               );
             })}
           </nav>
+        </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
-            {featureFlags.admin_debug_overlay && (
-              <>
+        {/* Bottom System & Language Controls */}
+        <div className="px-3 py-2.5 border-t border-stone-200 bg-stone-50/60 flex flex-wrap lg:flex-col gap-1.5">
+          {featureFlags.admin_debug_overlay && (
+            <div className="flex items-center justify-between gap-1.5 w-full">
+              <span
+                className="flex items-center gap-1.5 px-2 py-1 rounded bg-white border border-stone-200 text-[11px] font-medium text-stone-700"
+                title={
+                  aiOnline
+                    ? `AI: ${status?.ai_server?.base_url || "online"}`
+                    : "AI server offline"
+                }
+              >
                 <span
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] rounded-md bg-stone-800 text-xs font-semibold whitespace-nowrap"
-                  title={
-                    aiOnline
-                      ? `AI: ${status?.ai_server?.base_url || "online"}`
-                      : "AI server offline"
-                  }
-                >
-                  <span
-                    className={`w-2 h-2 rounded-full ${
-                      aiOnline ? "bg-emerald-400" : "bg-red-400"
-                    }`}
-                  />
-                  <span className={aiOnline ? "text-emerald-300" : "text-red-300"}>
-                    {aiOnline ? "AI" : "AI offline"}
-                  </span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => toggleFlag("admin_debug_overlay")}
-                  data-testid="header-admin-overlay-pill"
-                  title={
-                    lang === "sk"
-                      ? "Vypnúť technické nástroje (Admin Debug Overlay)"
-                      : "Turn off inline debug tools (Admin Debug Overlay)"
-                  }
-                  className="px-2.5 py-1.5 min-h-[34px] rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold whitespace-nowrap cursor-pointer transition"
-                >
-                  {lang === "sk" ? "Admin Overlay: ZAP" : "Admin Overlay: ON"}
-                </button>
-              </>
-            )}
+                  className={`w-2 h-2 rounded-full ${
+                    aiOnline ? "bg-emerald-500" : "bg-red-500"
+                  }`}
+                />
+                <span>{aiOnline ? "AI" : "AI offline"}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => toggleFlag("admin_debug_overlay")}
+                data-testid="header-admin-overlay-pill"
+                title={
+                  lang === "sk"
+                    ? "Vypnúť technické nástroje (Admin Debug Overlay)"
+                    : "Turn off inline debug tools (Admin Debug Overlay)"
+                }
+                className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer transition"
+              >
+                {lang === "sk" ? "Admin Overlay: ZAP" : "Admin Overlay: ON"}
+              </button>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-1.5 w-full">
             <button
               onClick={toggleLang}
-              className="px-3 py-1.5 min-h-[34px] min-w-[38px] rounded-md bg-stone-800 hover:bg-stone-700 border border-stone-700 font-semibold text-xs cursor-pointer text-stone-200"
+              className="flex-1 px-2.5 py-1.5 min-h-[32px] rounded-lg bg-white hover:bg-stone-100 border border-stone-200 font-semibold text-xs cursor-pointer text-stone-700 transition"
               title="Prepnúť jazyk / Switch language"
             >
               {lang === "sk" ? "SK" : "EN"}
@@ -624,23 +637,25 @@ export default function App() {
             <Link
               to="/debug"
               title={lang === "sk" ? "Admin & Debug konzola" : "Admin & Debug Console"}
-              className={`px-2.5 py-1.5 min-h-[34px] rounded-md font-semibold text-xs inline-flex items-center gap-1.5 transition ${
+              className={`flex-1 px-2.5 py-1.5 min-h-[32px] rounded-lg font-semibold text-xs inline-flex items-center justify-center gap-1.5 transition ${
                 debugActive
                   ? "bg-amber-600 text-white"
-                  : "text-stone-300 hover:bg-stone-800 hover:text-white border border-stone-700"
+                  : "bg-white hover:bg-stone-100 text-stone-600 hover:text-stone-900 border border-stone-200"
               }`}
             >
-              <Activity className="w-4 h-4" />
+              <Activity className="w-3.5 h-3.5" />
               <span>Debug</span>
             </Link>
           </div>
         </div>
       </header>
 
+      {/* Right Workspace Content Column */}
+      <div className="flex-1 min-w-0 flex flex-col min-h-screen">
       {isBusy && ps && (
         <div
           data-testid="global-pipeline-progress-banner"
-          className="bg-amber-50 border-b border-amber-300 px-4 lg:px-6 py-2 shadow-xs"
+          className="bg-amber-50 border-b border-amber-200 px-4 lg:px-6 py-2"
         >
           <div className="w-full max-w-none mx-auto flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2 min-w-0">
@@ -979,6 +994,7 @@ export default function App() {
           </span>
         </div>
       </footer>
+      </div>
     </div>
   );
 }

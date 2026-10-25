@@ -1018,7 +1018,9 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const [showFullSheetScan, setShowFullSheetScan] = useState<boolean>(
     () => searchParams.get("scan") === "1"
   );
-  const [activeFieldFocus, setActiveFieldFocus] = useState<ActiveFieldFocus | null>(null);
+  const [activeFieldFocus, setActiveFieldFocus] = useState<ActiveFieldFocus | null>({
+    key: "surname",
+  });
   const splitLayout = false;
 
   // Household member selection & drawer editing
@@ -5185,7 +5187,10 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 } gap-4 text-xs sm:text-sm`}
                               >
                                 {/* 1. Identita a vzťah */}
-                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                <div
+                                  onFocus={() => setActiveFieldFocus({ key: "surname" })}
+                                  className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
+                                >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
                                     {lang === "sk" ? "1. Identita a vzťah" : "1. Identity & Relation"}
                                   </h4>
@@ -5197,6 +5202,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       <input
                                         type="text"
                                         value={editForm.person_row_number}
+                                        onFocus={() => setActiveFieldFocus({ key: "row_num" })}
                                         onChange={(e) =>
                                           setEditForm({
                                             ...editForm,
@@ -5212,6 +5218,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       </label>
                                       <select
                                         value={editForm.dwelling_unit || ""}
+                                        onFocus={() => setActiveFieldFocus({ key: "row_num" })}
                                         onChange={(e) =>
                                           setEditForm({
                                             ...editForm,
@@ -5237,6 +5244,12 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       <input
                                         type="text"
                                         value={editForm.surname_raw}
+                                        onFocus={() =>
+                                          setActiveFieldFocus({
+                                            key: "surname",
+                                            valuePreview: editForm.surname_raw || null,
+                                          })
+                                        }
                                         onChange={(e) =>
                                           setEditForm({ ...editForm, surname_raw: e.target.value })
                                         }
@@ -5276,6 +5289,12 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       <input
                                         type="text"
                                         value={editForm.mother_maiden_surname}
+                                        onFocus={() =>
+                                          setActiveFieldFocus({
+                                            key: "surname",
+                                            valuePreview: editForm.mother_maiden_surname || null,
+                                          })
+                                        }
                                         onChange={(e) =>
                                           setEditForm({
                                             ...editForm,
@@ -5292,6 +5311,12 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       <input
                                         type="text"
                                         value={editForm.given_name_raw}
+                                        onFocus={() =>
+                                          setActiveFieldFocus({
+                                            key: "given_name",
+                                            valuePreview: editForm.given_name_raw || null,
+                                          })
+                                        }
                                         onChange={(e) =>
                                           setEditForm({
                                             ...editForm,
@@ -5308,13 +5333,27 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       <input
                                         type="text"
                                         value={editForm.sex}
+                                        onFocus={() =>
+                                          setActiveFieldFocus({
+                                            key: "sex",
+                                            valuePreview: editForm.sex || null,
+                                          })
+                                        }
                                         onChange={(e) =>
                                           setEditForm({ ...editForm, sex: e.target.value })
                                         }
                                         className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
                                       />
                                     </div>
-                                    <div className="col-span-2 space-y-1.5 pt-1 border-t border-stone-100">
+                                    <div
+                                      onFocus={() =>
+                                        setActiveFieldFocus({
+                                          key: "relation",
+                                          valuePreview: editForm.relation_to_head || null,
+                                        })
+                                      }
+                                      className="col-span-2 space-y-1.5 pt-1 border-t border-stone-100"
+                                    >
                                       <label className="block font-semibold text-stone-700">
                                         {lang === "sk"
                                           ? "Pomer k hlave domácnosti (stĺpec 4)"
@@ -5393,7 +5432,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 </div>
 
                                 {/* 2. Narodenie a rodinný stav */}
-                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                <div
+                                  onFocus={() =>
+                                    setActiveFieldFocus({
+                                      key: "dob_marital",
+                                      valuePreview: editForm.birth_or_event_date || null,
+                                    })
+                                  }
+                                  className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
+                                >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
                                     {lang === "sk"
                                       ? "2. Narodenie a rodinný stav"
@@ -5526,7 +5573,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 </div>
 
                                 {/* 3. Rodisko (stĺpec 11) */}
-                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                <div
+                                  onFocus={() =>
+                                    setActiveFieldFocus({
+                                      key: "birthplace",
+                                      valuePreview: editForm.birth_place_municipality || null,
+                                    })
+                                  }
+                                  className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
+                                >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
                                     {lang === "sk" ? "3. Rodisko (stĺpec 11)" : "3. Birthplace (col 11)"}
                                   </h4>
@@ -5599,7 +5654,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 </div>
 
                                 {/* 4. Prisťahovanie a príslušnosť (stĺpce 12–14) */}
-                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                <div
+                                  onFocus={() =>
+                                    setActiveFieldFocus({
+                                      key: "domicile_citizenship",
+                                      valuePreview: editForm.home_jurisdiction || null,
+                                    })
+                                  }
+                                  className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
+                                >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
                                     {lang === "sk"
                                       ? "4. Prisťahovanie a príslušnosť (stĺpce 12–14)"
@@ -5674,7 +5737,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 </div>
 
                                 {/* 5. Národnosť, Náboženstvo a Gramotnosť (stĺpce 15–17) */}
-                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                <div
+                                  onFocus={() =>
+                                    setActiveFieldFocus({
+                                      key: "nationality_religion",
+                                      valuePreview: editForm.nationality || null,
+                                    })
+                                  }
+                                  className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
+                                >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
                                     {lang === "sk"
                                       ? "5. Národnosť, Náboženstvo a Gramotnosť (stĺpce 15–17)"
@@ -5731,7 +5802,16 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 </div>
 
                                 {/* 6. Povolanie a poznámky (stĺpce 18–24) */}
-                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
+                                <div
+                                  onFocus={() =>
+                                    setActiveFieldFocus({
+                                      key: "occupation_notes",
+                                      valuePreview:
+                                        editForm.social_status_or_occupation || null,
+                                    })
+                                  }
+                                  className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
+                                >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
                                     {lang === "sk"
                                       ? "6. Povolanie a poznámky (stĺpce 18–24)"

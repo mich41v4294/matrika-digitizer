@@ -266,29 +266,31 @@ export default function QuestionCenter({ lang = "sk", refreshStatus }: Props) {
   };
 
   const tabClass = (active: boolean) =>
-    `px-3 py-1.5 rounded-lg font-semibold text-sm cursor-pointer ${
-      active ? "bg-amber-400 text-amber-950" : "bg-amber-800 text-amber-100 hover:bg-amber-700"
+    `px-3 py-1.5 rounded-lg font-semibold text-xs sm:text-sm cursor-pointer transition ${
+      active
+        ? "bg-amber-600 text-white shadow-2xs"
+        : "text-stone-600 hover:bg-stone-100 hover:text-stone-900"
     }`;
 
   const badgeLabels = lang === "en" ? FIELD_BADGE_LABELS_EN : FIELD_BADGE_LABELS_SK;
 
   return (
     <div className="space-y-4">
-      <div className="bg-amber-900 text-amber-50 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+      <div className="bg-white border border-stone-200 shadow-2xs rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
-          <HelpCircle className="w-5 h-5 text-amber-300 shrink-0" />
-          <h1 className="text-lg font-bold truncate">
+          <HelpCircle className="w-5 h-5 text-amber-600 shrink-0" />
+          <h1 className="text-lg font-bold text-stone-900 truncate">
             {lang === "sk"
               ? "Otázky na kontrolu rukopisu"
               : "Handwriting Review Questions"}
           </h1>
           {activeQ && (
-            <span className="text-sm text-amber-200 shrink-0">
+            <span className="px-2 py-0.5 rounded-md bg-stone-100 text-stone-700 text-xs font-semibold shrink-0">
               {currentIdx + 1} / {questions.length}
             </span>
           )}
         </div>
-        <div className="flex flex-wrap gap-1.5">
+        <div className="inline-flex flex-wrap gap-1 bg-stone-100 p-1 rounded-xl border border-stone-200">
           <button
             onClick={() => setFilterStatus("open")}
             className={tabClass(filterStatus === "open")}
@@ -355,7 +357,7 @@ export default function QuestionCenter({ lang = "sk", refreshStatus }: Props) {
           )}
         </div>
       ) : (
-        <div className="bg-white border border-amber-300 rounded-xl p-4 space-y-4">
+        <div className="bg-white border border-stone-200 shadow-2xs rounded-xl p-5 space-y-4">
           <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm">
             <Link
               to={`/knihy?scan=${activeQ.scan_id}&row=${activeQ.row_id}`}

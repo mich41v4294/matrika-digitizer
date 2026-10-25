@@ -386,58 +386,58 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   row_num: {
     key: "row_num",
     xStartPct: 0.0,
-    xEndPct: 0.075,
-    labelSk: "Stĺpce 1–2: Číslo bytu a radové č.",
-    labelEn: "Cols 1–2: Dwelling & row #",
+    xEndPct: 0.28,
+    labelSk: "Stĺpce 1–4: Byt č., poradové č. a meno",
+    labelEn: "Cols 1–4: Dwelling, row # & name",
     shortSk: "Č. riadku",
     shortEn: "Row #",
     group: "household",
   },
   surname: {
     key: "surname",
-    xStartPct: 0.032,
-    xEndPct: 0.168,
-    labelSk: "Stĺpec 3: Priezvisko (a rodné priezvisko)",
-    labelEn: "Col 3: Surname (& maiden name)",
+    xStartPct: 0.0,
+    xEndPct: 0.28,
+    labelSk: "Stĺpec 2–4: Priezvisko (a rodné priezvisko)",
+    labelEn: "Col 2–4: Surname (& maiden name)",
     shortSk: "Priezvisko",
     shortEn: "Surname",
     group: "household",
   },
   given_name: {
     key: "given_name",
-    xStartPct: 0.128,
-    xEndPct: 0.228,
-    labelSk: "Stĺpec 4: Krstné meno",
-    labelEn: "Col 4: Given name",
+    xStartPct: 0.02,
+    xEndPct: 0.3,
+    labelSk: "Stĺpec 3–5: Krstné meno",
+    labelEn: "Col 3–5: Given name",
     shortSk: "Meno",
     shortEn: "Given name",
     group: "household",
   },
   relation: {
     key: "relation",
-    xStartPct: 0.198,
-    xEndPct: 0.268,
-    labelSk: "Stĺpec 5: Pomer k hlave domácnosti",
-    labelEn: "Col 5: Relation to head",
+    xStartPct: 0.06,
+    xEndPct: 0.34,
+    labelSk: "Stĺpec 4–6: Pomer k hlave domácnosti",
+    labelEn: "Col 4–6: Relation to head",
     shortSk: "Vzťah",
     shortEn: "Relation",
     group: "household",
   },
   sex: {
     key: "sex",
-    xStartPct: 0.242,
-    xEndPct: 0.292,
-    labelSk: "Stĺpec 6: Pohlavie",
-    labelEn: "Col 6: Sex",
+    xStartPct: 0.1,
+    xEndPct: 0.38,
+    labelSk: "Stĺpec 5–7: Pohlavie",
+    labelEn: "Col 5–7: Sex",
     shortSk: "Pohlavie",
     shortEn: "Sex",
     group: "household",
   },
   dob_marital: {
     key: "dob_marital",
-    xStartPct: 0.262,
-    xEndPct: 0.388,
-    labelSk: "Stĺpce 7–10: Dátum narodenia (deň, mesiac, rok) a stav",
+    xStartPct: 0.15,
+    xEndPct: 0.43,
+    labelSk: "Stĺpce 7–10: Dátum narodenia a rodinný stav",
     labelEn: "Cols 7–10: Date of birth & marital status",
     shortSk: "Dátum nar.",
     shortEn: "Date of birth",
@@ -445,8 +445,8 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   },
   birthplace: {
     key: "birthplace",
-    xStartPct: 0.355,
-    xEndPct: 0.518,
+    xStartPct: 0.3,
+    xEndPct: 0.58,
     labelSk: "Stĺpce 11–12: Rodisko (obec, okres, krajina)",
     labelEn: "Cols 11–12: Birthplace (municipality, district)",
     shortSk: "Rodisko",
@@ -455,8 +455,8 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   },
   domicile_citizenship: {
     key: "domicile_citizenship",
-    xStartPct: 0.492,
-    xEndPct: 0.578,
+    xStartPct: 0.4,
+    xEndPct: 0.68,
     labelSk: "Stĺpce 13–14: Domovská a štátna príslušnosť",
     labelEn: "Cols 13–14: Domicile & citizenship",
     shortSk: "Príslušnosť",
@@ -465,8 +465,8 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   },
   nationality_religion: {
     key: "nationality_religion",
-    xStartPct: 0.552,
-    xEndPct: 0.698,
+    xStartPct: 0.48,
+    xEndPct: 0.76,
     labelSk: "Stĺpce 15–17: Národnosť, náboženstvo a gramotnosť",
     labelEn: "Cols 15–17: Nationality, religion & literacy",
     shortSk: "Národ./Nábož.",
@@ -475,7 +475,7 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   },
   occupation_notes: {
     key: "occupation_notes",
-    xStartPct: 0.675,
+    xStartPct: 0.64,
     xEndPct: 1.0,
     labelSk: "Stĺpce 18–24: Povolanie, postavenie, závod a poznámky",
     labelEn: "Cols 18–24: Occupation, workplace & remarks",
@@ -486,7 +486,7 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   ov_ordinal_settlement: {
     key: "ov_ordinal_settlement",
     xStartPct: 0.0,
-    xEndPct: 0.28,
+    xEndPct: 0.34,
     labelSk: "Stĺpce 1–2: Radové č. a meno osady/ulice",
     labelEn: "Cols 1–2: Ordinal # & settlement/street",
     shortSk: "Osada",
@@ -495,8 +495,8 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   },
   ov_house_num: {
     key: "ov_house_num",
-    xStartPct: 0.22,
-    xEndPct: 0.39,
+    xStartPct: 0.16,
+    xEndPct: 0.48,
     labelSk: "Stĺpec 3: Popisné číslo domu",
     labelEn: "Col 3: House conscription #",
     shortSk: "Č. domu",
@@ -505,8 +505,8 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   },
   ov_owner_name: {
     key: "ov_owner_name",
-    xStartPct: 0.34,
-    xEndPct: 0.68,
+    xStartPct: 0.3,
+    xEndPct: 0.7,
     labelSk: "Stĺpec 6: Meno majiteľa domu",
     labelEn: "Col 6: House owner name",
     shortSk: "Majiteľ domu",
@@ -515,8 +515,8 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   },
   ov_counts: {
     key: "ov_counts",
-    xStartPct: 0.63,
-    xEndPct: 0.89,
+    xStartPct: 0.58,
+    xEndPct: 0.92,
     labelSk: "Stĺpce 7–8: Počet bytov a prítomných osôb",
     labelEn: "Cols 7–8: Dwelling units & present residents",
     shortSk: "Počty osôb",
@@ -525,7 +525,7 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
   },
   ov_remarks: {
     key: "ov_remarks",
-    xStartPct: 0.82,
+    xStartPct: 0.68,
     xEndPct: 1.0,
     labelSk: "Stĺpec 9: Poznámka",
     labelEn: "Col 9: Remarks",
@@ -604,6 +604,10 @@ export function HoverZoomRowCrop({
   const [contextPaddingMult, setContextPaddingMult] = useState<number>(3.5);
   const [cropImgFailed, setCropImgFailed] = useState<boolean>(false);
   const [cropImgLoading, setCropImgLoading] = useState<boolean>(false);
+  const [rowNaturalDim, setRowNaturalDim] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
   const cropImgRef = useRef<HTMLImageElement | null>(null);
   const [headerImgFailed, setHeaderImgFailed] = useState<boolean>(false);
   const [headerNaturalDim, setHeaderNaturalDim] = useState<{
@@ -629,6 +633,7 @@ export function HoverZoomRowCrop({
 
   useEffect(() => {
     setCropImgFailed(false);
+    setRowNaturalDim(null);
     if (!cropUrl) {
       setCropImgLoading(false);
       return;
@@ -639,6 +644,10 @@ export function HoverZoomRowCrop({
       cropImgRef.current.naturalWidth > 0
     ) {
       setCropImgLoading(false);
+      setRowNaturalDim({
+        width: cropImgRef.current.naturalWidth,
+        height: cropImgRef.current.naturalHeight,
+      });
     } else {
       setCropImgLoading(true);
     }
@@ -724,10 +733,11 @@ export function HoverZoomRowCrop({
   const winH = Math.max(rowH * 2, winY1 - winY0);
 
   const canUseHeaderCropImg = Boolean(resolvedHeaderCropUrl && !headerImgFailed);
-  const hdrW = headerNaturalDim?.width || effectiveScanWidth;
+  const hdrW = headerNaturalDim?.width || rowNaturalDim?.width || effectiveScanWidth;
   const hdrH = headerNaturalDim?.height || Math.round(effectiveScanHeight * 0.25);
-  const hdrSliceY0 = Math.round(hdrH * 0.42);
-  const hdrSliceH = Math.max(48, hdrH - hdrSliceY0);
+  // Start at 45% of header.jpg height so only the column rubric titles + column numbers (1..24) are shown
+  const hdrSliceY0 = Math.round(hdrH * 0.45);
+  const hdrSliceH = Math.max(54, hdrH - hdrSliceY0);
 
   const fallbackScanHeaderYEnd =
     headerYEnd && headerYEnd > 40
@@ -740,7 +750,7 @@ export function HoverZoomRowCrop({
     fallbackScanHeaderYEnd - Math.round(effectiveScanHeight * 0.14)
   );
   const fallbackScanHeaderH = Math.max(
-    60,
+    54,
     fallbackScanHeaderYEnd - fallbackScanHeaderY0
   );
 
@@ -751,7 +761,16 @@ export function HoverZoomRowCrop({
 
   const sliceX0 = fieldSpec ? fieldSpec.xStartPct : 0;
   const sliceX1 = fieldSpec ? fieldSpec.xEndPct : 1;
-  const sliceWidthFraction = Math.max(0.05, sliceX1 - sliceX0);
+  const sliceWidthFraction = Math.max(0.26, sliceX1 - sliceX0);
+
+  // Lock the rendered row crop height to ~110px with 100% native 1:1 aspect ratio:
+  // sliceAspect = (rowW * sliceWidthFraction) / rowH => containerWidth = 110 * sliceAspect
+  const effRowW = rowNaturalDim?.width || hdrW || effectiveScanWidth;
+  const effRowH = rowNaturalDim?.height || Math.max(140, Math.round(effRowW / 18));
+  const sliceAspect = Math.max(2.6, (effRowW * sliceWidthFraction) / Math.max(1, effRowH));
+  const fieldContainerMaxWidthPx = fieldSpec
+    ? Math.max(340, Math.min(760, Math.round(110 * sliceAspect)))
+    : undefined;
 
   const fieldSliceImgStyle: React.CSSProperties | undefined = fieldSpec
     ? {
@@ -761,7 +780,7 @@ export function HoverZoomRowCrop({
       }
     : undefined;
 
-  const zoomScale = !fieldSpec && showContext && !hasValidRowBand ? 1.65 : 1;
+  const zoomScale = !fieldSpec && showContext && !hasValidRowBand ? 1.45 : 1;
   const sharedHorizTransformStyle: React.CSSProperties | undefined = fieldSliceImgStyle
     ? fieldSliceImgStyle
     : zoomScale > 1
@@ -772,27 +791,36 @@ export function HoverZoomRowCrop({
     : undefined;
 
   const renderPinnedColumnHeader = (syncZoomWithRowStrip: boolean) => {
+    // In single-field crop mode, show a compact, zero-height-bloat column label bar
+    // so the handwriting crop stays a sleek wide landscape strip (~110px tall) instead of a tall square box!
+    if (fieldSpec) {
+      return (
+        <div className="bg-stone-900 border-b border-stone-700 px-3 py-1 flex items-center justify-between gap-2 text-[11px]">
+          <span className="font-bold uppercase tracking-wider text-amber-300 truncate">
+            {lang === "sk" ? fieldSpec.labelSk : fieldSpec.labelEn}
+          </span>
+          {activeFieldFocus?.valuePreview && (
+            <span className="font-mono font-semibold text-stone-200 truncate">
+              {activeFieldFocus.valuePreview}
+            </span>
+          )}
+        </div>
+      );
+    }
+
     const transformStyle = syncZoomWithRowStrip ? sharedHorizTransformStyle : undefined;
     if (canUseHeaderCropImg && resolvedHeaderCropUrl) {
-      const hdrViewX0 = fieldSpec ? Math.round(hdrW * sliceX0) : 0;
-      const hdrViewW = fieldSpec ? Math.max(20, Math.round(hdrW * sliceWidthFraction)) : hdrW;
       return (
-        <div className="relative overflow-hidden bg-stone-950 border-b border-stone-700">
-          <span className="absolute top-1 left-1.5 z-10 px-2 py-0.5 rounded bg-stone-950/90 text-amber-300 border border-stone-700 text-[11px] font-bold uppercase tracking-wider pointer-events-none shadow">
-            {fieldSpec
-              ? lang === "sk"
-                ? fieldSpec.labelSk
-                : fieldSpec.labelEn
-              : lang === "sk"
-              ? "Hlavička stĺpcov"
-              : "Column header"}
+        <div className="relative overflow-hidden bg-stone-900 border-b border-stone-700">
+          <span className="absolute top-1 left-1.5 z-10 px-2 py-0.5 rounded bg-stone-950/85 text-amber-200 border border-stone-700 text-[10px] font-bold uppercase tracking-wider pointer-events-none shadow-2xs">
+            {lang === "sk" ? "Hlavička stĺpcov" : "Column header"}
           </span>
           {headerNaturalDim ? (
             <svg
-              viewBox={`${hdrViewX0} ${hdrSliceY0} ${hdrViewW} ${hdrSliceH}`}
-              style={fieldSpec ? undefined : transformStyle}
-              className="w-full h-auto max-h-24 block transition-transform duration-150 ease-out"
-              preserveAspectRatio="none"
+              viewBox={`0 ${hdrSliceY0} ${hdrW} ${hdrSliceH}`}
+              style={transformStyle}
+              className="w-full h-auto block transition-transform duration-150 ease-out"
+              preserveAspectRatio="xMidYMid meet"
             >
               <image
                 href={resolvedHeaderCropUrl}
@@ -800,7 +828,7 @@ export function HoverZoomRowCrop({
                 y={0}
                 width={hdrW}
                 height={hdrH}
-                preserveAspectRatio="none"
+                preserveAspectRatio="xMidYMid meet"
               />
             </svg>
           ) : (
@@ -809,7 +837,7 @@ export function HoverZoomRowCrop({
               alt={lang === "sk" ? "Hlavička stĺpcov" : "Column header"}
               style={transformStyle}
               onError={() => setHeaderImgFailed(true)}
-              className="w-full h-auto max-h-24 object-cover object-bottom block transition-transform duration-150 ease-out"
+              className="w-full h-auto max-h-[110px] object-contain object-bottom block transition-transform duration-150 ease-out"
             />
           )}
         </div>
@@ -817,26 +845,16 @@ export function HoverZoomRowCrop({
     }
 
     if (scanUrl) {
-      const scanViewX0 = fieldSpec ? Math.round(effectiveScanWidth * sliceX0) : 0;
-      const scanViewW = fieldSpec
-        ? Math.max(20, Math.round(effectiveScanWidth * sliceWidthFraction))
-        : effectiveScanWidth;
       return (
-        <div className="relative overflow-hidden bg-stone-950 border-b border-stone-700">
-          <span className="absolute top-1 left-1.5 z-10 px-2 py-0.5 rounded bg-stone-950/90 text-amber-300 border border-stone-700 text-[11px] font-bold uppercase tracking-wider pointer-events-none shadow">
-            {fieldSpec
-              ? lang === "sk"
-                ? fieldSpec.labelSk
-                : fieldSpec.labelEn
-              : lang === "sk"
-              ? "Hlavička stĺpcov"
-              : "Column header"}
+        <div className="relative overflow-hidden bg-stone-900 border-b border-stone-700">
+          <span className="absolute top-1 left-1.5 z-10 px-2 py-0.5 rounded bg-stone-950/85 text-amber-200 border border-stone-700 text-[10px] font-bold uppercase tracking-wider pointer-events-none shadow-2xs">
+            {lang === "sk" ? "Hlavička stĺpcov" : "Column header"}
           </span>
           <svg
-            viewBox={`${scanViewX0} ${fallbackScanHeaderY0} ${scanViewW} ${fallbackScanHeaderH}`}
-            style={fieldSpec ? undefined : transformStyle}
-            className="w-full h-auto max-h-24 block transition-transform duration-150 ease-out"
-            preserveAspectRatio="none"
+            viewBox={`0 ${fallbackScanHeaderY0} ${effectiveScanWidth} ${fallbackScanHeaderH}`}
+            style={transformStyle}
+            className="w-full h-auto block transition-transform duration-150 ease-out"
+            preserveAspectRatio="xMidYMid meet"
           >
             <image
               href={scanUrl}
@@ -844,7 +862,7 @@ export function HoverZoomRowCrop({
               y={0}
               width={effectiveScanWidth}
               height={effectiveScanHeight}
-              preserveAspectRatio="none"
+              preserveAspectRatio="xMidYMid meet"
             />
           </svg>
         </div>
@@ -873,27 +891,27 @@ export function HoverZoomRowCrop({
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       onMouseMove={handleMouseMoveStrip}
-      className={`bg-stone-900 rounded-xl p-2.5 border transition-all duration-200 ${
+      className={`bg-white rounded-xl p-3 border transition-all duration-200 ${
         showContext || fieldSpec
-          ? "border-amber-500 shadow-md ring-1 ring-amber-500/30"
-          : "border-stone-300"
+          ? "border-amber-400 shadow-xs"
+          : "border-stone-200"
       } ${className}`}
     >
       {/* Top Status & Field Crop Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-2 px-1 text-xs">
-        <div className="flex flex-wrap items-center gap-2 text-stone-200 min-w-0">
-          <Eye className="w-4 h-4 text-amber-400 shrink-0" />
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-stone-700 min-w-0">
+          <Eye className="w-4 h-4 text-amber-600 shrink-0" />
           {rowLabel ? (
-            <span className="font-semibold text-stone-100 text-xs sm:text-sm truncate">
+            <span className="font-bold text-stone-900 text-xs sm:text-sm truncate">
               {rowLabel}
             </span>
           ) : (
-            <span className="font-semibold text-stone-200 text-xs sm:text-sm">
+            <span className="font-bold text-stone-900 text-xs sm:text-sm">
               {lang === "sk" ? "Výrez vybraného riadku" : "Selected row crop"}
             </span>
           )}
           {cropImgLoading && !cropImgFailed && (
-            <span className="px-2 py-0.5 rounded-full bg-stone-800 text-amber-300 text-xs font-semibold inline-flex items-center gap-1">
+            <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold inline-flex items-center gap-1">
               <RefreshCw className="w-3 h-3 animate-spin" />
               <span>{lang === "sk" ? "Načítavam výrez…" : "Loading crop…"}</span>
             </span>
@@ -901,17 +919,17 @@ export function HoverZoomRowCrop({
           {fieldSpec ? (
             <span
               data-testid="active-field-crop-badge"
-              className="px-2.5 py-0.5 rounded-full bg-amber-500 text-white font-bold text-xs inline-flex items-center gap-1.5"
+              className="px-2.5 py-0.5 rounded-full bg-amber-600 text-white font-semibold text-xs inline-flex items-center gap-1.5"
             >
               <span>{lang === "sk" ? fieldSpec.labelSk : fieldSpec.labelEn}</span>
               {activeFieldFocus?.valuePreview && (
-                <span className="px-1.5 py-0 rounded bg-stone-950/60 text-amber-200 font-mono text-[11px]">
+                <span className="px-1.5 py-0 rounded bg-stone-950/30 text-white font-mono text-[11px]">
                   {activeFieldFocus.valuePreview}
                 </span>
               )}
             </span>
           ) : (
-            <span className="px-2 py-0.5 rounded-full bg-stone-800 text-stone-300 text-xs">
+            <span className="px-2 py-0.5 rounded-md bg-stone-100 text-stone-600 text-xs">
               {lang === "sk"
                 ? "Najeďte myšou na bunku v tabuľke pre detailný výrez daného údaja"
                 : "Hover any cell in the table below to view its targeted column crop"}
@@ -921,7 +939,7 @@ export function HoverZoomRowCrop({
 
         <div className="flex flex-wrap items-center gap-1.5">
           {activeFieldFocus?.key && (
-            <div className="inline-flex rounded-lg bg-stone-800 p-0.5 border border-stone-700 text-xs">
+            <div className="inline-flex rounded-lg bg-stone-100 p-0.5 border border-stone-200 text-xs">
               <button
                 type="button"
                 onClick={(e) => {
@@ -930,8 +948,8 @@ export function HoverZoomRowCrop({
                 }}
                 className={`px-2.5 py-1 rounded-md font-semibold cursor-pointer transition ${
                   !forceFullRow
-                    ? "bg-amber-500 text-white"
-                    : "text-stone-300 hover:text-white"
+                    ? "bg-amber-600 text-white shadow-2xs"
+                    : "text-stone-600 hover:text-stone-900"
                 }`}
               >
                 {lang === "sk" ? "Výrez poľa" : "Field crop"}
@@ -944,8 +962,8 @@ export function HoverZoomRowCrop({
                 }}
                 className={`px-2.5 py-1 rounded-md font-semibold cursor-pointer transition ${
                   forceFullRow
-                    ? "bg-amber-500 text-white"
-                    : "text-stone-300 hover:text-white"
+                    ? "bg-amber-600 text-white shadow-2xs"
+                    : "text-stone-600 hover:text-stone-900"
                 }`}
               >
                 {lang === "sk" ? "Celý riadok" : "Full row"}
@@ -965,8 +983,8 @@ export function HoverZoomRowCrop({
                     }}
                     className={`px-2 py-1 min-h-[28px] rounded-md cursor-pointer ${
                       contextPaddingMult === 2.2
-                        ? "bg-amber-500 text-white font-bold"
-                        : "bg-stone-800 text-stone-200 hover:bg-stone-700"
+                        ? "bg-amber-600 text-white font-bold"
+                        : "bg-stone-100 text-stone-700 hover:bg-stone-200"
                     }`}
                   >
                     {lang === "sk" ? "±2 riadky" : "±2 rows"}
@@ -979,8 +997,8 @@ export function HoverZoomRowCrop({
                     }}
                     className={`px-2 py-1 min-h-[28px] rounded-md cursor-pointer ${
                       contextPaddingMult === 3.5
-                        ? "bg-amber-500 text-white font-bold"
-                        : "bg-stone-800 text-stone-200 hover:bg-stone-700"
+                        ? "bg-amber-600 text-white font-bold"
+                        : "bg-stone-100 text-stone-700 hover:bg-stone-200"
                     }`}
                   >
                     {lang === "sk" ? "±3.5 riadku" : "±3.5 rows"}
@@ -1003,10 +1021,10 @@ export function HoverZoomRowCrop({
                     ? "Pripnúť kontext okolitých riadkov"
                     : "Pin neighboring rows context"
                 }
-                className={`px-2.5 py-1 min-h-[28px] rounded-md text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer ${
+                className={`px-2.5 py-1 min-h-[28px] rounded-md text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer border ${
                   isPinned
-                    ? "bg-amber-500 text-white"
-                    : "bg-stone-800 text-stone-200 hover:bg-stone-700"
+                    ? "bg-amber-600 text-white border-amber-600"
+                    : "bg-stone-100 text-stone-700 hover:bg-stone-200 border-stone-200"
                 }`}
               >
                 <Pin className="w-3.5 h-3.5" />
@@ -1027,7 +1045,7 @@ export function HoverZoomRowCrop({
 
       {/* Optional Quick Field Selector Pills */}
       {showFieldPills && onSelectFieldFocus && (
-        <div className="flex flex-wrap items-center gap-1 mb-2 px-1">
+        <div className="flex flex-wrap items-center gap-1 mb-2">
           <button
             type="button"
             onClick={(e) => {
@@ -1037,8 +1055,8 @@ export function HoverZoomRowCrop({
             }}
             className={`px-2 py-0.5 rounded text-[11px] font-semibold cursor-pointer transition ${
               !fieldSpec
-                ? "bg-amber-500 text-white"
-                : "bg-stone-800 text-stone-300 hover:bg-stone-700"
+                ? "bg-stone-900 text-white"
+                : "bg-stone-100 text-stone-600 hover:bg-stone-200 hover:text-stone-900"
             }`}
           >
             {lang === "sk" ? "Celý riadok (1–24)" : "Full row (1–24)"}
@@ -1057,8 +1075,8 @@ export function HoverZoomRowCrop({
                 }}
                 className={`px-2 py-0.5 rounded text-[11px] font-semibold cursor-pointer transition ${
                   isAct
-                    ? "bg-amber-500 text-white"
-                    : "bg-stone-800 text-stone-300 hover:bg-stone-700"
+                    ? "bg-amber-600 text-white"
+                    : "bg-stone-100 text-stone-600 hover:bg-stone-200 hover:text-stone-900"
                 }`}
               >
                 {lang === "sk" ? spec.shortSk : spec.shortEn}
@@ -1068,16 +1086,16 @@ export function HoverZoomRowCrop({
         </div>
       )}
 
-      {/* Main Crop / Contextual View Area with Pinned Aligned Column Header */}
+      {/* Main Crop / Contextual View Area with Pinned Aligned Column Header & Natural Aspect Ratio */}
       {!fieldSpec && showContext && hasValidRowBand && scanUrl ? (
         <div className="space-y-1.5">
           {/* Pinned Column Header + Zoomed-out contextual window from full scan */}
-          <div className="relative rounded-lg overflow-hidden border border-amber-500/60 bg-stone-950">
+          <div className="relative rounded-lg overflow-hidden border border-stone-300 bg-stone-950">
             {renderPinnedColumnHeader(false)}
             <svg
               viewBox={`0 ${winY0} ${effectiveScanWidth} ${winH}`}
-              className="w-full h-auto max-h-[440px] block"
-              preserveAspectRatio="none"
+              className="w-full h-auto max-h-[340px] block"
+              preserveAspectRatio="xMidYMid meet"
             >
               <image
                 href={scanUrl}
@@ -1085,7 +1103,7 @@ export function HoverZoomRowCrop({
                 y={0}
                 width={effectiveScanWidth}
                 height={effectiveScanHeight}
-                preserveAspectRatio="none"
+                preserveAspectRatio="xMidYMid meet"
               />
               {y0 > winY0 && (
                 <rect
@@ -1119,51 +1137,65 @@ export function HoverZoomRowCrop({
           </div>
           {/* Keep the tight stitched strip underneath for direct comparison */}
           {!cropImgFailed && (
-            <div className="rounded bg-stone-950/90 p-1 border border-stone-800">
+            <div className="rounded bg-stone-950 p-1 border border-stone-300">
               <img
                 src={cropUrl}
                 alt={rowLabel || (lang === "sk" ? "Výrez riadku" : "Row crop")}
                 loading="eager"
                 decoding="async"
                 onError={() => setCropImgFailed(true)}
-                className="w-full h-auto block rounded opacity-95"
+                className="w-full h-auto max-h-[140px] object-contain block rounded"
               />
             </div>
           )}
         </div>
       ) : (
-        <div
-          className={`relative overflow-hidden rounded-lg bg-stone-950 border border-stone-800 ${
-            fieldSpec ? "max-w-3xl mx-auto shadow-inner" : ""
-          }`}
-        >
-          {renderPinnedColumnHeader(true)}
-          <div className="relative overflow-hidden bg-stone-950">
-            {!cropImgFailed ? (
-            <img
-              ref={cropImgRef}
-              src={cropUrl}
-              alt={rowLabel || (lang === "sk" ? "Výrez riadku" : "Row crop")}
-              loading="eager"
-              decoding="async"
-              style={sharedHorizTransformStyle}
-              onLoad={() => setCropImgLoading(false)}
-              onError={() => {
-                setCropImgLoading(false);
-                setCropImgFailed(true);
-              }}
-              className="w-full h-auto block transition-all duration-150 ease-out"
-            />
-            ) : (
-              <div className="py-4 px-3 text-center text-xs text-stone-400 flex items-center justify-center gap-1.5">
-                <ImageOff className="w-4 h-4 text-stone-500" />
-                <span>
-                  {lang === "sk"
-                    ? "Výrez riadku nie je v lokálnom úložisku k dispozícii."
-                    : "Row crop image is not available in local storage."}
-                </span>
-              </div>
-            )}
+        <div className="bg-stone-100/80 rounded-lg p-2 border border-stone-200 flex justify-center">
+          <div
+            style={
+              fieldContainerMaxWidthPx
+                ? { width: "100%", maxWidth: `${fieldContainerMaxWidthPx}px` }
+                : { width: "100%" }
+            }
+            className="relative overflow-hidden rounded-lg bg-stone-950 border border-stone-300 shadow-2xs transition-all duration-150"
+          >
+            {renderPinnedColumnHeader(true)}
+            <div className="relative overflow-hidden bg-stone-950">
+              {!cropImgFailed ? (
+                <img
+                  ref={cropImgRef}
+                  src={cropUrl}
+                  alt={rowLabel || (lang === "sk" ? "Výrez riadku" : "Row crop")}
+                  loading="eager"
+                  decoding="async"
+                  style={sharedHorizTransformStyle}
+                  onLoad={(e) => {
+                    setCropImgLoading(false);
+                    const el = e.currentTarget;
+                    if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+                      setRowNaturalDim({
+                        width: el.naturalWidth,
+                        height: el.naturalHeight,
+                      });
+                    }
+                  }}
+                  onError={() => {
+                    setCropImgLoading(false);
+                    setCropImgFailed(true);
+                  }}
+                  className="w-full h-auto block transition-all duration-150 ease-out"
+                />
+              ) : (
+                <div className="py-4 px-3 text-center text-xs text-stone-400 flex items-center justify-center gap-1.5">
+                  <ImageOff className="w-4 h-4 text-stone-500" />
+                  <span>
+                    {lang === "sk"
+                      ? "Výrez riadku nie je v lokálnom úložisku k dispozícii."
+                      : "Row crop image is not available in local storage."}
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

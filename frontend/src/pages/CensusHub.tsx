@@ -16,6 +16,8 @@ import {
   Home,
   Layers,
   MapPin,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pause,
   Play,
   RefreshCw,
@@ -441,9 +443,20 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   const [jobsExpanded, setJobsExpanded] = useState<boolean>(false);
   const [dismissedActiveJobId, setDismissedActiveJobId] = useState<number | null>(null);
   const [splitMenuOpen, setSplitMenuOpen] = useState<boolean>(false);
+  const [villageMenuCollapsed, setVillageMenuCollapsed] = useState<boolean>(
+    () => localStorage.getItem("matrika_village_menu_collapsed") === "true"
+  );
   const [loading, setLoading] = useState<boolean>(true);
   const splitMenuRef = useRef<HTMLDivElement | null>(null);
   const jobsPopoverRef = useRef<HTMLDivElement | null>(null);
+
+  const toggleVillageMenu = () => {
+    setVillageMenuCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem("matrika_village_menu_collapsed", String(next));
+      return next;
+    });
+  };
 
   useEffect(() => {
     const handleMouseDown = (e: MouseEvent) => {
@@ -2228,28 +2241,53 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
       {/* LEFT SIDEBAR: Okresy a obce */}
-      <aside className="lg:col-span-3 bg-white rounded-xl border border-stone-300 p-3.5 space-y-3 lg:sticky lg:top-4">
+      {!villageMenuCollapsed && (
+      <aside
+        data-testid="village-selection-sidebar"
+        className="lg:col-span-3 bg-white rounded-xl border border-stone-300 p-3.5 space-y-3 lg:sticky lg:top-4"
+      >
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-bold text-stone-900 flex items-center gap-1.5">
-            <MapPin className="w-4 h-4 text-amber-600" />
-            <span>
+          <h2 className="text-sm font-bold text-stone-900 flex items-center gap-1.5 min-w-0">
+            <MapPin className="w-4 h-4 text-amber-600 shrink-0" />
+            <span className="truncate">
               {lang === "sk" ? "Okresy a obce" : "Districts & Municipalities"}
             </span>
             {(loadingFacets || loading) && (
               <span title={lang === "sk" ? "Načítavam obce…" : "Loading municipalities…"}>
-                <RefreshCw className="w-3.5 h-3.5 text-amber-600 animate-spin" />
+                <RefreshCw className="w-3.5 h-3.5 text-amber-600 animate-spin shrink-0" />
               </span>
             )}
           </h2>
-          <a
-            href="https://slovakiana.sk/scitacie-harky/?page=1&lm=0"
-            target="_blank"
-            rel="noreferrer"
-            className="text-xs font-semibold text-amber-800 hover:underline inline-flex items-center gap-1 py-1 px-1.5 min-h-[32px]"
-          >
-            <span>Slovakiana</span>
-            <ExternalLink className="w-3.5 h-3.5" />
-          </a>
+          <div className="flex items-center gap-1 shrink-0">
+            <a
+              href="https://slovakiana.sk/scitacie-harky/?page=1&lm=0"
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs font-semibold text-amber-800 hover:underline inline-flex items-center gap-1 py-1 px-1.5 min-h-[32px]"
+            >
+              <span>Slovakiana</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+            <button
+              type="button"
+              onClick={toggleVillageMenu}
+              data-testid="toggle-village-menu-btn"
+              aria-expanded={!villageMenuCollapsed}
+              aria-label={
+                lang === "sk"
+                  ? "Zbaliť výber obcí"
+                  : "Collapse municipalities menu"
+              }
+              title={
+                lang === "sk"
+                  ? "Zbaliť výber obcí (Okresy a obce)"
+                  : "Collapse Districts & Municipalities menu"
+              }
+              className="p-1.5 min-h-[30px] min-w-[30px] rounded-lg text-stone-500 hover:text-stone-900 hover:bg-stone-100 inline-flex items-center justify-center shrink-0 cursor-pointer transition"
+            >
+              <PanelLeftClose className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Year Switch: 1930 | 1940 (always single year, 1930 by default) */}
@@ -2549,15 +2587,45 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
           })}
         </div>
       </aside>
+      )}
 
       {/* RIGHT MAIN WORKSPACE */}
-      <section className="lg:col-span-9 space-y-4">
+      <section
+        className={`${
+          villageMenuCollapsed ? "lg:col-span-12" : "lg:col-span-9"
+        } space-y-4`}
+      >
         {/* Unified Header & Action Bar */}
         <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3">
           {/* Row 1: Identity & Primary Action Toolbar */}
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <div className="flex flex-wrap items-center gap-2">
+                {villageMenuCollapsed && (
+                  <button
+                    type="button"
+                    onClick={toggleVillageMenu}
+                    data-testid="toggle-village-menu-btn"
+                    aria-expanded={false}
+                    aria-label={
+                      lang === "sk"
+                        ? "Rozbaliť výber obcí"
+                        : "Expand municipalities menu"
+                    }
+                    title={
+                      lang === "sk"
+                        ? "Rozbaliť výber obcí (Okresy a obce)"
+                        : "Expand Districts & Municipalities menu"
+                    }
+                    className="px-2.5 py-1.5 min-h-[32px] rounded-lg bg-stone-100 hover:bg-amber-50 border border-stone-300 hover:border-amber-400 text-stone-800 hover:text-amber-900 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition shadow-2xs"
+                  >
+                    <PanelLeftOpen className="w-4 h-4 text-amber-600 shrink-0" />
+                    <MapPin className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    <span>
+                      {lang === "sk" ? "Okresy a obce" : "Districts & Municipalities"}
+                    </span>
+                  </button>
+                )}
                 <h1 className="text-lg font-bold text-stone-900">
                   {selectedMunicipality
                     ? `${selectedMunicipality}${
@@ -3973,7 +4041,13 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   </div>
                 )}
 
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                <div
+                  className={`grid grid-cols-1 md:grid-cols-2 ${
+                    villageMenuCollapsed
+                      ? "lg:grid-cols-3 2xl:grid-cols-4"
+                      : "xl:grid-cols-3"
+                  } gap-3`}
+                >
                   {pagedSheets.map(
                   ({
                     sheet: s,

@@ -11,6 +11,8 @@ import {
   FileSpreadsheet,
   HelpCircle,
   Home,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Search,
   Upload,
@@ -182,6 +184,9 @@ export default function App() {
   const [lang, setLang] = useState<"sk" | "en">(
     () => (localStorage.getItem("matrika_lang") as "sk" | "en") || "sk"
   );
+  const [leftMenuCollapsed, setLeftMenuCollapsed] = useState<boolean>(
+    () => localStorage.getItem("matrika_left_menu_collapsed") === "true"
+  );
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [elapsedSec, setElapsedSec] = useState<number>(0);
@@ -195,6 +200,14 @@ export default function App() {
     const next = lang === "sk" ? "en" : "sk";
     setLang(next);
     localStorage.setItem("matrika_lang", next);
+  };
+
+  const toggleLeftMenu = () => {
+    setLeftMenuCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem("matrika_left_menu_collapsed", String(next));
+      return next;
+    });
   };
 
   const dismissToast = useCallback((toastId: string) => {
@@ -511,18 +524,35 @@ export default function App() {
   return (
     <div className="min-h-screen flex flex-col lg:flex-row bg-stone-100 text-stone-900 overflow-x-hidden">
       {/* Mockup B: Clean Nordic Left Navigation Rail (Desktop) & Crisp White Top Bar (Mobile) */}
-      <header className="w-full lg:w-56 xl:w-60 shrink-0 bg-white border-b lg:border-b-0 lg:border-r border-stone-200 flex flex-col justify-between lg:sticky lg:top-0 lg:h-screen z-30">
+      <header
+        data-testid="app-left-menu"
+        data-collapsed={leftMenuCollapsed ? "true" : "false"}
+        className={`w-full ${
+          leftMenuCollapsed ? "lg:w-14" : "lg:w-56 xl:w-60"
+        } shrink-0 bg-white border-b lg:border-b-0 lg:border-r border-stone-200 flex flex-col justify-between lg:sticky lg:top-0 lg:h-screen z-30 transition-all duration-150`}
+      >
         <div className="flex flex-col">
           {/* Brand Row */}
-          <div className="px-3.5 py-3 flex items-center justify-between gap-2 border-b border-stone-100">
+          <div
+            className={`px-3.5 py-3 flex items-center justify-between gap-2 border-b border-stone-100 ${
+              leftMenuCollapsed ? "lg:px-1.5 lg:py-2.5 lg:flex-col lg:justify-center lg:gap-1.5" : ""
+            }`}
+          >
             <Link
               to={featureFlags.tab_matrika ? "/" : "/scitacie-harky"}
-              className="flex items-center gap-2.5 min-w-0"
+              title={
+                lang === "sk"
+                  ? "Čítačka matrík a sčítacích hárkov"
+                  : "Matrika & Census Digitizer"
+              }
+              className={`flex items-center gap-2.5 min-w-0 ${
+                leftMenuCollapsed ? "lg:justify-center" : ""
+              }`}
             >
               <div className="w-7 h-7 rounded-lg bg-amber-600 flex items-center justify-center font-bold text-sm text-white shrink-0 shadow-2xs">
                 M
               </div>
-              <div className="leading-tight min-w-0">
+              <div className={`leading-tight min-w-0 ${leftMenuCollapsed ? "lg:hidden" : ""}`}>
                 <h1 className="text-xs xl:text-sm font-bold tracking-tight text-stone-900 truncate">
                   {lang === "sk"
                     ? "Čítačka matrík a sčítacích hárkov"
@@ -533,10 +563,47 @@ export default function App() {
                 </span>
               </div>
             </Link>
+            <button
+              type="button"
+              onClick={toggleLeftMenu}
+              data-testid="toggle-left-menu-btn"
+              aria-expanded={!leftMenuCollapsed}
+              aria-label={
+                leftMenuCollapsed
+                  ? lang === "sk"
+                    ? "Rozbaliť ľavé menu"
+                    : "Expand left menu"
+                  : lang === "sk"
+                  ? "Zbaliť ľavé menu"
+                  : "Collapse left menu"
+              }
+              title={
+                leftMenuCollapsed
+                  ? lang === "sk"
+                    ? "Rozbaliť ľavé menu"
+                    : "Expand left menu"
+                  : lang === "sk"
+                  ? "Zbaliť ľavé menu"
+                  : "Collapse left menu"
+              }
+              className="p-1.5 min-h-[30px] min-w-[30px] rounded-lg text-stone-500 hover:text-stone-900 hover:bg-stone-100 inline-flex items-center justify-center shrink-0 cursor-pointer transition"
+            >
+              {leftMenuCollapsed ? (
+                <PanelLeftOpen className="w-4 h-4" />
+              ) : (
+                <PanelLeftClose className="w-4 h-4" />
+              )}
+            </button>
           </div>
 
           {/* Primary Navigation */}
-          <nav className="px-2.5 py-2 lg:py-3 flex flex-wrap lg:flex-col items-center lg:items-stretch gap-1">
+          <nav
+            className={`${
+              leftMenuCollapsed
+                ? "hidden lg:flex lg:flex-col lg:items-center lg:px-1.5 lg:py-3"
+                : "px-2.5 py-2 lg:py-3 flex flex-wrap lg:flex-col items-center lg:items-stretch"
+            } gap-1`}
+          >
             {navItems.map((item) => {
               const Icon = item.icon;
               const active =
@@ -560,7 +627,17 @@ export default function App() {
                 <Link
                   key={item.to}
                   to={item.to}
-                  className={`flex items-center justify-between gap-2 px-2.5 py-1.5 min-h-[34px] rounded-lg font-medium text-xs xl:text-sm whitespace-nowrap transition ${
+                  title={
+                    item.badge !== null && item.badge > 0
+                      ? `${item.label} (${item.badge})`
+                      : item.label
+                  }
+                  aria-label={item.label}
+                  className={`relative flex items-center ${
+                    leftMenuCollapsed
+                      ? "lg:justify-center lg:w-9 lg:h-9 lg:px-0 lg:py-0"
+                      : "justify-between gap-2 px-2.5 py-1.5 min-h-[34px]"
+                  } rounded-lg font-medium text-xs xl:text-sm whitespace-nowrap transition ${
                     active
                       ? "bg-amber-50 text-amber-700 font-semibold ring-1 ring-amber-200/80"
                       : "text-stone-600 hover:bg-stone-100 hover:text-stone-900"
@@ -572,18 +649,28 @@ export default function App() {
                         active ? "text-amber-600" : "text-stone-400"
                       }`}
                     />
-                    <span className="truncate">{item.label}</span>
+                    <span className={`truncate ${leftMenuCollapsed ? "lg:hidden" : ""}`}>
+                      {item.label}
+                    </span>
                   </span>
                   {item.badge !== null && item.badge > 0 && (
-                    <span
-                      className={`px-1.5 py-0.5 rounded-md text-[11px] font-semibold leading-none ${
-                        active
-                          ? "bg-amber-600 text-white"
-                          : "bg-stone-100 text-stone-600"
-                      }`}
-                    >
-                      {item.badge}
-                    </span>
+                    leftMenuCollapsed ? (
+                      <span
+                        className={`hidden lg:block absolute top-1 right-1 w-2 h-2 rounded-full ${
+                          active ? "bg-amber-600" : "bg-stone-400"
+                        }`}
+                      />
+                    ) : (
+                      <span
+                        className={`px-1.5 py-0.5 rounded-md text-[11px] font-semibold leading-none ${
+                          active
+                            ? "bg-amber-600 text-white"
+                            : "bg-stone-100 text-stone-600"
+                        }`}
+                      >
+                        {item.badge}
+                      </span>
+                    )
                   )}
                 </Link>
               );
@@ -592,11 +679,23 @@ export default function App() {
         </div>
 
         {/* Bottom System & Language Controls */}
-        <div className="px-3 py-2.5 border-t border-stone-200 bg-stone-50/60 flex flex-wrap lg:flex-col gap-1.5">
+        <div
+          className={`${
+            leftMenuCollapsed
+              ? "hidden lg:flex lg:flex-col lg:items-center px-1.5 py-2.5"
+              : "px-3 py-2.5 flex flex-wrap lg:flex-col"
+          } border-t border-stone-200 bg-stone-50/60 gap-1.5`}
+        >
           {featureFlags.admin_debug_overlay && (
-            <div className="flex items-center justify-between gap-1.5 w-full">
+            <div
+              className={`flex items-center justify-between gap-1.5 w-full ${
+                leftMenuCollapsed ? "lg:flex-col lg:justify-center" : ""
+              }`}
+            >
               <span
-                className="flex items-center gap-1.5 px-2 py-1 rounded bg-white border border-stone-200 text-[11px] font-medium text-stone-700"
+                className={`flex items-center justify-center gap-1.5 ${
+                  leftMenuCollapsed ? "lg:w-9 lg:px-1" : "px-2"
+                } py-1 rounded bg-white border border-stone-200 text-[11px] font-medium text-stone-700`}
                 title={
                   aiOnline
                     ? `AI: ${status?.ai_server?.base_url || "online"}`
@@ -604,11 +703,13 @@ export default function App() {
                 }
               >
                 <span
-                  className={`w-2 h-2 rounded-full ${
+                  className={`w-2 h-2 rounded-full shrink-0 ${
                     aiOnline ? "bg-emerald-500" : "bg-red-500"
                   }`}
                 />
-                <span>{aiOnline ? "AI" : "AI offline"}</span>
+                <span className={leftMenuCollapsed ? "lg:hidden" : ""}>
+                  {aiOnline ? "AI" : "AI offline"}
+                </span>
               </span>
               <button
                 type="button"
@@ -619,17 +720,29 @@ export default function App() {
                     ? "Vypnúť technické nástroje (Admin Debug Overlay)"
                     : "Turn off inline debug tools (Admin Debug Overlay)"
                 }
-                className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer transition"
+                className={`${
+                  leftMenuCollapsed ? "lg:w-9 lg:px-1" : "px-2"
+                } py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer transition`}
               >
-                {lang === "sk" ? "Admin Overlay: ZAP" : "Admin Overlay: ON"}
+                {leftMenuCollapsed
+                  ? "ON"
+                  : lang === "sk"
+                  ? "Admin Overlay: ZAP"
+                  : "Admin Overlay: ON"}
               </button>
             </div>
           )}
 
-          <div className="flex items-center justify-between gap-1.5 w-full">
+          <div
+            className={`flex items-center justify-between gap-1.5 w-full ${
+              leftMenuCollapsed ? "lg:flex-col lg:justify-center" : ""
+            }`}
+          >
             <button
               onClick={toggleLang}
-              className="flex-1 px-2.5 py-1.5 min-h-[32px] rounded-lg bg-white hover:bg-stone-100 border border-stone-200 font-semibold text-xs cursor-pointer text-stone-700 transition"
+              className={`${
+                leftMenuCollapsed ? "lg:w-9 lg:px-0 lg:flex-none" : "flex-1 px-2.5"
+              } py-1.5 min-h-[32px] rounded-lg bg-white hover:bg-stone-100 border border-stone-200 font-semibold text-xs cursor-pointer text-stone-700 transition`}
               title="Prepnúť jazyk / Switch language"
             >
               {lang === "sk" ? "SK" : "EN"}
@@ -637,14 +750,17 @@ export default function App() {
             <Link
               to="/debug"
               title={lang === "sk" ? "Admin & Debug konzola" : "Admin & Debug Console"}
-              className={`flex-1 px-2.5 py-1.5 min-h-[32px] rounded-lg font-semibold text-xs inline-flex items-center justify-center gap-1.5 transition ${
+              aria-label={lang === "sk" ? "Admin & Debug konzola" : "Admin & Debug Console"}
+              className={`${
+                leftMenuCollapsed ? "lg:w-9 lg:px-0 lg:flex-none" : "flex-1 px-2.5"
+              } py-1.5 min-h-[32px] rounded-lg font-semibold text-xs inline-flex items-center justify-center gap-1.5 transition ${
                 debugActive
                   ? "bg-amber-600 text-white"
                   : "bg-white hover:bg-stone-100 text-stone-600 hover:text-stone-900 border border-stone-200"
               }`}
             >
-              <Activity className="w-3.5 h-3.5" />
-              <span>Debug</span>
+              <Activity className="w-3.5 h-3.5 shrink-0" />
+              <span className={leftMenuCollapsed ? "lg:hidden" : ""}>Debug</span>
             </Link>
           </div>
         </div>

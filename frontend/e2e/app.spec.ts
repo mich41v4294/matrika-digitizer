@@ -191,6 +191,21 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
           await page.getByText("Obec Testová", { exact: true }).first().click();
           await expect(page.locator("body")).toContainText("Prehľady sčítacích obvodov");
           await expect(page.locator("body")).toContainText("Dom č. 15");
+
+          // Test collapsing and expanding both the left menu and the village selection menu
+          await expect(page.getByTestId("app-left-menu")).toHaveAttribute("data-collapsed", "false");
+          await expect(page.getByTestId("village-selection-sidebar")).toBeVisible();
+          await page.getByTestId("toggle-left-menu-btn").click();
+          await expect(page.getByTestId("app-left-menu")).toHaveAttribute("data-collapsed", "true");
+          await page.getByTestId("toggle-village-menu-btn").click();
+          await expect(page.getByTestId("village-selection-sidebar")).toHaveCount(0);
+          await assertCleanPageAndImages(page, diag, `${vp.name}:${r.path}:collapsed`);
+
+          // Expand both menus back
+          await page.getByTestId("toggle-village-menu-btn").click();
+          await expect(page.getByTestId("village-selection-sidebar")).toBeVisible();
+          await page.getByTestId("toggle-left-menu-btn").click();
+          await expect(page.getByTestId("app-left-menu")).toHaveAttribute("data-collapsed", "false");
         }
 
         if (r.path === "/scitacie-harky/cair-test001") {

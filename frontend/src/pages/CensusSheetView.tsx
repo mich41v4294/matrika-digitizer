@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -25,8 +25,9 @@ import {
   X,
 } from "lucide-react";
 import ZoomableScanViewer, {
-  HoverZoomRowCrop,
-  type ActiveFieldFocus,
+  FloatingFieldCropPopover,
+  type CensusFieldCropKey,
+  type HoveredFieldCropState,
 } from "../components/ZoomableScanViewer";
 import OcrFeedbackControls, { type OcrFeedbackItem } from "../components/OcrFeedbackControls";
 import { useFeatureFlags } from "../featureFlags";
@@ -1019,10 +1020,134 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const [showFullSheetScan, setShowFullSheetScan] = useState<boolean>(
     () => searchParams.get("scan") === "1"
   );
-  const [activeFieldFocus, setActiveFieldFocus] = useState<ActiveFieldFocus | null>({
-    key: "surname",
-  });
+  const hoveredElRef = useRef<HTMLElement | null>(null);
+  const [hoveredFieldCrop, setHoveredFieldCrop] = useState<HoveredFieldCropState | null>(
+    null
+  );
   const splitLayout = false;
+
+  const showFieldCropAtElement = (
+    el: HTMLElement,
+    cropUrl: string | null | undefined,
+    fieldKey: CensusFieldCropKey,
+    valuePreview?: string | null,
+    mouseX?: number,
+    mouseY?: number
+  ) => {
+    if (!cropUrl) {
+      hoveredElRef.current = null;
+      setHoveredFieldCrop(null);
+      return;
+    }
+    const r = el.getBoundingClientRect();
+    hoveredElRef.current = el;
+    setHoveredFieldCrop({
+      cropUrl,
+      fieldKey,
+      valuePreview: valuePreview ?? null,
+      anchorRect: {
+        top: r.top,
+        bottom: r.bottom,
+        left: r.left,
+        right: r.right,
+        width: r.width,
+        height: r.height,
+      },
+      mouseX,
+      mouseY,
+    });
+  };
+
+  const getFieldHoverProps = (
+    cropUrl: string | null | undefined,
+    fieldKey: CensusFieldCropKey,
+    valuePreview?: string | null
+  ) => ({
+    onMouseEnter: (e: React.MouseEvent<HTMLElement>) => {
+      showFieldCropAtElement(
+        e.currentTarget,
+        cropUrl,
+        fieldKey,
+        valuePreview,
+        e.clientX,
+        e.clientY
+      );
+    },
+    onMouseMove: (e: React.MouseEvent<HTMLElement>) => {
+      if (!cropUrl) return;
+      const r = e.currentTarget.getBoundingClientRect();
+      hoveredElRef.current = e.currentTarget;
+      setHoveredFieldCrop((prev) => {
+        if (
+          prev &&
+          prev.cropUrl === cropUrl &&
+          prev.fieldKey === fieldKey &&
+          Math.abs((prev.mouseX ?? 0) - e.clientX) < 3 &&
+          Math.abs(prev.anchorRect.top - r.top) < 2
+        ) {
+          return prev;
+        }
+        return {
+          cropUrl,
+          fieldKey,
+          valuePreview: valuePreview ?? null,
+          anchorRect: {
+            top: r.top,
+            bottom: r.bottom,
+            left: r.left,
+            right: r.right,
+            width: r.width,
+            height: r.height,
+          },
+          mouseX: e.clientX,
+          mouseY: e.clientY,
+        };
+      });
+    },
+    onMouseLeave: (e: React.MouseEvent<HTMLElement>) => {
+      if (hoveredElRef.current === e.currentTarget) {
+        hoveredElRef.current = null;
+        setHoveredFieldCrop(null);
+      }
+    },
+  });
+
+  useEffect(() => {
+    if (!hoveredFieldCrop) return;
+    const handleScrollOrResize = () => {
+      const el = hoveredElRef.current;
+      if (!el || !el.isConnected) {
+        setHoveredFieldCrop(null);
+        return;
+      }
+      const r = el.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight) {
+        setHoveredFieldCrop(null);
+        return;
+      }
+      setHoveredFieldCrop((prev) =>
+        prev
+          ? {
+              ...prev,
+              anchorRect: {
+                top: r.top,
+                bottom: r.bottom,
+                left: r.left,
+                right: r.right,
+                width: r.width,
+                height: r.height,
+              },
+            }
+          : null
+      );
+    };
+    window.addEventListener("scroll", handleScrollOrResize, true);
+    window.addEventListener("resize", handleScrollOrResize);
+    return () => {
+      window.removeEventListener("scroll", handleScrollOrResize, true);
+      window.removeEventListener("resize", handleScrollOrResize);
+    };
+  }, [Boolean(hoveredFieldCrop)]);
 
   // Household member selection & drawer editing
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(() => {
@@ -2480,9 +2605,6 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
   const selectedMember =
     members.find((m) => m.fact.id === selectedMemberId) || members[0] || null;
-  const selectedMemberRow = selectedMember
-    ? selectedMember.row || rowsById.get(selectedMember.fact.row_id) || null
-    : null;
 
   const selectedHouse =
     overview_houses.find((h) => h.id === selectedHouseId) || overview_houses[0] || null;
@@ -2491,123 +2613,9 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     municipal_overview_districts[0] ||
     null;
 
-  // Determine active row crop props for <HoverZoomRowCrop>
-  let activeCropUrl: string | null = null;
-  let activeHeaderCropUrl: string | null =
-    activeScan?.header_crop_path ||
-    activeScan?.header_crop_url ||
-    front_scan?.header_crop_path ||
-    front_scan?.header_crop_url ||
-    null;
-  let activeRowYStart: number | null = null;
-  let activeRowYEnd: number | null = null;
-  let activeRowLabel = "";
-  let activeRowScanUrl: string | null = frontOriginalUrl;
-  let activeRowScanHeight: number | null = front_scan?.height || null;
-  let activeRowScanWidth: number | null = front_scan?.width || null;
-
-  if (isMunicipalOverviewSheet && selectedDistrictRow) {
-    activeCropUrl = selectedDistrictRow.stitched_crop_path;
-    const matchRow =
-      (selectedDistrictRow.row_id && rowsById.get(selectedDistrictRow.row_id)) ||
-      (selectedDistrictRow.stitched_crop_path &&
-        rowsByCrop.get(selectedDistrictRow.stitched_crop_path)) ||
-      null;
-    activeRowYStart = selectedDistrictRow.y_start ?? matchRow?.y_start ?? null;
-    activeRowYEnd = selectedDistrictRow.y_end ?? matchRow?.y_end ?? null;
-    activeHeaderCropUrl =
-      selectedDistrictRow.header_crop_url ||
-      front_scan?.header_crop_path ||
-      front_scan?.header_crop_url ||
-      activeHeaderCropUrl;
-    activeRowLabel = selectedDistrictRow.is_summary_row
-      ? lang === "sk"
-        ? `Výrez súhrnného riadku (Spolu za celú obec): ${selectedDistrictRow.houses_total ?? "—"} domov, ${selectedDistrictRow.present_persons_count ?? "—"} osôb`
-        : `Summary row crop (Municipality Total): ${selectedDistrictRow.houses_total ?? "—"} houses, ${selectedDistrictRow.present_persons_count ?? "—"} residents`
-      : lang === "sk"
-      ? `Výrez sčítacieho obvodu č. ${selectedDistrictRow.obvod_number || selectedDistrictRow.row_index}: komisár ${selectedDistrictRow.commissioner_name || "—"} (${selectedDistrictRow.houses_total ?? "—"} domov, ${selectedDistrictRow.present_persons_count ?? "—"} osôb)`
-      : `District #${selectedDistrictRow.obvod_number || selectedDistrictRow.row_index} crop: commissioner ${selectedDistrictRow.commissioner_name || "—"} (${selectedDistrictRow.houses_total ?? "—"} houses, ${selectedDistrictRow.present_persons_count ?? "—"} residents)`;
-  } else if (isOverviewSheet && selectedHouse) {
-    activeCropUrl = selectedHouse.stitched_crop_path;
-    const matchRow = resolveOverviewHouseRow(selectedHouse);
-    activeRowYStart = selectedHouse.y_start ?? matchRow?.y_start ?? null;
-    activeRowYEnd = selectedHouse.y_end ?? matchRow?.y_end ?? null;
-    const housePageSide =
-      selectedHouse.page_side ||
-      (selectedHouse.scan_id && back_scan && selectedHouse.scan_id === back_scan.id
-        ? "back"
-        : "front");
-    const housePageObj = (detail.pages || []).find(
-      (p) =>
-        (selectedHouse.scan_id && p.scan_id === selectedHouse.scan_id) ||
-        p.page_side === housePageSide
-    );
-    const houseScan =
-      housePageSide === "back" && back_scan
-        ? back_scan
-        : housePageSide === "front" && front_scan
-        ? front_scan
-        : housePageObj
-        ? {
-            id: housePageObj.scan_id || 0,
-            header_crop_path: housePageObj.header_crop_url,
-            header_crop_url: housePageObj.header_crop_url,
-            height: housePageObj.height,
-            width: housePageObj.width,
-          }
-        : front_scan;
-    activeRowScanUrl =
-      housePageSide === "back"
-        ? backOriginalUrl
-        : housePageSide === "front"
-        ? frontOriginalUrl
-        : housePageObj?.scan_url || frontOriginalUrl;
-    activeHeaderCropUrl =
-      selectedHouse.header_crop_url ||
-      houseScan?.header_crop_path ||
-      houseScan?.header_crop_url ||
-      (houseScan?.id ? `/media/crops/scan_${houseScan.id}/header.jpg` : activeHeaderCropUrl);
-    activeRowScanHeight = houseScan?.height || null;
-    activeRowScanWidth = houseScan?.width || null;
-    activeRowLabel =
-      lang === "sk"
-        ? `Výrez vybraného domu (riadok č. ${
-            selectedHouse.ordinal_number || selectedHouse.row_index
-          }${selectedHouse.booklet_page ? ` · strana ${selectedHouse.booklet_page}` : ""}): dom č. ${
-            selectedHouse.house_number || "—"
-          } – ${selectedHouse.owner_name || "neznámy majiteľ"}`
-        : `Selected house crop (row #${
-            selectedHouse.ordinal_number || selectedHouse.row_index
-          }${selectedHouse.booklet_page ? ` · page ${selectedHouse.booklet_page}` : ""}): house #${
-            selectedHouse.house_number || "—"
-          } – ${selectedHouse.owner_name || "unknown owner"}`;
-  } else if (selectedMember) {
-    activeCropUrl =
-      selectedMemberRow?.stitched_crop_path || selectedMember.stitched_crop_url || null;
-    activeRowYStart = selectedMemberRow?.y_start ?? null;
-    activeRowYEnd = selectedMemberRow?.y_end ?? null;
-    activeHeaderCropUrl =
-      activeScan?.header_crop_path ||
-      activeScan?.header_crop_url ||
-      front_scan?.header_crop_path ||
-      front_scan?.header_crop_url ||
-      (front_scan?.id ? `/media/crops/scan_${front_scan.id}/header.jpg` : null);
-    activeRowLabel =
-      lang === "sk"
-        ? `Výrez vybraného riadku č. ${
-            selectedMember.fact.person_row_number || "—"
-          }: ${selectedMember.fact.given_name_raw || ""} ${
-            selectedMember.fact.surname_raw || ""
-          }`.trim()
-        : `Selected row crop #${
-            selectedMember.fact.person_row_number || "—"
-          }: ${selectedMember.fact.given_name_raw || ""} ${
-            selectedMember.fact.surname_raw || ""
-          }`.trim();
-  }
-
   return (
     <div className="space-y-4">
+      <FloatingFieldCropPopover state={hoveredFieldCrop} lang={lang} />
       {/* Top Header Bar */}
       <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -3373,24 +3381,6 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
           </div>
         )}
 
-        {/* PRIMARY CROP-FIRST VERIFICATION BAR: Pinned Field/Row Crop right above the data table */}
-        {activeCropUrl && (
-          <HoverZoomRowCrop
-            cropUrl={activeCropUrl}
-            headerCropUrl={activeHeaderCropUrl}
-            scanUrl={featureFlags.hover_row_zoom ? activeRowScanUrl : null}
-            yStart={featureFlags.hover_row_zoom ? activeRowYStart : null}
-            yEnd={featureFlags.hover_row_zoom ? activeRowYEnd : null}
-            scanHeight={activeRowScanHeight}
-            scanWidth={activeRowScanWidth}
-            rowLabel={activeRowLabel}
-            activeFieldFocus={activeFieldFocus}
-            onSelectFieldFocus={setActiveFieldFocus}
-            showFieldPills={!isOverviewSheet && !isMunicipalOverviewSheet}
-            lang={lang}
-          />
-        )}
-
       <div className="space-y-4 min-w-0">
       {/* Global datalist for Pomer k hlave domácnosti */}
       <datalist id="relation-to-head-options">
@@ -3542,6 +3532,13 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                     {municipal_overview_districts.map((d) => {
                       const isSelected = selectedDistrictRow?.id === d.id;
                       const isEditing = editingDistrictRowId === d.id;
+                      const distMatchRow =
+                        (d.row_id && rowsById.get(d.row_id)) ||
+                        (d.stitched_crop_path &&
+                          rowsByCrop.get(d.stitched_crop_path)) ||
+                        null;
+                      const distCropUrl =
+                        d.stitched_crop_path || distMatchRow?.stitched_crop_path || null;
                       const linkedOvRef =
                         d.matched_overview_slovakiana_key ||
                         d.matched_overview_sheet?.slovakiana_id ||
@@ -3562,7 +3559,20 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 : "hover:bg-stone-50"
                             }`}
                           >
-                            <td className="py-2.5 px-2 align-middle text-stone-800 whitespace-nowrap">
+                            <td
+                              {...getFieldHoverProps(
+                                distCropUrl,
+                                "ov_ordinal_settlement",
+                                d.is_summary_row
+                                  ? lang === "sk"
+                                    ? "Spolu"
+                                    : "Total"
+                                  : normalizePlaceSpelling(d.settlement_name) ||
+                                      normalizePlaceSpelling(sheet.municipality_name) ||
+                                      null
+                              )}
+                              className="py-2.5 px-2 align-middle text-stone-800 whitespace-nowrap"
+                            >
                               {d.is_summary_row ? (
                                 <span className="px-2 py-0.5 rounded bg-indigo-900 text-white text-xs font-sans font-bold">
                                   {lang === "sk" ? "Spolu" : "Total"}
@@ -3580,7 +3590,18 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 </span>
                               )}
                             </td>
-                            <td className="py-2.5 px-2 align-middle whitespace-nowrap">
+                            <td
+                              {...getFieldHoverProps(
+                                distCropUrl,
+                                "ov_house_num",
+                                d.is_summary_row
+                                  ? lang === "sk"
+                                    ? "Celá obec"
+                                    : "All districts"
+                                  : `Obvod č. ${d.obvod_number || d.row_index}`
+                              )}
+                              className="py-2.5 px-2 align-middle whitespace-nowrap"
+                            >
                               {d.is_summary_row ? (
                                 <span className="text-xs text-stone-600">
                                   {lang === "sk" ? "Celá obec" : "All districts"}
@@ -3592,17 +3613,42 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 </span>
                               )}
                             </td>
-                            <td className="py-2.5 px-2 align-middle font-semibold text-stone-900">
+                            <td
+                              {...getFieldHoverProps(
+                                distCropUrl,
+                                "ov_owner_name",
+                                d.is_summary_row
+                                  ? lang === "sk"
+                                    ? "Súčet za celú obec"
+                                    : "Municipality Total"
+                                  : d.commissioner_name || null
+                              )}
+                              className="py-2.5 px-2 align-middle font-semibold text-stone-900"
+                            >
                               {d.is_summary_row
                                 ? lang === "sk"
                                   ? "Súčet za celú obec"
                                   : "Municipality Total"
                                 : d.commissioner_name || "—"}
                             </td>
-                            <td className="py-2.5 px-2 align-middle text-center font-bold text-stone-900">
+                            <td
+                              {...getFieldHoverProps(
+                                distCropUrl,
+                                "ov_counts",
+                                d.houses_total != null ? `${d.houses_total} domov` : null
+                              )}
+                              className="py-2.5 px-2 align-middle text-center font-bold text-stone-900"
+                            >
                               {d.houses_total ?? "—"}
                             </td>
-                            <td className="py-2.5 px-2 align-middle text-center whitespace-nowrap">
+                            <td
+                              {...getFieldHoverProps(
+                                distCropUrl,
+                                "ov_counts",
+                                `${d.houses_inhabited ?? "—"} / ${d.houses_uninhabited ?? 0}`
+                              )}
+                              className="py-2.5 px-2 align-middle text-center whitespace-nowrap"
+                            >
                               <span className="text-emerald-800 font-semibold">
                                 {d.houses_inhabited ?? "—"}
                               </span>
@@ -3611,10 +3657,28 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 {d.houses_uninhabited ?? 0}
                               </span>
                             </td>
-                            <td className="py-2.5 px-2 align-middle text-center font-semibold text-stone-800">
+                            <td
+                              {...getFieldHoverProps(
+                                distCropUrl,
+                                "ov_counts",
+                                d.household_count != null
+                                  ? `${d.household_count} byt.`
+                                  : null
+                              )}
+                              className="py-2.5 px-2 align-middle text-center font-semibold text-stone-800"
+                            >
                               {d.household_count ?? "—"}
                             </td>
-                            <td className="py-2.5 px-2 align-middle text-center font-bold text-amber-900">
+                            <td
+                              {...getFieldHoverProps(
+                                distCropUrl,
+                                "ov_counts",
+                                d.present_persons_count != null
+                                  ? `${d.present_persons_count} os.`
+                                  : null
+                              )}
+                              className="py-2.5 px-2 align-middle text-center font-bold text-amber-900"
+                            >
                               {d.present_persons_count ?? "—"}
                             </td>
                             <td className="py-2.5 px-2 align-middle">
@@ -4150,6 +4214,10 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                     const isEditing = editingHouseId === h.id;
                     const isFuzzyQueryMatch = fuzzyMatchedHouseIds.has(h.id);
                     const linkedTarget = h.matched_slovakiana_key || h.matched_sheet_id;
+                    const houseCropUrl =
+                      h.stitched_crop_path ||
+                      resolveOverviewHouseRow(h)?.stitched_crop_path ||
+                      null;
                     return (
                       <React.Fragment key={h.id}>
                         <tr
@@ -4163,13 +4231,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                           }`}
                         >
                           <td
-                            onMouseEnter={() => {
-                              selectHouseAndSyncPage(h);
-                              setActiveFieldFocus({
-                                key: "ov_ordinal_settlement",
-                                valuePreview: String(h.ordinal_number ?? h.row_index),
-                              });
-                            }}
+                            {...getFieldHoverProps(
+                              houseCropUrl,
+                              "ov_ordinal_settlement",
+                              String(h.ordinal_number ?? h.row_index)
+                            )}
                             className="py-2.5 px-2 align-middle font-mono font-bold text-stone-800 whitespace-nowrap"
                           >
                             <div className="inline-flex items-center gap-1.5">
@@ -4190,26 +4256,22 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                           </td>
                           {!splitLayout && (
                             <td
-                              onMouseEnter={() => {
-                                selectHouseAndSyncPage(h);
-                                setActiveFieldFocus({
-                                  key: "ov_ordinal_settlement",
-                                  valuePreview: normalizePlaceSpelling(h.settlement_name) || null,
-                                });
-                              }}
+                              {...getFieldHoverProps(
+                                houseCropUrl,
+                                "ov_ordinal_settlement",
+                                normalizePlaceSpelling(h.settlement_name) || null
+                              )}
                               className="py-2.5 px-2 align-middle text-stone-800"
                             >
                               {normalizePlaceSpelling(h.settlement_name) || "—"}
                             </td>
                           )}
                           <td
-                            onMouseEnter={() => {
-                              selectHouseAndSyncPage(h);
-                              setActiveFieldFocus({
-                                key: "ov_house_num",
-                                valuePreview: h.house_number ? `Dom č. ${h.house_number}` : null,
-                              });
-                            }}
+                            {...getFieldHoverProps(
+                              houseCropUrl,
+                              "ov_house_num",
+                              h.house_number ? `Dom č. ${h.house_number}` : null
+                            )}
                             className="py-2.5 px-2 align-middle whitespace-nowrap"
                           >
                             <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-bold">
@@ -4217,7 +4279,20 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                             </span>
                           </td>
                           {!splitLayout && (
-                            <td className="py-2.5 px-2 align-middle whitespace-nowrap">
+                            <td
+                              {...getFieldHoverProps(
+                                houseCropUrl,
+                                "ov_inhabited",
+                                h.is_inhabited === false
+                                  ? lang === "sk"
+                                    ? "Neobývaný"
+                                    : "Uninhabited"
+                                  : lang === "sk"
+                                  ? "Áno"
+                                  : "Yes"
+                              )}
+                              className="py-2.5 px-2 align-middle whitespace-nowrap"
+                            >
                               {h.is_inhabited === false ? (
                                 <span className="inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded bg-stone-200 text-stone-800 text-xs">
                                   {lang === "sk" ? "Neobývaný" : "Uninhabited"}
@@ -4230,51 +4305,43 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                             </td>
                           )}
                           <td
-                            onMouseEnter={() => {
-                              selectHouseAndSyncPage(h);
-                              setActiveFieldFocus({
-                                key: "ov_owner_name",
-                                valuePreview: h.owner_name || null,
-                              });
-                            }}
+                            {...getFieldHoverProps(
+                              houseCropUrl,
+                              "ov_owner_name",
+                              h.owner_name || null
+                            )}
                             className="py-2.5 px-2 align-middle font-semibold text-stone-900"
                           >
                             {h.owner_name || "—"}
                           </td>
                           {!splitLayout && (
                             <td
-                              onMouseEnter={() => {
-                                selectHouseAndSyncPage(h);
-                                setActiveFieldFocus({
-                                  key: "ov_counts",
-                                  valuePreview: `${h.household_count ?? "—"} byt. / ${h.present_persons_count ?? "—"} os.`,
-                                });
-                              }}
+                              {...getFieldHoverProps(
+                                houseCropUrl,
+                                "ov_counts",
+                                `${h.household_count ?? "—"} byt. / ${h.present_persons_count ?? "—"} os.`
+                              )}
                               className="py-2.5 px-2 align-middle text-center font-semibold text-stone-800"
                             >
                               {h.household_count ?? "—"}
                             </td>
                           )}
                           <td
-                            onMouseEnter={() => {
-                              selectHouseAndSyncPage(h);
-                              setActiveFieldFocus({
-                                key: "ov_counts",
-                                valuePreview: `${h.present_persons_count ?? "—"} os.`,
-                              });
-                            }}
+                            {...getFieldHoverProps(
+                              houseCropUrl,
+                              "ov_counts",
+                              `${h.present_persons_count ?? "—"} os.`
+                            )}
                             className="py-2.5 px-2 align-middle text-center font-bold text-amber-900"
                           >
                             {h.present_persons_count ?? "—"}
                           </td>
                           <td
-                            onMouseEnter={() => {
-                              selectHouseAndSyncPage(h);
-                              setActiveFieldFocus({
-                                key: "ov_remarks",
-                                valuePreview: h.remarks || null,
-                              });
-                            }}
+                            {...getFieldHoverProps(
+                              houseCropUrl,
+                              "ov_remarks",
+                              h.remarks || null
+                            )}
                             className="py-2.5 px-2 align-middle text-stone-700 break-words max-w-[200px]"
                           >
                             {h.remarks || "—"}
@@ -4481,37 +4548,14 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                   </div>
                                 </div>
 
-                                {h.stitched_crop_path && (
-                                  <HoverZoomRowCrop
-                                    cropUrl={h.stitched_crop_path}
-                                    headerCropUrl={h.header_crop_url || activeHeaderCropUrl}
-                                    scanUrl={featureFlags.hover_row_zoom ? activeRowScanUrl : null}
-                                    yStart={
-                                      featureFlags.hover_row_zoom
-                                        ? h.y_start ??
-                                          resolveOverviewHouseRow(h)?.y_start ??
-                                          null
-                                        : null
-                                    }
-                                    yEnd={
-                                      featureFlags.hover_row_zoom
-                                        ? h.y_end ??
-                                          resolveOverviewHouseRow(h)?.y_end ??
-                                          null
-                                        : null
-                                    }
-                                    scanHeight={activeRowScanHeight}
-                                    scanWidth={activeRowScanWidth}
-                                    rowLabel={`Výrez domu (riadok č. ${
-                                      h.ordinal_number || h.row_index
-                                    }${h.booklet_page ? ` · strana ${h.booklet_page}` : ""}): dom č. ${
-                                      h.house_number || "—"
-                                    } – ${h.owner_name || ""}`.trim()}
-                                  />
-                                )}
-
                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                                  <div>
+                                  <div
+                                    {...getFieldHoverProps(
+                                      houseCropUrl,
+                                      "ov_ordinal_settlement",
+                                      String(houseEditForm.ordinal_number ?? "")
+                                    )}
+                                  >
                                     <label className="block font-semibold text-stone-700 mb-1">
                                       Radové č. (stĺpec 1)
                                     </label>
@@ -4527,7 +4571,13 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
                                     />
                                   </div>
-                                  <div>
+                                  <div
+                                    {...getFieldHoverProps(
+                                      houseCropUrl,
+                                      "ov_ordinal_settlement",
+                                      houseEditForm.settlement_name || null
+                                    )}
+                                  >
                                     <label className="block font-semibold text-stone-700 mb-1">
                                       Meno osady (stĺpec 2)
                                     </label>
@@ -4543,7 +4593,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
                                     />
                                   </div>
-                                  <div>
+                                  <div
+                                    {...getFieldHoverProps(
+                                      houseCropUrl,
+                                      "ov_house_num",
+                                      houseEditForm.house_number
+                                        ? `Dom č. ${houseEditForm.house_number}`
+                                        : null
+                                    )}
+                                  >
                                     <label className="block font-semibold text-stone-700 mb-1">
                                       Popisné č. domu (stĺpec 3)
                                     </label>
@@ -4559,7 +4617,13 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
                                     />
                                   </div>
-                                  <div>
+                                  <div
+                                    {...getFieldHoverProps(
+                                      houseCropUrl,
+                                      "ov_owner_name",
+                                      houseEditForm.owner_name || null
+                                    )}
+                                  >
                                     <label className="block font-semibold text-stone-700 mb-1">
                                       Meno majiteľa domu (stĺpec 6)
                                     </label>
@@ -4575,7 +4639,13 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
                                     />
                                   </div>
-                                  <div>
+                                  <div
+                                    {...getFieldHoverProps(
+                                      houseCropUrl,
+                                      "ov_counts",
+                                      `${houseEditForm.household_count ?? "—"} byt.`
+                                    )}
+                                  >
                                     <label className="block font-semibold text-stone-700 mb-1">
                                       Počet bytových strán (stĺpec 7)
                                     </label>
@@ -4591,7 +4661,13 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
                                     />
                                   </div>
-                                  <div>
+                                  <div
+                                    {...getFieldHoverProps(
+                                      houseCropUrl,
+                                      "ov_counts",
+                                      `${houseEditForm.present_persons_count ?? "—"} os.`
+                                    )}
+                                  >
                                     <label className="block font-semibold text-stone-700 mb-1">
                                       Počet prítomných osôb (stĺpec 8)
                                     </label>
@@ -4607,7 +4683,13 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       className="w-full px-2.5 py-1.5 rounded border border-stone-300 bg-white"
                                     />
                                   </div>
-                                  <div>
+                                  <div
+                                    {...getFieldHoverProps(
+                                      houseCropUrl,
+                                      "ov_inhabited",
+                                      houseEditForm.is_inhabited ? "Obývaný" : "Neobývaný"
+                                    )}
+                                  >
                                     <label className="block font-semibold text-stone-700 mb-1">
                                       Obývaný dom (stĺpce 4–5)
                                     </label>
@@ -4625,7 +4707,13 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       <option value="0">Neobývaný</option>
                                     </select>
                                   </div>
-                                  <div>
+                                  <div
+                                    {...getFieldHoverProps(
+                                      houseCropUrl,
+                                      "ov_remarks",
+                                      houseEditForm.remarks || null
+                                    )}
+                                  >
                                     <label className="block font-semibold text-stone-700 mb-1">
                                       Poznámka (stĺpec 9)
                                     </label>
@@ -4852,6 +4940,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                     bytGroup?.consensusSurname || null,
                     featureFlags.census_surname_consensus
                   );
+                  const memberCropUrl =
+                    m.row?.stitched_crop_path ||
+                    rowsById.get(f.row_id)?.stitched_crop_path ||
+                    m.stitched_crop_url ||
+                    null;
 
                   return (
                     <React.Fragment key={f.id}>
@@ -4897,13 +4990,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                         }`}
                       >
                         <td
-                          onMouseEnter={() => {
-                            setSelectedMemberId(f.id);
-                            setActiveFieldFocus({
-                              key: "row_num",
-                              valuePreview: String(f.person_row_number || "—"),
-                            });
-                          }}
+                          {...getFieldHoverProps(
+                            memberCropUrl,
+                            "row_num",
+                            String(f.person_row_number || "—")
+                          )}
                           className="py-2.5 px-2 align-middle font-bold text-stone-800 whitespace-nowrap"
                         >
                           <div className="inline-flex items-center gap-1.5 whitespace-nowrap">
@@ -4920,13 +5011,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                         </td>
 
                         <td
-                          onMouseEnter={() => {
-                            setSelectedMemberId(f.id);
-                            setActiveFieldFocus({
-                              key: "surname",
-                              valuePreview: f.surname_raw || null,
-                            });
-                          }}
+                          {...getFieldHoverProps(
+                            memberCropUrl,
+                            "surname",
+                            f.surname_raw || null
+                          )}
                           className="py-2.5 px-2 align-middle font-semibold text-stone-900"
                         >
                           <div className="flex flex-wrap items-center gap-1">
@@ -4963,26 +5052,22 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                         </td>
 
                         <td
-                          onMouseEnter={() => {
-                            setSelectedMemberId(f.id);
-                            setActiveFieldFocus({
-                              key: "given_name",
-                              valuePreview: f.given_name_raw || null,
-                            });
-                          }}
+                          {...getFieldHoverProps(
+                            memberCropUrl,
+                            "given_name",
+                            f.given_name_raw || null
+                          )}
                           className="py-2.5 px-2 align-middle font-semibold text-stone-900"
                         >
                           {f.given_name_raw || "—"}
                         </td>
 
                         <td
-                          onMouseEnter={() => {
-                            setSelectedMemberId(f.id);
-                            setActiveFieldFocus({
-                              key: "relation",
-                              valuePreview: f.relation_to_head || null,
-                            });
-                          }}
+                          {...getFieldHoverProps(
+                            memberCropUrl,
+                            "relation",
+                            f.relation_to_head || null
+                          )}
                           className="py-2.5 px-2 align-middle"
                         >
                           <span
@@ -4998,13 +5083,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
                         {!splitLayout && (
                           <td
-                            onMouseEnter={() => {
-                              setSelectedMemberId(f.id);
-                              setActiveFieldFocus({
-                                key: "sex",
-                                valuePreview: f.sex || null,
-                              });
-                            }}
+                            {...getFieldHoverProps(
+                              memberCropUrl,
+                              "sex",
+                              f.sex || null
+                            )}
                             className="py-2.5 px-2 align-middle text-center font-semibold text-stone-800"
                           >
                             {f.sex || "—"}
@@ -5013,15 +5096,12 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
                         <td
                           data-testid={`cell-dob-${f.id}`}
-                          onMouseEnter={() => {
-                            setSelectedMemberId(f.id);
-                            setActiveFieldFocus({
-                              key: "dob_marital",
-                              valuePreview:
-                                f.birth_or_event_date ||
-                                (f.birth_year_est ? String(f.birth_year_est) : null),
-                            });
-                          }}
+                          {...getFieldHoverProps(
+                            memberCropUrl,
+                            "dob_marital",
+                            f.birth_or_event_date ||
+                              (f.birth_year_est ? String(f.birth_year_est) : null)
+                          )}
                           className="py-2.5 px-2 align-middle"
                         >
                           <div className="font-medium text-stone-900">
@@ -5036,13 +5116,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                         </td>
 
                         <td
-                          onMouseEnter={() => {
-                            setSelectedMemberId(f.id);
-                            setActiveFieldFocus({
-                              key: "birthplace",
-                              valuePreview: bp.primary !== "—" ? bp.primary : null,
-                            });
-                          }}
+                          {...getFieldHoverProps(
+                            memberCropUrl,
+                            "birthplace",
+                            bp.primary !== "—" ? bp.primary : null
+                          )}
                           className="py-2.5 px-2 align-middle"
                         >
                           <div className="font-medium text-stone-900">
@@ -5058,13 +5136,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                         {!splitLayout && (
                           <>
                             <td
-                              onMouseEnter={() => {
-                                setSelectedMemberId(f.id);
-                                setActiveFieldFocus({
-                                  key: "domicile_citizenship",
-                                  valuePreview: homeJur || f.citizenship || null,
-                                });
-                              }}
+                              {...getFieldHoverProps(
+                                memberCropUrl,
+                                "domicile_citizenship",
+                                homeJur || f.citizenship || null
+                              )}
                               className="py-2.5 px-2 align-middle"
                             >
                               <div className="text-stone-800">
@@ -5078,15 +5154,12 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                             </td>
 
                             <td
-                              onMouseEnter={() => {
-                                setSelectedMemberId(f.id);
-                                setActiveFieldFocus({
-                                  key: "nationality_religion",
-                                  valuePreview:
-                                    [f.nationality, f.religion].filter(Boolean).join(" · ") ||
-                                    null,
-                                });
-                              }}
+                              {...getFieldHoverProps(
+                                memberCropUrl,
+                                "nationality_religion",
+                                [f.nationality, f.religion].filter(Boolean).join(" · ") ||
+                                  null
+                              )}
                               className="py-2.5 px-2 align-middle"
                             >
                               <div className="font-medium text-stone-800">
@@ -5102,17 +5175,14 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                         )}
 
                         <td
-                          onMouseEnter={() => {
-                            setSelectedMemberId(f.id);
-                            setActiveFieldFocus({
-                              key: "occupation_notes",
-                              valuePreview:
-                                f.social_status_or_occupation &&
-                                f.social_status_or_occupation !== "—"
-                                  ? f.social_status_or_occupation
-                                  : null,
-                            });
-                          }}
+                          {...getFieldHoverProps(
+                            memberCropUrl,
+                            "occupation_notes",
+                            f.social_status_or_occupation &&
+                              f.social_status_or_occupation !== "—"
+                              ? f.social_status_or_occupation
+                              : null
+                          )}
                           className="py-2.5 px-2 align-middle"
                         >
                           {hasOccupation ? (
@@ -5356,33 +5426,6 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                               </div>
                             </div>
 
-                            {/* Inline Row Crop with Pinned Column Header inside Drawer */}
-                            {(m.row?.stitched_crop_path || m.stitched_crop_url) && (
-                              <HoverZoomRowCrop
-                                cropUrl={m.row?.stitched_crop_path || m.stitched_crop_url}
-                                headerCropUrl={activeHeaderCropUrl}
-                                scanUrl={featureFlags.hover_row_zoom ? activeRowScanUrl : null}
-                                yStart={
-                                  featureFlags.hover_row_zoom
-                                    ? m.row?.y_start ?? rowsById.get(f.row_id)?.y_start ?? null
-                                    : null
-                                }
-                                yEnd={
-                                  featureFlags.hover_row_zoom
-                                    ? m.row?.y_end ?? rowsById.get(f.row_id)?.y_end ?? null
-                                    : null
-                                }
-                                scanHeight={activeRowScanHeight}
-                                scanWidth={activeRowScanWidth}
-                                activeFieldFocus={activeFieldFocus}
-                                onSelectFieldFocus={setActiveFieldFocus}
-                                showFieldPills={true}
-                                rowLabel={`Výrez upravovaného riadku č. ${
-                                  f.person_row_number || "—"
-                                }: ${f.given_name_raw || ""} ${f.surname_raw || ""}`.trim()}
-                              />
-                            )}
-
                               {/* 6 Grouped Form Sections */}
                               <div
                                 className={`grid grid-cols-1 md:grid-cols-2 ${
@@ -5390,22 +5433,24 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                 } gap-4 text-xs sm:text-sm`}
                               >
                                 {/* 1. Identita a vzťah */}
-                                <div
-                                  onFocus={() => setActiveFieldFocus({ key: "surname" })}
-                                  className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
-                                >
+                                <div className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5">
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
                                     {lang === "sk" ? "1. Identita a vzťah" : "1. Identity & Relation"}
                                   </h4>
                                   <div className="grid grid-cols-2 gap-2">
-                                    <div>
+                                    <div
+                                      {...getFieldHoverProps(
+                                        memberCropUrl,
+                                        "row_num",
+                                        editForm.person_row_number || null
+                                      )}
+                                    >
                                       <label className="block font-semibold text-stone-700 mb-0.5">
                                         {lang === "sk" ? "Poradové č." : "Row #"}
                                       </label>
                                       <input
                                         type="text"
                                         value={editForm.person_row_number}
-                                        onFocus={() => setActiveFieldFocus({ key: "row_num" })}
                                         onChange={(e) =>
                                           setEditForm({
                                             ...editForm,
@@ -5415,13 +5460,18 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                         className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
                                       />
                                     </div>
-                                    <div>
+                                    <div
+                                      {...getFieldHoverProps(
+                                        memberCropUrl,
+                                        "row_num",
+                                        editForm.dwelling_unit || null
+                                      )}
+                                    >
                                       <label className="block font-semibold text-stone-700 mb-0.5">
                                         {lang === "sk" ? "Byt č. (I, II, III…)" : "Unit # (I, II, III…)"}
                                       </label>
                                       <select
                                         value={editForm.dwelling_unit || ""}
-                                        onFocus={() => setActiveFieldFocus({ key: "row_num" })}
                                         onChange={(e) =>
                                           setEditForm({
                                             ...editForm,
@@ -5440,19 +5490,19 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                         ))}
                                       </select>
                                     </div>
-                                    <div>
+                                    <div
+                                      {...getFieldHoverProps(
+                                        memberCropUrl,
+                                        "surname",
+                                        editForm.surname_raw || null
+                                      )}
+                                    >
                                       <label className="block font-semibold text-stone-700 mb-0.5">
                                         {lang === "sk" ? "Priezvisko" : "Surname"}
                                       </label>
                                       <input
                                         type="text"
                                         value={editForm.surname_raw}
-                                        onFocus={() =>
-                                          setActiveFieldFocus({
-                                            key: "surname",
-                                            valuePreview: editForm.surname_raw || null,
-                                          })
-                                        }
                                         onChange={(e) =>
                                           setEditForm({ ...editForm, surname_raw: e.target.value })
                                         }
@@ -5485,19 +5535,19 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                           </button>
                                         )}
                                     </div>
-                                    <div>
+                                    <div
+                                      {...getFieldHoverProps(
+                                        memberCropUrl,
+                                        "surname",
+                                        editForm.mother_maiden_surname || null
+                                      )}
+                                    >
                                       <label className="block font-semibold text-stone-700 mb-0.5">
                                         {lang === "sk" ? "Rodné priezvisko" : "Maiden surname"}
                                       </label>
                                       <input
                                         type="text"
                                         value={editForm.mother_maiden_surname}
-                                        onFocus={() =>
-                                          setActiveFieldFocus({
-                                            key: "surname",
-                                            valuePreview: editForm.mother_maiden_surname || null,
-                                          })
-                                        }
                                         onChange={(e) =>
                                           setEditForm({
                                             ...editForm,
@@ -5507,19 +5557,19 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                         className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
                                       />
                                     </div>
-                                    <div>
+                                    <div
+                                      {...getFieldHoverProps(
+                                        memberCropUrl,
+                                        "given_name",
+                                        editForm.given_name_raw || null
+                                      )}
+                                    >
                                       <label className="block font-semibold text-stone-700 mb-0.5">
                                         {lang === "sk" ? "Krstné meno" : "Given name"}
                                       </label>
                                       <input
                                         type="text"
                                         value={editForm.given_name_raw}
-                                        onFocus={() =>
-                                          setActiveFieldFocus({
-                                            key: "given_name",
-                                            valuePreview: editForm.given_name_raw || null,
-                                          })
-                                        }
                                         onChange={(e) =>
                                           setEditForm({
                                             ...editForm,
@@ -5529,19 +5579,19 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                         className="w-full px-2.5 py-1.5 min-h-[34px] rounded border border-stone-300"
                                       />
                                     </div>
-                                    <div>
+                                    <div
+                                      {...getFieldHoverProps(
+                                        memberCropUrl,
+                                        "sex",
+                                        editForm.sex || null
+                                      )}
+                                    >
                                       <label className="block font-semibold text-stone-700 mb-0.5">
                                         {lang === "sk" ? "Pohlavie (M/F)" : "Sex (M/F)"}
                                       </label>
                                       <input
                                         type="text"
                                         value={editForm.sex}
-                                        onFocus={() =>
-                                          setActiveFieldFocus({
-                                            key: "sex",
-                                            valuePreview: editForm.sex || null,
-                                          })
-                                        }
                                         onChange={(e) =>
                                           setEditForm({ ...editForm, sex: e.target.value })
                                         }
@@ -5549,12 +5599,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       />
                                     </div>
                                     <div
-                                      onFocus={() =>
-                                        setActiveFieldFocus({
-                                          key: "relation",
-                                          valuePreview: editForm.relation_to_head || null,
-                                        })
-                                      }
+                                      {...getFieldHoverProps(
+                                        memberCropUrl,
+                                        "relation",
+                                        editForm.relation_to_head || null
+                                      )}
                                       className="col-span-2 space-y-1.5 pt-1 border-t border-stone-100"
                                     >
                                       <label className="block font-semibold text-stone-700">
@@ -5636,12 +5685,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
                                 {/* 2. Narodenie a rodinný stav */}
                                 <div
-                                  onFocus={() =>
-                                    setActiveFieldFocus({
-                                      key: "dob_marital",
-                                      valuePreview: editForm.birth_or_event_date || null,
-                                    })
-                                  }
+                                  {...getFieldHoverProps(
+                                    memberCropUrl,
+                                    "dob_marital",
+                                    editForm.birth_or_event_date || null
+                                  )}
                                   className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
                                 >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
@@ -5777,12 +5825,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
                                 {/* 3. Rodisko (stĺpec 11) */}
                                 <div
-                                  onFocus={() =>
-                                    setActiveFieldFocus({
-                                      key: "birthplace",
-                                      valuePreview: editForm.birth_place_municipality || null,
-                                    })
-                                  }
+                                  {...getFieldHoverProps(
+                                    memberCropUrl,
+                                    "birthplace",
+                                    editForm.birth_place_municipality || null
+                                  )}
                                   className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
                                 >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
@@ -5858,12 +5905,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
                                 {/* 4. Prisťahovanie a príslušnosť (stĺpce 12–14) */}
                                 <div
-                                  onFocus={() =>
-                                    setActiveFieldFocus({
-                                      key: "domicile_citizenship",
-                                      valuePreview: editForm.home_jurisdiction || null,
-                                    })
-                                  }
+                                  {...getFieldHoverProps(
+                                    memberCropUrl,
+                                    "domicile_citizenship",
+                                    editForm.home_jurisdiction || null
+                                  )}
                                   className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
                                 >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
@@ -5941,12 +5987,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
                                 {/* 5. Národnosť, Náboženstvo a Gramotnosť (stĺpce 15–17) */}
                                 <div
-                                  onFocus={() =>
-                                    setActiveFieldFocus({
-                                      key: "nationality_religion",
-                                      valuePreview: editForm.nationality || null,
-                                    })
-                                  }
+                                  {...getFieldHoverProps(
+                                    memberCropUrl,
+                                    "nationality_religion",
+                                    editForm.nationality || null
+                                  )}
                                   className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
                                 >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">
@@ -6006,13 +6051,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
                                 {/* 6. Povolanie a poznámky (stĺpce 18–24) */}
                                 <div
-                                  onFocus={() =>
-                                    setActiveFieldFocus({
-                                      key: "occupation_notes",
-                                      valuePreview:
-                                        editForm.social_status_or_occupation || null,
-                                    })
-                                  }
+                                  {...getFieldHoverProps(
+                                    memberCropUrl,
+                                    "occupation_notes",
+                                    editForm.social_status_or_occupation || null
+                                  )}
                                   className="bg-white rounded-lg p-3 border border-amber-200/80 space-y-2.5"
                                 >
                                   <h4 className="font-bold text-amber-950 uppercase tracking-wider text-xs border-b border-stone-100 pb-1">

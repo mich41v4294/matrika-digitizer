@@ -402,11 +402,12 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(page.getByTestId("full-sheet-scan-card")).toHaveCount(0);
     await expect(page.getByTestId("ocr-feedback-correct-btn")).toHaveCount(0);
     await expect(page.getByTestId("sheet-type-select")).toHaveCount(0);
-    await expect(page.getByTestId("hover-zoom-row-crop")).toBeVisible();
+    await expect(page.getByTestId("hover-zoom-row-crop")).toHaveCount(0);
 
-    // Hover over Date of Birth cell -> shows only Date of Birth crop badge in verification bar
+    // Hover over Date of Birth cell -> shows floating Date of Birth crop right above the hovered cell
     const janRowInitial = page.locator("tbody tr").filter({ hasText: "hlava domácnosti" }).first();
     await janRowInitial.locator('[data-testid^="cell-dob-"]').hover();
+    await expect(page.getByTestId("hover-zoom-row-crop")).toBeVisible();
     await expect(page.getByTestId("active-field-crop-badge")).toContainText(
       "Stĺpce 7–10: Dátum narodenia"
     );

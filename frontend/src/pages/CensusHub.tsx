@@ -2,6 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import type { LinkedHouseSheet } from "../api";
 import { emitClientOcrNotification, type PipelineState } from "../App";
+import {
+  FloatingFieldCropPopover,
+  type CensusFieldCropKey,
+  type HoveredFieldCropState,
+} from "../components/ZoomableScanViewer";
 import { useFeatureFlags } from "../featureFlags";
 import { foldText, matchesPersonNameQuery } from "../utils/fuzzyName";
 import {
@@ -2458,8 +2463,119 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     );
   };
 
+  const hoveredElRef = useRef<HTMLElement | null>(null);
+  const [hoveredFieldCrop, setHoveredFieldCrop] = useState<HoveredFieldCropState | null>(
+    null
+  );
+
+  const getFieldHoverProps = (
+    cropUrl: string | null | undefined,
+    fieldKey: CensusFieldCropKey,
+    valuePreview?: string | null
+  ) => ({
+    onMouseEnter: (e: React.MouseEvent<HTMLElement>) => {
+      if (!cropUrl) {
+        hoveredElRef.current = null;
+        setHoveredFieldCrop(null);
+        return;
+      }
+      const r = e.currentTarget.getBoundingClientRect();
+      hoveredElRef.current = e.currentTarget;
+      setHoveredFieldCrop({
+        cropUrl,
+        fieldKey,
+        valuePreview: valuePreview ?? null,
+        anchorRect: {
+          top: r.top,
+          bottom: r.bottom,
+          left: r.left,
+          right: r.right,
+          width: r.width,
+          height: r.height,
+        },
+        mouseX: e.clientX,
+        mouseY: e.clientY,
+      });
+    },
+    onMouseMove: (e: React.MouseEvent<HTMLElement>) => {
+      if (!cropUrl) return;
+      const r = e.currentTarget.getBoundingClientRect();
+      hoveredElRef.current = e.currentTarget;
+      setHoveredFieldCrop((prev) => {
+        if (
+          prev &&
+          prev.cropUrl === cropUrl &&
+          prev.fieldKey === fieldKey &&
+          Math.abs((prev.mouseX ?? 0) - e.clientX) < 3 &&
+          Math.abs(prev.anchorRect.top - r.top) < 2
+        ) {
+          return prev;
+        }
+        return {
+          cropUrl,
+          fieldKey,
+          valuePreview: valuePreview ?? null,
+          anchorRect: {
+            top: r.top,
+            bottom: r.bottom,
+            left: r.left,
+            right: r.right,
+            width: r.width,
+            height: r.height,
+          },
+          mouseX: e.clientX,
+          mouseY: e.clientY,
+        };
+      });
+    },
+    onMouseLeave: (e: React.MouseEvent<HTMLElement>) => {
+      if (hoveredElRef.current === e.currentTarget) {
+        hoveredElRef.current = null;
+        setHoveredFieldCrop(null);
+      }
+    },
+  });
+
+  useEffect(() => {
+    if (!hoveredFieldCrop) return;
+    const handleScrollOrResize = () => {
+      const el = hoveredElRef.current;
+      if (!el || !el.isConnected) {
+        setHoveredFieldCrop(null);
+        return;
+      }
+      const r = el.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight) {
+        setHoveredFieldCrop(null);
+        return;
+      }
+      setHoveredFieldCrop((prev) =>
+        prev
+          ? {
+              ...prev,
+              anchorRect: {
+                top: r.top,
+                bottom: r.bottom,
+                left: r.left,
+                right: r.right,
+                width: r.width,
+                height: r.height,
+              },
+            }
+          : null
+      );
+    };
+    window.addEventListener("scroll", handleScrollOrResize, true);
+    window.addEventListener("resize", handleScrollOrResize);
+    return () => {
+      window.removeEventListener("scroll", handleScrollOrResize, true);
+      window.removeEventListener("resize", handleScrollOrResize);
+    };
+  }, [Boolean(hoveredFieldCrop)]);
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+      <FloatingFieldCropPopover state={hoveredFieldCrop} lang={lang} />
       {/* LEFT SIDEBAR: Okresy a obce */}
       {!villageMenuCollapsed && (
       <aside
@@ -3940,7 +4056,14 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                         return (
                           <tr key={rowKey} className="hover:bg-stone-50 transition">
                             {/* Dom č. & Osada */}
-                            <td className="py-2.5 px-2.5">
+                            <td
+                              {...getFieldHoverProps(
+                                entry.stitched_crop_path,
+                                "ov_house_num",
+                                entry.house_number ? `Dom č. ${entry.house_number}` : null
+                              )}
+                              className="py-2.5 px-2.5"
+                            >
                               <div className="flex items-center gap-1.5">
                                 <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-bold">
                                   Dom č. {entry.house_number || "—"}
@@ -3970,7 +4093,14 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                             </td>
 
                             {/* Majiteľ domu */}
-                            <td className="py-2.5 px-2.5">
+                            <td
+                              {...getFieldHoverProps(
+                                entry.stitched_crop_path,
+                                "ov_owner_name",
+                                entry.owner_name || null
+                              )}
+                              className="py-2.5 px-2.5"
+                            >
                               <div className="font-semibold text-stone-900">
                                 {entry.owner_name || "—"}
                               </div>
@@ -3982,7 +4112,19 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                             </td>
 
                             {/* Bytové strany / Prítomné osoby */}
-                            <td className="py-2.5 px-2.5 text-center">
+                            <td
+                              {...getFieldHoverProps(
+                                entry.stitched_crop_path,
+                                "ov_counts",
+                                `${entry.overview_household_count ?? "—"} byt. / ${
+                                  entry.overview_present_persons_count ??
+                                  (entry.extracted_members_count > 0
+                                    ? entry.extracted_members_count
+                                    : "—")
+                                } os.`
+                              )}
+                              className="py-2.5 px-2.5 text-center"
+                            >
                               <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-stone-100 border border-stone-200 text-xs">
                                 <span title="Počet bytových strán">
                                   {lang === "sk" ? "Byty:" : "Units:"}{" "}

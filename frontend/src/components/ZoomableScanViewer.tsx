@@ -362,6 +362,7 @@ export type CensusFieldCropKey =
   | "occupation_notes"
   | "ov_ordinal_settlement"
   | "ov_house_num"
+  | "ov_inhabited"
   | "ov_owner_name"
   | "ov_counts"
   | "ov_remarks";
@@ -501,6 +502,16 @@ export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRange
     labelEn: "Col 3: House conscription #",
     shortSk: "Č. domu",
     shortEn: "House #",
+    group: "overview",
+  },
+  ov_inhabited: {
+    key: "ov_inhabited",
+    xStartPct: 0.22,
+    xEndPct: 0.52,
+    labelSk: "Stĺpce 4–5: Obývaný / Neobývaný dom",
+    labelEn: "Cols 4–5: Inhabited / Uninhabited",
+    shortSk: "Obývaný",
+    shortEn: "Inhabited",
     group: "overview",
   },
   ov_owner_name: {
@@ -1198,6 +1209,134 @@ export function HoverZoomRowCrop({
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+export interface HoveredFieldCropState {
+  cropUrl: string;
+  fieldKey: CensusFieldCropKey;
+  valuePreview?: string | null;
+  anchorRect: {
+    top: number;
+    bottom: number;
+    left: number;
+    right: number;
+    width: number;
+    height: number;
+  };
+  mouseX?: number;
+  mouseY?: number;
+}
+
+export function FloatingFieldCropPopover({
+  state,
+  lang: explicitLang,
+}: {
+  state: HoveredFieldCropState | null;
+  lang?: "sk" | "en";
+}) {
+  const lang = resolveLang(explicitLang);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+
+  if (!state || !state.cropUrl || failedUrl === state.cropUrl) {
+    return null;
+  }
+
+  const fieldSpec = CENSUS_FIELD_CROP_RANGES[state.fieldKey] || null;
+  if (!fieldSpec) {
+    return null;
+  }
+
+  const sliceX0 = fieldSpec.xStartPct;
+  const sliceX1 = fieldSpec.xEndPct;
+  const sliceWidthFraction = Math.max(0.26, sliceX1 - sliceX0);
+
+  const viewportW = typeof window !== "undefined" ? window.innerWidth : 1280;
+  const popoverWidth = Math.min(420, Math.max(260, viewportW - 24));
+
+  const fallbackCenterX = state.anchorRect.left + state.anchorRect.width / 2;
+  const desiredCenterX =
+    state.mouseX != null && state.anchorRect.width >= 28
+      ? Math.max(
+          state.anchorRect.left + 14,
+          Math.min(state.anchorRect.right - 14, state.mouseX)
+        )
+      : fallbackCenterX;
+
+  const left = Math.max(
+    12,
+    Math.min(viewportW - popoverWidth - 12, desiredCenterX - popoverWidth / 2)
+  );
+  const arrowX = Math.max(
+    18,
+    Math.min(popoverWidth - 18, desiredCenterX - left)
+  );
+
+  // Place right above the hovered element unless it is too close to the top of the viewport
+  const placeBelow = state.anchorRect.top < 140;
+  const topPx = placeBelow ? state.anchorRect.bottom + 8 : state.anchorRect.top - 8;
+
+  const fieldSliceImgStyle: React.CSSProperties = {
+    width: `${(1 / sliceWidthFraction) * 100}%`,
+    maxWidth: "none",
+    marginLeft: `${(-sliceX0 / sliceWidthFraction) * 100}%`,
+  };
+
+  return (
+    <div
+      data-testid="hover-zoom-row-crop"
+      style={{
+        position: "fixed",
+        left: `${Math.round(left)}px`,
+        top: `${Math.round(topPx)}px`,
+        width: `${popoverWidth}px`,
+        transform: placeBelow ? "none" : "translateY(-100%)",
+        zIndex: 60,
+      }}
+      className="pointer-events-none select-none"
+    >
+      {placeBelow && (
+        <div
+          style={{ left: `${Math.round(arrowX - 5)}px` }}
+          className="absolute -top-1.5 w-2.5 h-2.5 rotate-45 bg-stone-900 border-l border-t border-amber-400 z-10"
+        />
+      )}
+      <div className="relative rounded-xl overflow-hidden bg-stone-950 border border-amber-400 shadow-2xl ring-1 ring-stone-950/60">
+        <div className="bg-stone-900 border-b border-stone-700/90 px-2.5 py-1 flex items-center justify-between gap-2 text-[11px]">
+          <span
+            data-testid="active-field-crop-badge"
+            className="font-bold uppercase tracking-wider text-amber-300 truncate inline-flex items-center gap-1.5"
+          >
+            <Eye className="w-3 h-3 text-amber-400 shrink-0" />
+            <span className="truncate">
+              {lang === "sk" ? fieldSpec.labelSk : fieldSpec.labelEn}
+            </span>
+          </span>
+          {state.valuePreview && (
+            <span className="px-1.5 py-0.5 rounded bg-stone-800 text-stone-100 font-mono font-semibold text-[11px] truncate max-w-[170px] shrink-0">
+              {state.valuePreview}
+            </span>
+          )}
+        </div>
+        <div className="relative overflow-hidden bg-stone-950">
+          <img
+            src={state.cropUrl}
+            alt={lang === "sk" ? fieldSpec.labelSk : fieldSpec.labelEn}
+            loading="eager"
+            decoding="async"
+            style={fieldSliceImgStyle}
+            onError={() => setFailedUrl(state.cropUrl)}
+            className="block h-auto select-none"
+          />
+        </div>
+      </div>
+      {!placeBelow && (
+        <div
+          style={{ left: `${Math.round(arrowX - 5)}px` }}
+          className="absolute -bottom-1.5 w-2.5 h-2.5 rotate-45 bg-stone-950 border-r border-b border-amber-400 z-10"
+        />
       )}
     </div>
   );

@@ -1040,6 +1040,11 @@ def search_unified(
                     used_rust_cat_match = False
 
                 if not used_rust_cat_match:
+                    from backend.app.pipeline.lexicon import (
+                        canonical_municipality_key,
+                        normalize_house_number,
+                    )
+
                     # Check CensusOverviewHouse owners & CensusSheet household_owner for fuzzy matches (scoped by active filters)
                     ovh_stmt = select(
                         CensusOverviewHouse.census_sheet_id,
@@ -1047,6 +1052,9 @@ def search_unified(
                         CensusOverviewHouse.owner_name,
                         CensusOverviewHouse.remarks,
                         CensusOverviewHouse.raw_ocr_text,
+                        CensusOverviewHouse.municipality,
+                        CensusOverviewHouse.house_number,
+                        CensusOverviewHouse.census_year,
                     )
                     if year_from is not None:
                         ovh_stmt = ovh_stmt.where(CensusOverviewHouse.census_year >= year_from)
@@ -1054,7 +1062,8 @@ def search_unified(
                         ovh_stmt = ovh_stmt.where(CensusOverviewHouse.census_year <= year_to)
                     if municipality and municipality.strip():
                         ovh_stmt = ovh_stmt.where(CensusOverviewHouse.municipality.ilike(f"%{municipality.strip()}%"))  # type: ignore[union-attr]
-                    for ov_csid, ov_msid, ov_owner, ov_rem, ov_ocr in session.exec(ovh_stmt).all():
+                    needed_muni_year_hn: set[tuple[str, int, str]] = set()
+                    for ov_csid, ov_msid, ov_owner, ov_rem, ov_ocr, ov_muni, ov_hn, ov_cyear in session.exec(ovh_stmt).all():
                         matched_ovh = fuzzy_name_matches(q_clean, [ov_owner, ov_rem], threshold=0.76) or (
                             bool(ov_ocr and q_fold and q_fold in fold_text_diacritics(ov_ocr))
                         ) or (not ov_owner and bool(ov_ocr) and fuzzy_name_matches(q_clean, [ov_ocr], threshold=0.76))
@@ -1065,6 +1074,25 @@ def search_unified(
                             if ov_msid and ov_msid not in matched_Id_set:
                                 matched_Id_set.add(ov_msid)
                                 matched_sheet_ids.append(ov_msid)
+                            m_canon = canonical_municipality_key(ov_muni)
+                            hn_norm = normalize_house_number(ov_hn)
+                            if m_canon and hn_norm:
+                                needed_muni_year_hn.add((m_canon, int(ov_cyear or 1930), hn_norm))
+
+                    if needed_muni_year_hn:
+                        for cs_cand in session.exec(
+                            sheet_stmt.where(CensusSheet.house_number.is_not(None))  # type: ignore[union-attr]
+                        ).all():
+                            if cs_cand.id and cs_cand.id not in matched_Id_set:
+                                if (cs_cand.sheet_type or "household") not in ("overview", "municipal_overview"):
+                                    key_cand = (
+                                        canonical_municipality_key(cs_cand.municipality),
+                                        int(cs_cand.census_year or 1930),
+                                        normalize_house_number(cs_cand.house_number),
+                                    )
+                                    if key_cand in needed_muni_year_hn:
+                                        matched_Id_set.add(cs_cand.id)
+                                        matched_sheet_ids.append(cs_cand.id)
 
                     cs_owner_stmt = sheet_stmt.where(CensusSheet.household_owner.is_not(None)).with_only_columns(  # type: ignore[union-attr]
                         CensusSheet.id, CensusSheet.household_owner

@@ -42,6 +42,7 @@ from backend.app.db.models import (
     PersonFact,
     RecordRow,
     ScanImage,
+    WorkflowTrace,
 )
 from backend.app.db.session import SessionDep
 from backend.app.pipeline.feedback import build_feedback_lookup_maps, reset_ocr_feedback
@@ -583,14 +584,18 @@ def _serialize_household(hh: CensusHousehold | None) -> dict[str, Any] | None:
 
 class StartCensusJobRequest(BaseModel):
     name: str | None = None
-    job_type: str = "catalog_harvest"  # "catalog_harvest" | "download_and_pipeline" | "overview_only"
+    job_type: str = "catalog_harvest"  # "catalog_harvest" | "download_and_pipeline" | "overview_only" | "owner_linked"
     census_year_tag: str | None = "10001"  # "10001" (1930) | "10003" (1940) — always single year (1930 default)
     census_year: int | None = None
     district_tag: str | None = None
     municipality_tag: str | None = None
     municipality: str | None = None
     district: str | None = None
+    street: str | None = None
     query_text: str | None = None
+    owner_query: str | None = None
+    sheet_ids: list[int] | None = None
+    include_cross_year: bool = False
     max_sheets: int | None = 100
     run_pipeline: bool = True
     run_mcp: bool = True
@@ -893,6 +898,174 @@ def delete_or_cancel_census_job(job_id: int, session: SessionDep) -> dict[str, A
     return {"status": "deleted", "job_id": job_id}
 
 
+def _resolve_owner_linked_household_sheets(
+    session: SessionDep,
+    *,
+    owner_query: str,
+    census_year: int | None = None,
+    municipality: str | None = None,
+    district: str | None = None,
+    street: str | None = None,
+    include_cross_year: bool = False,
+) -> list[CensusSheet]:
+    """
+    Finds all household `CensusSheet`s linked to `Prehľad sčítacieho obvodu` (`CensusOverviewHouse`)
+    rows or household records where `owner_query` matches the house owner.
+    """
+    q_clean = (owner_query or "").strip()
+    if not q_clean:
+        return []
+
+    has_muni = bool(municipality and municipality.strip())
+    has_dist = bool(district and district.strip())
+    has_st = bool(street and street.strip())
+
+    # 1. Load candidate household CensusSheets
+    cs_stmt = select(CensusSheet).where(
+        CensusSheet.sheet_type.notin_(["overview", "municipal_overview"])  # type: ignore[union-attr]
+    )
+    if census_year is not None and not include_cross_year:
+        cs_stmt = cs_stmt.where(CensusSheet.census_year == census_year)
+    all_hh_sheets = list(session.exec(cs_stmt.order_by(CensusSheet.id.asc())).all())
+    if has_muni and municipality:
+        all_hh_sheets = [s for s in all_hh_sheets if _sheet_matches_municipality(s, municipality)]
+    if has_dist and district:
+        all_hh_sheets = [
+            s for s in all_hh_sheets if _sheet_matches_district(s, district, municipality_specified=has_muni)
+        ]
+
+    sheets_by_id: dict[int, CensusSheet] = {s.id: s for s in all_hh_sheets if s.id is not None}
+    by_muni_year_hn: dict[tuple[str, int, str], list[CensusSheet]] = {}
+    by_muni_hn: dict[tuple[str, str], list[CensusSheet]] = {}
+    for s in all_hh_sheets:
+        m_key = canonical_municipality_key(s.municipality)
+        hn_key = normalize_house_number(s.house_number)
+        if m_key and hn_key:
+            c_yr = int(s.census_year or 1930)
+            by_muni_year_hn.setdefault((m_key, c_yr, hn_key), []).append(s)
+            by_muni_hn.setdefault((m_key, hn_key), []).append(s)
+            if "," in str(s.house_number or ""):
+                base_hn = re.sub(r"[a-z]+$", "", hn_key)
+                if base_hn and base_hn != hn_key:
+                    by_muni_year_hn.setdefault((m_key, c_yr, base_hn), []).append(s)
+                    by_muni_hn.setdefault((m_key, base_hn), []).append(s)
+
+    # 2. Match CensusOverviewHouse rows where owner matches owner_query
+    ov_stmt = select(CensusOverviewHouse)
+    if census_year is not None and not include_cross_year:
+        ov_stmt = ov_stmt.where(CensusOverviewHouse.census_year == census_year)
+    ov_rows = list(
+        session.exec(
+            ov_stmt.order_by(
+                CensusOverviewHouse.census_sheet_id.asc(),
+                CensusOverviewHouse.row_index.asc(),
+                CensusOverviewHouse.id.asc(),
+            )
+        ).all()
+    )
+
+    ov_parent_ids = list({r.census_sheet_id for r in ov_rows if r.census_sheet_id})
+    ov_parents: dict[int, CensusSheet] = (
+        {
+            s.id: s
+            for s in session.exec(select(CensusSheet).where(CensusSheet.id.in_(ov_parent_ids))).all()  # type: ignore[union-attr]
+            if s.id is not None
+        }
+        if ov_parent_ids
+        else {}
+    )
+
+    matched_sheet_ids: list[int] = []
+    seen_sheet_ids: set[int] = set()
+
+    def _add_sheet(sh: CensusSheet | None) -> None:
+        if sh is not None and sh.id is not None and sh.id not in seen_sheet_ids:
+            if (sh.sheet_type or "household") not in ("overview", "municipal_overview"):
+                seen_sheet_ids.add(sh.id)
+                matched_sheet_ids.append(sh.id)
+                sheets_by_id[sh.id] = sh
+
+    for ovh in ov_rows:
+        ov_parent = ov_parents.get(ovh.census_sheet_id)
+        ov_muni_raw = ovh.municipality or (ov_parent.municipality if ov_parent else None)
+        if has_muni and municipality:
+            target_canon = canonical_municipality_key(municipality)
+            m_fold = fold_text_diacritics(municipality.strip())
+            if (
+                canonical_municipality_key(ov_muni_raw) != target_canon
+                and m_fold not in fold_text_diacritics(ov_muni_raw or "")
+            ):
+                continue
+        if has_dist and district:
+            d_fold = fold_text_diacritics(district.strip())
+            ov_dist_raw = ovh.district or (ov_parent.district if ov_parent else None)
+            if d_fold not in fold_text_diacritics(ov_dist_raw or "") and not (
+                ov_parent and _sheet_matches_district(ov_parent, district, municipality_specified=has_muni)
+            ):
+                continue
+        if has_st and street:
+            if not text_matches_street([ovh.settlement_name], street):
+                continue
+        if not _overview_house_matches_person_query(ovh, q_clean):
+            continue
+
+        # Resolve linked household sheet(s) for this overview house row
+        direct = sheets_by_id.get(ovh.matched_sheet_id or 0) or (
+            session.get(CensusSheet, ovh.matched_sheet_id) if ovh.matched_sheet_id else None
+        )
+        if direct and can_match_overview_house_to_sheet(ovh, direct, overview_sheet=ov_parent):
+            if census_year is None or include_cross_year or int(direct.census_year or 0) == census_year:
+                _add_sheet(direct)
+
+        m_key = canonical_municipality_key(ov_muni_raw)
+        hn_key = normalize_house_number(ovh.house_number)
+        if m_key and hn_key:
+            cands = (
+                by_muni_hn.get((m_key, hn_key), [])
+                if (include_cross_year or census_year is None)
+                else by_muni_year_hn.get((m_key, int(ovh.census_year or census_year or 1930), hn_key), [])
+            )
+            for cand in cands:
+                if include_cross_year or census_year is None:
+                    if is_compatible_settlement(ovh.settlement_name, cand.street_raw, ov_muni_raw):
+                        _add_sheet(cand)
+                elif can_match_overview_house_to_sheet(ovh, cand, overview_sheet=ov_parent):
+                    _add_sheet(cand)
+
+    # 3. Also check household sheets whose own `household_owner` or `CensusHousehold.house_owner_name` matches
+    hh_by_sheet: dict[int, list[CensusHousehold]] = {}
+    if all_hh_sheets:
+        hh_sids = [s.id for s in all_hh_sheets if s.id is not None]
+        for start in range(0, len(hh_sids), 450):
+            chunk = hh_sids[start : start + 450]
+            for hh in session.exec(
+                select(CensusHousehold).where(CensusHousehold.census_sheet_id.in_(chunk))  # type: ignore[union-attr]
+            ).all():
+                hh_by_sheet.setdefault(hh.census_sheet_id, []).append(hh)
+
+    for s in all_hh_sheets:
+        if s.id in seen_sheet_ids:
+            continue
+        s_hhs = hh_by_sheet.get(s.id or 0, [])
+        if has_st and street:
+            if not text_matches_street([s.street_raw, *(h.street for h in s_hhs)], street):
+                continue
+        owner_cands: list[str | None] = [s.household_owner, *(h.house_owner_name for h in s_hhs)]
+        if _text_matches_person_name(owner_cands, q_clean):
+            _add_sheet(s)
+
+    ordered = [sheets_by_id[sid] for sid in matched_sheet_ids if sid in sheets_by_id]
+    ordered.sort(
+        key=lambda s: (
+            0 if s.download_status not in ("ocr_done", "extracted", "matched") else 1,
+            s.census_year or 0,
+            s.house_number_int if s.house_number_int is not None else 999999,
+            s.id or 0,
+        )
+    )
+    return ordered
+
+
 @router.post("/jobs/start")
 async def start_census_job(
     req: StartCensusJobRequest,
@@ -903,30 +1076,57 @@ async def start_census_job(
     years = [resolved_year]
     cat_keys = [k for k in (req.district_tag, req.municipality_tag) if k]
     is_overview_only = bool(req.overview_only or req.job_type == "overview_only")
+    is_owner_linked = bool(req.job_type == "owner_linked" or req.owner_query or req.sheet_ids)
+
+    explicit_sheet_ids: list[int] = []
+    if req.sheet_ids:
+        for sid in req.sheet_ids:
+            if isinstance(sid, int) and sid > 0 and sid not in explicit_sheet_ids:
+                explicit_sheet_ids.append(sid)
+    elif req.owner_query and req.owner_query.strip():
+        resolved_owner_sheets = _resolve_owner_linked_household_sheets(
+            session,
+            owner_query=req.owner_query.strip(),
+            census_year=resolved_year if (req.census_year is not None or req.census_year_tag is not None) else None,
+            municipality=req.municipality,
+            district=req.district,
+            street=req.street,
+            include_cross_year=req.include_cross_year,
+        )
+        explicit_sheet_ids = [s.id for s in resolved_owner_sheets if s.id is not None]
+
+    owner_label = (req.owner_query or req.query_text or "").strip()
     job_name = req.name or (
         f"Katalóg Slovakiana ({req.municipality or req.query_text or req.municipality_tag or req.district_tag or 'všetky'})"
         if req.job_type == "catalog_harvest"
         else (
             f"Stiahnuť hárky a OCR prehľadov ({req.municipality or req.query_text or req.municipality_tag or 'výber'})"
             if is_overview_only
-            else f"Sťahovanie a OCR hárkov ({req.municipality or req.query_text or req.municipality_tag or 'výber'})"
+            else (
+                f"Stiahnuť a OCR hárkov majiteľa: {owner_label or req.municipality or 'výber'}"
+                if is_owner_linked
+                else f"Sťahovanie a OCR hárkov ({req.municipality or req.query_text or req.municipality_tag or 'výber'})"
+            )
         )
     )
     db_job_type = "catalog_harvest" if req.job_type == "catalog_harvest" else "full_pipeline"
-    filter_payload = {
+    filter_payload: dict[str, Any] = {
         "name": job_name,
         "years": years,
         "category_keys": cat_keys,
         "municipality": (req.municipality or "").strip() or None,
         "district": (req.district or "").strip() or None,
         "search_text": req.query_text or "",
+        "owner_query": (req.owner_query or "").strip() or None,
         "include_blackened": True,
-        "limit_sheets": req.max_sheets or (500 if is_overview_only else 50),
+        "limit_sheets": req.max_sheets or (500 if is_overview_only else (max(50, len(explicit_sheet_ids)) if explicit_sheet_ids else 50)),
         "auto_ocr": req.run_pipeline,
         "run_mcp": req.run_mcp,
         "only_undone": req.only_undone,
         "overview_only": is_overview_only,
     }
+    if is_owner_linked or explicit_sheet_ids:
+        filter_payload["sheet_ids"] = explicit_sheet_ids
     job = CensusDownloadJob(
         job_type=db_job_type,
         filter_json=json.dumps(filter_payload, ensure_ascii=False),
@@ -966,10 +1166,16 @@ async def start_census_job(
             initial_stage="census_download",
             active_model="slovakiana-iiif",
             target_url="/scitacie-harky",
-            metadata={"job_id": jid},
+            metadata={"job_id": jid, "matched_sheets_count": len(explicit_sheet_ids)},
         )
 
-    return {"status": "started", "job": job, "task": queued_task}
+    return {
+        "status": "started",
+        "job": job,
+        "task": queued_task,
+        "matched_sheet_ids": explicit_sheet_ids,
+        "matched_sheets_count": len(explicit_sheet_ids),
+    }
 
 
 @router.post("/jobs/{job_id}/pause")
@@ -1200,6 +1406,9 @@ def list_census_sheets(
                 for k_fb, v_fb in (rs_out.get("fallback_streets") or {}).items():
                     if v_fb:
                         matched_ovh_settlements_by_sheet[int(k_fb)] = [str(v_fb)]
+                for k_own, v_own in (rs_out.get("fallback_owners") or {}).items():
+                    if v_own:
+                        matched_ovh_owners_by_sheet[int(k_own)] = [str(v_own)]
                 rust_previews_by_sheet = {
                     int(k_pr): v_pr for k_pr, v_pr in (rs_out.get("previews_by_sheet") or {}).items()
                 }
@@ -1249,17 +1458,36 @@ def list_census_sheets(
                     if ocr_t:
                         row_ocr_by_id[r_obj.id] = ocr_t
         seen_filter_ovh: set[tuple[int, str]] = set()
+        hh_sheets_by_muni_year_hn: dict[tuple[str, int, str], list[int]] = {}
+        for s_item in all_matching:
+            if s_item.id and (s_item.sheet_type or "household") not in ("overview", "municipal_overview"):
+                m_c = canonical_municipality_key(s_item.municipality)
+                hn_n = normalize_house_number(s_item.house_number)
+                if m_c and hn_n:
+                    hh_sheets_by_muni_year_hn.setdefault(
+                        (m_c, int(s_item.census_year or 1930), hn_n), []
+                    ).append(s_item.id)
+        cand_id_set = set(candidate_ids)
         for ovh in session.exec(
-            select(CensusOverviewHouse).where(
-                (CensusOverviewHouse.census_sheet_id.in_(candidate_ids))
-                | (CensusOverviewHouse.matched_sheet_id.in_(candidate_ids))
-            )
+            select(CensusOverviewHouse).where(CensusOverviewHouse.census_year == resolved_year)
         ).all():
             ov_k = (
                 int(ovh.census_sheet_id or 0),
                 normalize_house_number(ovh.house_number) or str(ovh.row_index),
             )
-            if ov_k not in seen_filter_ovh:
+            in_cs = ovh.census_sheet_id in cand_id_set
+            target_sids: list[int] = []
+            if ovh.matched_sheet_id and ovh.matched_sheet_id in cand_id_set:
+                target_sids.append(ovh.matched_sheet_id)
+            ov_muni_c = canonical_municipality_key(ovh.municipality)
+            ov_hn_n = normalize_house_number(ovh.house_number)
+            if ov_muni_c and ov_hn_n:
+                for cid in hh_sheets_by_muni_year_hn.get((ov_muni_c, int(ovh.census_year or 1930), ov_hn_n), []):
+                    if cid not in target_sids:
+                        target_sids.append(cid)
+            if not in_cs and not target_sids:
+                continue
+            if in_cs and ov_k not in seen_filter_ovh:
                 seen_filter_ovh.add(ov_k)
                 overview_counts_by_sheet[ovh.census_sheet_id] = (
                     overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
@@ -1267,12 +1495,12 @@ def list_census_sheets(
                 ovh_by_overview_sheet.setdefault(ovh.census_sheet_id, []).append(ovh)
             if ovh.settlement_name and ovh.settlement_name.strip() and ovh.settlement_name.strip() not in ("-", "—", "?"):
                 available_streets_set.add(ovh.settlement_name.strip())
-            if ovh.matched_sheet_id:
+            for msid in target_sids:
                 if ovh.settlement_name:
-                    matched_ovh_settlements_by_sheet.setdefault(ovh.matched_sheet_id, []).append(ovh.settlement_name)
+                    matched_ovh_settlements_by_sheet.setdefault(msid, []).append(ovh.settlement_name)
                 for tx in (ovh.owner_name, ovh.remarks):
                     if tx:
-                        matched_ovh_owners_by_sheet.setdefault(ovh.matched_sheet_id, []).append(tx)
+                        matched_ovh_owners_by_sheet.setdefault(msid, []).append(tx)
         for md in session.exec(
             select(CensusMunicipalOverviewDistrict).where(
                 CensusMunicipalOverviewDistrict.census_sheet_id.in_(candidate_ids)
@@ -1441,18 +1669,43 @@ def list_census_sheets(
             if pf.census_sheet_id:
                 facts_by_sheet.setdefault(pf.census_sheet_id, []).append(pf)
         seen_page_ovh: set[tuple[int, str]] = set()
+        page_id_set = set(sheet_ids)
+        page_hh_by_muni_year_hn: dict[tuple[str, int, str], list[int]] = {}
+        for p_s in page_items:
+            if p_s.id and (p_s.sheet_type or "household") not in ("overview", "municipal_overview"):
+                p_mc = canonical_municipality_key(p_s.municipality)
+                p_hn = normalize_house_number(p_s.house_number)
+                if p_mc and p_hn:
+                    page_hh_by_muni_year_hn.setdefault(
+                        (p_mc, int(p_s.census_year or 1930), p_hn), []
+                    ).append(p_s.id)
         for ovh in session.exec(
-            select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id.in_(sheet_ids))
+            select(CensusOverviewHouse).where(CensusOverviewHouse.census_year == resolved_year)
         ).all():
             ov_k = (
                 int(ovh.census_sheet_id or 0),
                 normalize_house_number(ovh.house_number) or str(ovh.row_index),
             )
-            if ov_k not in seen_page_ovh:
+            if ovh.census_sheet_id in page_id_set and ov_k not in seen_page_ovh:
                 seen_page_ovh.add(ov_k)
                 overview_counts_by_sheet[ovh.census_sheet_id] = (
                     overview_counts_by_sheet.get(ovh.census_sheet_id, 0) + 1
                 )
+            p_target_sids: list[int] = []
+            if ovh.matched_sheet_id and ovh.matched_sheet_id in page_id_set:
+                p_target_sids.append(ovh.matched_sheet_id)
+            ov_mc = canonical_municipality_key(ovh.municipality)
+            ov_hnn = normalize_house_number(ovh.house_number)
+            if ov_mc and ov_hnn:
+                for cid in page_hh_by_muni_year_hn.get((ov_mc, int(ovh.census_year or 1930), ov_hnn), []):
+                    if cid not in p_target_sids:
+                        p_target_sids.append(cid)
+            for msid in p_target_sids:
+                if ovh.settlement_name:
+                    matched_ovh_settlements_by_sheet.setdefault(msid, []).append(ovh.settlement_name)
+                for tx in (ovh.owner_name, ovh.remarks):
+                    if tx:
+                        matched_ovh_owners_by_sheet.setdefault(msid, []).append(tx)
         for md in session.exec(
             select(CensusMunicipalOverviewDistrict).where(
                 CensusMunicipalOverviewDistrict.census_sheet_id.in_(sheet_ids)
@@ -1517,6 +1770,10 @@ def list_census_sheets(
             )
             if fallback_st:
                 s_payload["street_name"] = fallback_st
+        if not s_payload.get("household_owner"):
+            fallback_owner = next(iter(matched_ovh_owners_by_sheet.get(sid, [])), None)
+            if fallback_owner:
+                s_payload["household_owner"] = _normalize_overview_owner(fallback_owner) or fallback_owner
         if has_st:
             s_payload["matched_street"] = True
         s_payload["linked_house_sheets"] = linked_sheets
@@ -2468,7 +2725,27 @@ def _deduplicate_and_repair_overview_houses(
                 )
             )
         ]
-        if len(valid_rec_crops) > len(stage1) and any(cp not in seen_crops for cp in valid_rec_crops):
+        trace_left_crops = [
+            re.sub(r"_left\.jpg$", "_stitched.jpg", tr.image_path)
+            for tr in session.exec(
+                select(WorkflowTrace)
+                .where(
+                    WorkflowTrace.scan_id.in_(scan_ids_check),  # type: ignore[union-attr]
+                    WorkflowTrace.stage == "ocr_left",
+                    WorkflowTrace.status == "ok",
+                )
+                .order_by(WorkflowTrace.id.desc())
+            ).all()
+            if tr.image_path
+            and tr.response_text
+            and re.search(r"/row_0*\d+_left\.jpg$", tr.image_path)
+            and not is_overview_summary_or_footer_row(tr.response_text)
+        ]
+        unique_trace_crops = list(dict.fromkeys(trace_left_crops))
+        if (
+            (len(valid_rec_crops) > len(stage1) and any(cp not in seen_crops for cp in valid_rec_crops))
+            or (len(unique_trace_crops) > len(stage1) and any(cp not in seen_crops for cp in unique_trace_crops))
+        ):
             rebuilt = reconstruct_overview_houses_from_existing_ocr(session, sheet)
             if len(rebuilt) >= len(stage1):
                 return rebuilt
@@ -2609,6 +2886,7 @@ def _deduplicate_and_repair_overview_houses(
                 default_settlement=sheet.municipality,
                 prev_house=kept[idx_k - 2] if idx_k >= 2 else None,
                 expected_house_num=ovh.house_number_int,
+                col5_uninhabited=(not ovh.is_inhabited),
             )
             heur_owner = _normalize_overview_owner(heur.get("owner_name"), prev_owner)
             if heur_owner and heur_owner != ovh.owner_name:
@@ -2616,14 +2894,21 @@ def _deduplicate_and_repair_overview_houses(
                 ovh.owner_surname_folded = owner_surname_folded_from_name(heur_owner)
                 session.add(ovh)
                 dirty = True
-            if heur.get("household_count") is not None and heur.get("household_count") != ovh.household_count:
-                ovh.household_count = heur["household_count"]
+            if not heur.get("is_inhabited", True) and ovh.is_inhabited:
+                ovh.is_inhabited = False
+                ovh.household_count = 0
+                ovh.present_persons_count = 0
                 session.add(ovh)
                 dirty = True
-            if heur.get("present_persons_count") is not None and heur.get("present_persons_count") != ovh.present_persons_count:
-                ovh.present_persons_count = heur["present_persons_count"]
-                session.add(ovh)
-                dirty = True
+            elif ovh.is_inhabited and heur.get("owner_name") is not None:
+                if heur.get("household_count") is not None and heur.get("household_count") != ovh.household_count:
+                    ovh.household_count = heur["household_count"]
+                    session.add(ovh)
+                    dirty = True
+                if heur.get("present_persons_count") is not None and heur.get("present_persons_count") != ovh.present_persons_count:
+                    ovh.present_persons_count = heur["present_persons_count"]
+                    session.add(ovh)
+                    dirty = True
 
         hn_lookup = normalize_house_number(ovh.house_number)
         known_rep = _KNOWN_OVERVIEW_ROW_REPAIRS.get((s_key, hn_lookup))

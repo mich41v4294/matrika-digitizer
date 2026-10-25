@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import func
 from sqlmodel import select
 
-from backend.app.db.models import CensusSheet, FamilySearchMatch, PersonFact, RecordRow, ScanImage
+from backend.app.db.models import CensusOverviewHouse, CensusSheet, FamilySearchMatch, PersonFact, RecordRow, ScanImage
 from backend.app.db.session import SessionDep, delete_person_fact_cascade
 from backend.app.export.gedcom import export_facts_to_csv, export_facts_to_gedcom
 from backend.app.mcp.familysearch_client import (
@@ -21,7 +21,9 @@ from backend.app.mcp.familysearch_client import (
 from backend.app.pipeline.feedback import build_feedback_lookup_maps
 from backend.app.pipeline.lexicon import (
     apply_person_fact_search_fields,
+    canonical_municipality_key,
     compute_person_fact_search_fields,
+    normalize_house_number,
     parse_observationes_events,
 )
 from backend.app.pipeline.schemas import (
@@ -118,9 +120,39 @@ def list_records(
             fb_maps["by_fact"].get(f.id or 0)
             or fb_maps["by_row"].get(f.row_id or 0)
         )
+    cat_sheets_raw = res.get("catalog_sheets", [])
+    cat_owner_by_id: dict[int, str] = {}
+    cat_owner_by_muni_year_hn: dict[tuple[str, int, str], str] = {}
+    if cat_sheets_raw:
+        cat_years = list({int(s.census_year or 1930) for s in cat_sheets_raw})
+        for ovh in session.exec(
+            select(CensusOverviewHouse).where(CensusOverviewHouse.census_year.in_(cat_years))  # type: ignore[union-attr]
+        ).all():
+            if not ovh.owner_name:
+                continue
+            if ovh.matched_sheet_id and ovh.matched_sheet_id not in cat_owner_by_id:
+                cat_owner_by_id[ovh.matched_sheet_id] = ovh.owner_name
+            m_k = canonical_municipality_key(ovh.municipality)
+            hn_k = normalize_house_number(ovh.house_number)
+            if m_k and hn_k:
+                key_mh = (m_k, int(ovh.census_year or 1930), hn_k)
+                if key_mh not in cat_owner_by_muni_year_hn:
+                    cat_owner_by_muni_year_hn[key_mh] = ovh.owner_name
+
     res["catalog_sheets"] = [
         {
             **s.model_dump(),
+            "household_owner": (
+                s.household_owner
+                or cat_owner_by_id.get(s.id or 0)
+                or cat_owner_by_muni_year_hn.get(
+                    (
+                        canonical_municipality_key(s.municipality),
+                        int(s.census_year or 1930),
+                        normalize_house_number(s.house_number),
+                    )
+                )
+            ),
             "slovakiana_id": s.slovakiana_key,
             "district_name": s.district,
             "municipality_name": s.municipality,
@@ -129,7 +161,7 @@ def list_records(
             "house_number_conscription": s.house_number,
             "pipeline_status": s.download_status,
         }
-        for s in res.get("catalog_sheets", [])
+        for s in cat_sheets_raw
     ]
     return res
 

@@ -1515,6 +1515,131 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     }
   };
 
+  const activeOwnerSearchQuery = (
+    personNameFilter.trim() || workspaceSearch.trim()
+  ).trim();
+
+  const ownerLinkedSheetsInfo = useMemo(() => {
+    if (!activeOwnerSearchQuery || /^cair-[a-z0-9_-]+$/i.test(activeOwnerSearchQuery)) {
+      return {
+        all: [] as Array<{ id: number; key: string; isOcrDone: boolean }>,
+        undone: [] as Array<{ id: number; key: string; isOcrDone: boolean }>,
+      };
+    }
+    const byId = new Map<number, { id: number; key: string; isOcrDone: boolean }>();
+    const addCandidate = (
+      id?: number | null,
+      key?: string | null,
+      status?: string | null,
+      membersCnt?: number
+    ) => {
+      if (!id || !key) return;
+      const done =
+        status === "ocr_done" ||
+        status === "extracted" ||
+        status === "matched" ||
+        (membersCnt || 0) > 0;
+      const prev = byId.get(id);
+      if (!prev || (!prev.isOcrDone && done)) {
+        byId.set(id, { id, key, isOcrDone: done });
+      }
+    };
+
+    for (const h of filteredHousesDirectory) {
+      if (
+        h.sheet_id &&
+        h.slovakiana_key &&
+        matchesPersonNameQuery(
+          [h.owner_name, h.head_name, h.remarks],
+          activeOwnerSearchQuery
+        )
+      ) {
+        addCandidate(
+          h.sheet_id,
+          h.slovakiana_key,
+          h.pipeline_status || h.sheet?.download_status,
+          h.extracted_members_count
+        );
+      }
+    }
+
+    for (const row of filteredSheets) {
+      const s = row.sheet;
+      const isOv = s.sheet_type === "overview" || s.sheet_type === "municipal_overview";
+      if (isOv) continue;
+      if (
+        matchesPersonNameQuery(
+          [
+            s.household_owner,
+            row.household?.head_of_household_name,
+            row.household?.head_given_name,
+            row.household?.head_surname,
+          ],
+          activeOwnerSearchQuery
+        )
+      ) {
+        addCandidate(
+          s.id,
+          s.slovakiana_id,
+          s.download_status,
+          row.extracted_members_count
+        );
+      }
+    }
+
+    const all = Array.from(byId.values());
+    const undone = all.filter((x) => !x.isOcrDone);
+    return { all, undone };
+  }, [activeOwnerSearchQuery, filteredHousesDirectory, filteredSheets]);
+
+  const handleOcrOwnerLinkedSheets = async () => {
+    if (!activeOwnerSearchQuery) return;
+    setBusyAction("owner_linked_ocr");
+    try {
+      const { targetName, resolvedMuniTag, distName, resolvedDistTag } =
+        resolveMunicipalityAndDistrictTags();
+      const targetItems =
+        ownerLinkedSheetsInfo.undone.length > 0
+          ? ownerLinkedSheetsInfo.undone
+          : ownerLinkedSheetsInfo.all;
+      const targetIds = targetItems.map((x) => x.id);
+      const onlyUndone = ownerLinkedSheetsInfo.undone.length > 0;
+
+      await fetch("/api/census/jobs/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name:
+            lang === "sk"
+              ? `OCR hárkov majiteľa domu: ${activeOwnerSearchQuery}${
+                  targetName ? ` (${targetName})` : ""
+                }`
+              : `OCR house owner sheets: ${activeOwnerSearchQuery}${
+                  targetName ? ` (${targetName})` : ""
+                }`,
+          job_type: "owner_linked",
+          census_year_tag: selectedYearTag || null,
+          district_tag: resolvedDistTag || null,
+          municipality_tag: resolvedMuniTag || null,
+          municipality: targetName || null,
+          district: distName || null,
+          street: streetFilter.trim() || null,
+          owner_query: activeOwnerSearchQuery,
+          sheet_ids: targetIds.length > 0 ? targetIds : undefined,
+          max_sheets: Math.max(targetIds.length, 50),
+          run_pipeline: true,
+          run_mcp: true,
+          only_undone: onlyUndone,
+        }),
+      });
+      setDismissedActiveJobId(null);
+      await loadWorkspaceData();
+      refreshStatus();
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const handlePauseResumeJob = async (job: CensusJob) => {
     setJobActionId(job.id);
     try {
@@ -2845,23 +2970,37 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                     type="button"
                     onClick={() => {
                       setSplitMenuOpen(false);
-                      handleBulkOcrWorkspace();
+                      if (featureFlags.census_overview_sheets) {
+                        handleOcrOverviewOnlyMunicipality();
+                      } else {
+                        handleBulkOcrWorkspace();
+                      }
                     }}
                     disabled={busyAction !== null}
                     title={
-                      lang === "sk"
+                      featureFlags.census_overview_sheets
+                        ? lang === "sk"
+                          ? "Stiahnuť hárky zo Slovakiany a spustiť AI OCR iba pre prehľady obvodov (zoznam domov a majiteľov)"
+                          : "Download sheets from Slovakiana and run AI OCR only for district overview sheets (house & owner directory)"
+                        : lang === "sk"
                         ? "Stiahnuť hárky zo Slovakiany a spustiť hromadné OCR"
                         : "Download sheets from Slovakiana and run batch OCR"
                     }
                     className="px-3.5 py-1.5 min-h-[34px] bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition"
                   >
-                    {busyAction === "bulk_ocr" ? (
+                    {busyAction === "bulk_ocr" || busyAction?.startsWith("overview_ocr_") ? (
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : featureFlags.census_overview_sheets ? (
+                      <Building2 className="w-3.5 h-3.5" />
                     ) : (
                       <Sparkles className="w-3.5 h-3.5" />
                     )}
                     <span>
-                      {lang === "sk"
+                      {featureFlags.census_overview_sheets
+                        ? lang === "sk"
+                          ? "Stiahnuť a OCR prehľadov"
+                          : "Download & OCR Overviews"
+                        : lang === "sk"
                         ? "Stiahnuť a spustiť OCR"
                         : "Download & Run OCR"}
                     </span>
@@ -2874,8 +3013,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                       disabled={busyAction !== null}
                       title={
                         lang === "sk"
-                          ? "Ďalšie možnosti: Iba načítať katalóg zo Slovakiany"
-                          : "More options: Only fetch catalog from Slovakiana"
+                          ? "Ďalšie možnosti: Hromadné OCR všetkých hárkov alebo iba načítať katalóg"
+                          : "More options: Batch OCR all sheets or only fetch catalog"
                       }
                       aria-label={
                         lang === "sk"
@@ -2900,22 +3039,22 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                         type="button"
                         onClick={() => {
                           setSplitMenuOpen(false);
-                          handleOcrOverviewOnlyMunicipality();
+                          handleBulkOcrWorkspace();
                         }}
                         disabled={busyAction !== null}
-                        className="w-full text-left px-3 py-2 rounded-md hover:bg-purple-50 text-stone-800 text-xs font-semibold flex items-start gap-2 cursor-pointer disabled:opacity-50"
+                        className="w-full text-left px-3 py-2 rounded-md hover:bg-amber-50 text-stone-800 text-xs font-semibold flex items-start gap-2 cursor-pointer disabled:opacity-50"
                       >
-                        <Building2 className="w-4 h-4 text-purple-700 shrink-0 mt-0.5" />
+                        <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                         <div>
                           <div>
                             {lang === "sk"
-                              ? "Stiahnuť hárky a OCR iba prehľadov"
-                              : "Download all & OCR overview sheets only"}
+                              ? "Stiahnuť a spustiť OCR všetkých hárkov"
+                              : "Download & run OCR on all sheets"}
                           </div>
                           <div className="text-[11px] font-normal text-stone-500">
                             {lang === "sk"
-                              ? "Stiahne všetky skeny obce, deteguje typ hárku a prečíta len prehľady obvodov a domov"
-                              : "Downloads all scans, runs type detection, and OCRs only overview sheets"}
+                              ? "Stiahne skeny a prečíta všetky rodinné sčítacie hárky v obci"
+                              : "Downloads scans and OCRs all household census sheets in the municipality"}
                           </div>
                         </div>
                       </button>
@@ -3227,6 +3366,41 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
               </div>
 
               <div className="flex flex-wrap items-center gap-2 justify-end">
+                {Boolean(activeOwnerSearchQuery) &&
+                  ownerLinkedSheetsInfo.all.length > 0 && (
+                    <button
+                      type="button"
+                      data-testid="search-ocr-owner-sheets-btn"
+                      onClick={handleOcrOwnerLinkedSheets}
+                      disabled={busyAction !== null}
+                      title={
+                        lang === "sk"
+                          ? `Stiahnuť a spustiť AI OCR pre všetky prepojené sčítacie hárky, kde je „${activeOwnerSearchQuery}“ uvedený ako majiteľ domu v prehľade obvodu (${ownerLinkedSheetsInfo.all.length} hárkov)`
+                          : `Download and run AI OCR for all linked census sheets where "${activeOwnerSearchQuery}" is listed as the house owner (${ownerLinkedSheetsInfo.all.length} sheets)`
+                      }
+                      className="px-3 py-1.5 min-h-[34px] rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition shadow-2xs"
+                    >
+                      {busyAction === "owner_linked_ocr" ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5 shrink-0" />
+                      )}
+                      <span>
+                        {lang === "sk"
+                          ? `Stiahnuť a OCR hárkov majiteľa (${
+                              ownerLinkedSheetsInfo.undone.length > 0
+                                ? ownerLinkedSheetsInfo.undone.length
+                                : ownerLinkedSheetsInfo.all.length
+                            })`
+                          : `Download & OCR owner's sheets (${
+                              ownerLinkedSheetsInfo.undone.length > 0
+                                ? ownerLinkedSheetsInfo.undone.length
+                                : ownerLinkedSheetsInfo.all.length
+                            })`}
+                      </span>
+                    </button>
+                  )}
+
                 {hasAnyActiveFilter && (
                   <button
                     type="button"
@@ -4289,30 +4463,39 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                         ) : (
                           <div className="space-y-1.5">
                             {household &&
-                              (household.head_surname ||
-                                household.head_given_name) && (
-                                <div className="bg-amber-50/80 border border-amber-200 rounded-lg px-2.5 py-1.5 text-xs text-stone-800 flex items-center justify-between">
-                                  <div className="truncate">
-                                    <span className="font-semibold text-amber-950">
-                                      {lang === "sk" ? "Hlava:" : "Head:"}{" "}
-                                    </span>
-                                    {household.head_given_name || ""}{" "}
-                                    {household.head_surname || ""}
-                                    {household.wife_given_name
-                                      ? ` + ${lang === "sk" ? "manž." : "wife"} ${household.wife_given_name}${
-                                          household.wife_maiden_surname
-                                            ? ` (rod. ${household.wife_maiden_surname})`
-                                            : ""
-                                        }`
-                                      : ""}
-                                  </div>
-                                  <span className="ml-2 px-1.5 py-0.5 rounded bg-amber-200/80 text-amber-950 font-bold shrink-0 flex items-center gap-1">
-                                    <Users className="w-3 h-3" />
-                                    {extracted_members_count ||
-                                      household.member_count}
+                            (household.head_surname ||
+                              household.head_given_name) ? (
+                              <div className="bg-amber-50/80 border border-amber-200 rounded-lg px-2.5 py-1.5 text-xs text-stone-800 flex items-center justify-between">
+                                <div className="truncate">
+                                  <span className="font-semibold text-amber-950">
+                                    {lang === "sk" ? "Hlava:" : "Head:"}{" "}
                                   </span>
+                                  {household.head_given_name || ""}{" "}
+                                  {household.head_surname || ""}
+                                  {household.wife_given_name
+                                    ? ` + ${lang === "sk" ? "manž." : "wife"} ${household.wife_given_name}${
+                                        household.wife_maiden_surname
+                                          ? ` (rod. ${household.wife_maiden_surname})`
+                                          : ""
+                                      }`
+                                    : ""}
                                 </div>
-                              )}
+                                <span className="ml-2 px-1.5 py-0.5 rounded bg-amber-200/80 text-amber-950 font-bold shrink-0 flex items-center gap-1">
+                                  <Users className="w-3 h-3" />
+                                  {extracted_members_count ||
+                                    household.member_count}
+                                </span>
+                              </div>
+                            ) : s.household_owner ? (
+                              <div className="bg-amber-50/80 border border-amber-200 rounded-lg px-2.5 py-1.5 text-xs text-stone-800 flex items-center justify-between">
+                                <div className="truncate">
+                                  <span className="font-semibold text-amber-950">
+                                    {lang === "sk" ? "Majiteľ domu:" : "House owner:"}{" "}
+                                  </span>
+                                  {s.household_owner}
+                                </div>
+                              </div>
+                            ) : null}
                             {renderHouseholdMembersBadges(sheetMembersPreview)}
                           </div>
                         )}

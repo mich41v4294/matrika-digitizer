@@ -6,7 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from backend.app.census.slovakiana_client import (
     normalize_category_keys_for_slovakiana,
@@ -3205,6 +3205,238 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
             muni_ov = get_municipality_overview(session, municipality="Horné Dubové", census_year=1930)
             self.assertEqual(len(muni_ov["overview_sheets"]), 1)
             self.assertEqual(muni_ov["overview_sheets"][0]["commissioner_name"], "Margita Puchlová")
+
+            # 5. Simulate legacy state where RecordRow.raw_ocr_combined only had table_ocr (without right_ocr),
+            # causing rows like Dom č. 8 ('8 | 1 | | 1 | 4') to be dropped from CensusOverviewHouse, while
+            # WorkflowTrace had both ocr_left and ocr_right traces. Verify get_census_sheet_detail self-heals all 16 houses!
+            from sqlmodel import select
+            from backend.app.db.models import CensusOverviewHouse, WorkflowTrace
+
+            for r_obj in session.exec(select(RecordRow).where(RecordRow.scan_id == front_sc.id)).all():
+                if r_obj.row_index == 8:
+                    r_obj.raw_ocr_left = "8 | 1 |  | 1 | 4"
+                    r_obj.raw_ocr_combined = "8 | 1 |  | 1 | 4"
+                    session.add(r_obj)
+                    session.add(
+                        WorkflowTrace(
+                            scan_id=front_sc.id,
+                            row_id=r_obj.id,
+                            stage="ocr_left",
+                            model_or_tool="glm-ocr",
+                            status="ok",
+                            image_path=f"/media/crops/scan_{front_sc.id}/row_08_left.jpg",
+                            response_text="8 | 1 |  | 1 | 4",
+                        )
+                    )
+                    session.add(
+                        WorkflowTrace(
+                            scan_id=front_sc.id,
+                            row_id=r_obj.id,
+                            stage="ocr_right",
+                            model_or_tool="glm-ocr",
+                            status="ok",
+                            image_path=f"/media/crops/scan_{front_sc.id}/row_08_right.jpg",
+                            response_text="Máring Boledo viétró 1 4",
+                        )
+                    )
+                else:
+                    session.add(
+                        WorkflowTrace(
+                            scan_id=front_sc.id,
+                            row_id=r_obj.id,
+                            stage="ocr_left",
+                            model_or_tool="glm-ocr",
+                            status="ok",
+                            image_path=f"/media/crops/scan_{front_sc.id}/row_{r_obj.row_index:02d}_left.jpg",
+                            response_text=r_obj.raw_ocr_combined,
+                        )
+                    )
+            for r_obj in session.exec(select(RecordRow).where(RecordRow.scan_id == back_sc.id)).all():
+                session.add(
+                    WorkflowTrace(
+                        scan_id=back_sc.id,
+                        row_id=r_obj.id,
+                        stage="ocr_left",
+                        model_or_tool="glm-ocr",
+                        status="ok",
+                        image_path=f"/media/crops/scan_{back_sc.id}/row_{r_obj.row_index:02d}_left.jpg",
+                        response_text=r_obj.raw_ocr_combined,
+                    )
+                )
+            for ovh_del in session.exec(
+                select(CensusOverviewHouse).where(
+                    CensusOverviewHouse.census_sheet_id == sheet.id,
+                    CensusOverviewHouse.house_number == "8",
+                )
+            ).all():
+                session.delete(ovh_del)
+            session.commit()
+
+            det_healed = asyncio.run(get_census_sheet_detail("cair-ko29x4e", session))
+            healed_by_hn = {h["house_number"]: h for h in det_healed["overview_houses"]}
+            self.assertEqual(len(det_healed["overview_houses"]), 16)
+            self.assertIn("8", healed_by_hn)
+            self.assertEqual(healed_by_hn["8"]["owner_name"], "Mária Boledovičová")
+            self.assertEqual((healed_by_hn["8"]["household_count"], healed_by_hn["8"]["present_persons_count"]), (1, 4))
+
+    def test_search_and_ocr_linked_sheets_by_house_owner_name(self) -> None:
+        from backend.app.api.census import (
+            _resolve_owner_linked_household_sheets,
+            list_census_sheets,
+        )
+        from backend.app.census.worker import _find_matching_census_sheets
+        from backend.app.db.models import CensusOverviewHouse
+        from backend.app.search.fts import search_unified
+
+        test_engine = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(test_engine)
+        ensure_fts_schema(test_engine)
+
+        with Session(test_engine) as session:
+            ov_sheet = CensusSheet(
+                slovakiana_key="cair-owner-ov1",
+                census_year=1930,
+                district="Trnava",
+                municipality="TestObec",
+                municipality_folded="testobec",
+                sheet_type="overview",
+                download_status="extracted",
+                has_images=True,
+            )
+            hh_h7 = CensusSheet(
+                slovakiana_key="cair-owner-h7",
+                census_year=1930,
+                district="Trnava",
+                municipality="TestObec",
+                municipality_folded="testobec",
+                house_number="7",
+                house_number_int=7,
+                sheet_type="household",
+                download_status="cataloged",
+                has_images=True,
+            )
+            hh_h8 = CensusSheet(
+                slovakiana_key="cair-owner-h8",
+                census_year=1930,
+                district="Trnava",
+                municipality="TestObec",
+                municipality_folded="testobec",
+                house_number="8",
+                house_number_int=8,
+                sheet_type="household",
+                download_status="cataloged",
+                has_images=True,
+            )
+            hh_h9_other = CensusSheet(
+                slovakiana_key="cair-owner-h9",
+                census_year=1930,
+                district="Trnava",
+                municipality="TestObec",
+                municipality_folded="testobec",
+                house_number="9",
+                house_number_int=9,
+                sheet_type="household",
+                download_status="cataloged",
+                has_images=True,
+            )
+            session.add_all([ov_sheet, hh_h7, hh_h8, hh_h9_other])
+            session.commit()
+            for s in (ov_sheet, hh_h7, hh_h8, hh_h9_other):
+                session.refresh(s)
+
+            # Note: matched_sheet_id is intentionally left None on h8 to verify dynamic house-number linking!
+            ovh7 = CensusOverviewHouse(
+                census_sheet_id=ov_sheet.id or 1,
+                row_index=1,
+                census_year=1930,
+                district="Trnava",
+                municipality="TestObec",
+                house_number="7",
+                house_number_int=7,
+                owner_name="Mária Boledovičová",
+                owner_surname_folded="boledovic",
+                matched_sheet_id=hh_h7.id,
+            )
+            ovh8 = CensusOverviewHouse(
+                census_sheet_id=ov_sheet.id or 1,
+                row_index=2,
+                census_year=1930,
+                district="Trnava",
+                municipality="TestObec",
+                house_number="8",
+                house_number_int=8,
+                owner_name="Mária Boledovičová",
+                owner_surname_folded="boledovic",
+                matched_sheet_id=None,
+            )
+            ovh9 = CensusOverviewHouse(
+                census_sheet_id=ov_sheet.id or 1,
+                row_index=3,
+                census_year=1930,
+                district="Trnava",
+                municipality="TestObec",
+                house_number="9",
+                house_number_int=9,
+                owner_name="Štefan Kováč",
+                owner_surname_folded="kovac",
+                matched_sheet_id=None,
+            )
+            session.add_all([ovh7, ovh8, ovh9])
+            session.commit()
+
+            # 1. Searching census sheets by owner name returns both linked household sheets (even when matched_sheet_id is None)
+            sheets_res = list_census_sheets(
+                session,
+                census_year=1930,
+                municipality="TestObec",
+                person_name="Boledovičová",
+            )
+            returned_keys = {item["sheet"]["slovakiana_id"] for item in sheets_res["sheets"]}
+            self.assertIn("cair-owner-h7", returned_keys)
+            self.assertIn("cair-owner-h8", returned_keys)
+            self.assertNotIn("cair-owner-h9", returned_keys)
+
+            # And populates household_owner fallback from the overview sheet onto the un-OCRed household sheet payload
+            h8_payload = next(
+                item["sheet"]
+                for item in sheets_res["sheets"]
+                if item["sheet"]["slovakiana_id"] == "cair-owner-h8"
+            )
+            self.assertEqual(h8_payload["household_owner"], "Mária Boledovičová")
+
+            # 2. Unified search catalog_sheets also includes both linked household sheets
+            uni_res = search_unified(session, q="Boledovič", municipality="TestObec")
+            uni_cat_keys = {cs.slovakiana_key for cs in uni_res["catalog_sheets"]}
+            self.assertIn("cair-owner-h7", uni_cat_keys)
+            self.assertIn("cair-owner-h8", uni_cat_keys)
+            self.assertNotIn("cair-owner-h9", uni_cat_keys)
+
+            # 3. _resolve_owner_linked_household_sheets resolves only the household sheets where Boledovičová is house owner
+            owner_sheets = _resolve_owner_linked_household_sheets(
+                session,
+                owner_query="Boledovič",
+                census_year=1930,
+                municipality="TestObec",
+            )
+            self.assertEqual(
+                [s.slovakiana_key for s in owner_sheets],
+                ["cair-owner-h7", "cair-owner-h8"],
+            )
+
+            # 4. Worker _find_matching_census_sheets respects explicit sheet_ids for selective owner-linked OCR jobs
+            job_filters = {
+                "years": [1930],
+                "municipality": "TestObec",
+                "owner_query": "Boledovič",
+                "sheet_ids": [s.id for s in owner_sheets],
+            }
+            worker_targets = _find_matching_census_sheets(
+                session, job_filters, only_undone=True, run_ocr=True
+            )
+            self.assertEqual(
+                [s.slovakiana_key for s in worker_targets],
+                ["cair-owner-h7", "cair-owner-h8"],
+            )
 
 
 if __name__ == "__main__":

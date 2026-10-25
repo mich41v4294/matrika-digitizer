@@ -110,6 +110,26 @@ def _find_matching_census_sheets(
     sheets deterministically (overview sheets first, already-downloaded sheets next,
     then by census_year, house_number_int, and id).
     """
+    sheet_ids_filter = [
+        int(x) for x in (filters.get("sheet_ids") or []) if str(x).isdigit() or isinstance(x, int)
+    ]
+    if sheet_ids_filter:
+        sheets_by_id: dict[int, CensusSheet] = {}
+        for start in range(0, len(sheet_ids_filter), 450):
+            chunk = sheet_ids_filter[start : start + 450]
+            for s in session.exec(select(CensusSheet).where(CensusSheet.id.in_(chunk))).all():  # type: ignore[union-attr]
+                if s.id is not None:
+                    sheets_by_id[s.id] = s
+        ordered: list[CensusSheet] = []
+        for sid in sheet_ids_filter:
+            sh = sheets_by_id.get(sid)
+            if not sh:
+                continue
+            if only_undone and is_census_sheet_done(sh, run_ocr=run_ocr, overview_only=overview_only):
+                continue
+            ordered.append(sh)
+        return ordered
+
     try:
         from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
 
@@ -1077,11 +1097,13 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
     # If the local DB has fewer than `limit_sheets` undone sheets (or when `overview_only=True`
     # and we need the full village catalog so overview sheets at the end of the remote pagination
     # are discovered), harvest catalog pages from Slovakiana.
+    has_explicit_sheet_ids = bool(filters.get("sheet_ids"))
     harvest_attempts = 0
     max_harvest_pages = 25
     has_more_remote = True
     while (
-        _ACTIVE_JOB_FLAGS.get(job_id, True)
+        not has_explicit_sheet_ids
+        and _ACTIVE_JOB_FLAGS.get(job_id, True)
         and (len(undone_matches) < limit_sheets or (overview_only and has_more_remote))
         and harvest_attempts < max_harvest_pages
     ):

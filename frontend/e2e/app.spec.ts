@@ -471,6 +471,15 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(page.locator("tbody")).toContainText("Dom č. 24");
 
     // Edit House #1 (Dom č. 15) remarks
+    const ovOwnerInput = page.getByTestId("overview-sheet-owner-search-input");
+    await ovOwnerInput.fill("Kováč");
+    await expect(page.getByTestId("overview-sheet-ocr-owner-sheets-btn")).toBeVisible();
+    await page.screenshot({
+      path: `${SCREENSHOT_DIR}/desktop_overview_sheet_owner_search.png`,
+      fullPage: false,
+    });
+    await ovOwnerInput.fill("");
+
     const house15Row = page.locator("tbody tr").filter({ hasText: "Dom č. 15" }).first();
     await house15Row.getByRole("button", { name: "Upraviť" }).click();
     const remarksInput = page
@@ -652,6 +661,18 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(page.getByRole("link", { name: "Otvoriť" }).first()).toBeVisible();
     await expect(hubOcrBtn).toBeVisible();
     await page.unroute("**/api/census/sheets/*/download-and-process*");
+
+    // Verify searching for a name in the search bar reveals the "Stiahnuť a OCR hárkov majiteľa" button
+    const nameSearchInput = page.getByLabel("Filtrovať podľa mena alebo priezviska osoby");
+    await nameSearchInput.fill("Kováč");
+    const ocrOwnerBtn = page.getByTestId("search-ocr-owner-sheets-btn");
+    await expect(ocrOwnerBtn).toBeVisible();
+    await expect(ocrOwnerBtn).toContainText("Stiahnuť a OCR hárkov majiteľa");
+    await page.screenshot({
+      path: `${SCREENSHOT_DIR}/desktop_census_hub_owner_search.png`,
+      fullPage: false,
+    });
+    await nameSearchInput.fill("");
 
     await page.goto("/hladanie", { waitUntil: "networkidle" });
     const unifiedStreetInput = page.getByLabel("Filtrovať podľa ulice");

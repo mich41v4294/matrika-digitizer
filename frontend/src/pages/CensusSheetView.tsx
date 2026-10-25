@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Save,
   Scale,
+  Search,
   Sparkles,
   Trash2,
   UserCheck,
@@ -1058,7 +1059,19 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   const [confirmDeleteDistrictRowId, setConfirmDeleteDistrictRowId] = useState<number | null>(null);
   const [deletingDistrictRowId, setDeletingDistrictRowId] = useState<number | null>(null);
 
+  const [overviewOwnerSearch, setOverviewOwnerSearch] = useState<string>(
+    () =>
+      (
+        searchParams.get("meno") ||
+        searchParams.get("person_name") ||
+        searchParams.get("q") ||
+        ""
+      ).trim()
+  );
+  const [ocrOwnerBusy, setOcrOwnerBusy] = useState<boolean>(false);
+
   const highlightPersonQuery = (
+    overviewOwnerSearch ||
     searchParams.get("meno") ||
     searchParams.get("person_name") ||
     searchParams.get("q") ||
@@ -2273,6 +2286,63 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     }
     return out;
   }, [detail?.overview_houses, highlightPersonQuery]);
+
+  const matchedOverviewLinkedSheetIds = useMemo(() => {
+    const ids: number[] = [];
+    if (!highlightPersonQuery || !detail?.overview_houses) return ids;
+    for (const h of detail.overview_houses) {
+      if (!fuzzyMatchedHouseIds.has(h.id)) continue;
+      if (h.matched_sheet_id && !ids.includes(h.matched_sheet_id)) {
+        ids.push(h.matched_sheet_id);
+      }
+      for (const ms of h.matched_sheets || []) {
+        if (
+          ms.id &&
+          ms.census_year === h.census_year &&
+          !ids.includes(ms.id)
+        ) {
+          ids.push(ms.id);
+        }
+      }
+    }
+    return ids;
+  }, [detail?.overview_houses, fuzzyMatchedHouseIds, highlightPersonQuery]);
+
+  const handleOcrOverviewOwnerLinkedSheets = async () => {
+    if (!highlightPersonQuery || !detail?.sheet) return;
+    setOcrOwnerBusy(true);
+    try {
+      await fetch("/api/census/jobs/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name:
+            lang === "sk"
+              ? `OCR hárkov majiteľa domu: ${highlightPersonQuery} (${detail.sheet.municipality_name})`
+              : `OCR house owner sheets: ${highlightPersonQuery} (${detail.sheet.municipality_name})`,
+          job_type: "owner_linked",
+          census_year: detail.sheet.census_year,
+          municipality: detail.sheet.municipality_name,
+          district: detail.sheet.district_name,
+          owner_query: highlightPersonQuery,
+          sheet_ids:
+            matchedOverviewLinkedSheetIds.length > 0
+              ? matchedOverviewLinkedSheetIds
+              : undefined,
+          max_sheets: Math.max(matchedOverviewLinkedSheetIds.length, 50),
+          run_pipeline: true,
+          run_mcp: true,
+          only_undone: false,
+        }),
+      });
+      refreshStatus();
+      setTimeout(() => {
+        void loadDetail();
+      }, 1500);
+    } finally {
+      setOcrOwnerBusy(false);
+    }
+  };
 
   const { rowsById, rowsByCrop } = useMemo(() => {
     const byId = new Map<number, ScanRowRecord>();
@@ -3951,6 +4021,71 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
               </div>
             </div>
           </div>
+
+          {overview_houses.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-2.5 bg-stone-50 p-2.5 rounded-lg border border-stone-200">
+              <div className="relative flex-1 min-w-[220px] max-w-md">
+                <Search className="w-3.5 h-3.5 text-stone-500 absolute left-2.5 top-2.5" />
+                <input
+                  type="text"
+                  data-testid="overview-sheet-owner-search-input"
+                  value={overviewOwnerSearch}
+                  onChange={(e) => setOverviewOwnerSearch(e.target.value)}
+                  placeholder={
+                    lang === "sk"
+                      ? "Hľadať majiteľa domu v prehľade obvodu (napr. Kováč)..."
+                      : "Search house owner in district overview (e.g. Kováč)..."
+                  }
+                  className="w-full pl-8 pr-8 py-1.5 min-h-[34px] rounded-md border border-stone-300 bg-white text-xs sm:text-sm"
+                />
+                {overviewOwnerSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setOverviewOwnerSearch("")}
+                    className="absolute right-1 top-1 p-1.5 text-stone-500 hover:text-stone-800 cursor-pointer"
+                    title={lang === "sk" ? "Vyčistiť hľadanie" : "Clear search"}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {Boolean(highlightPersonQuery) && fuzzyMatchedHouseIds.size > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold text-emerald-900 bg-emerald-100 border border-emerald-300 px-2.5 py-1 rounded-md">
+                    {lang === "sk"
+                      ? `Nájdených domov majiteľa: ${fuzzyMatchedHouseIds.size}`
+                      : `Matched owner houses: ${fuzzyMatchedHouseIds.size}`}
+                  </span>
+                  {matchedOverviewLinkedSheetIds.length > 0 && (
+                    <button
+                      type="button"
+                      data-testid="overview-sheet-ocr-owner-sheets-btn"
+                      onClick={handleOcrOverviewOwnerLinkedSheets}
+                      disabled={ocrOwnerBusy}
+                      title={
+                        lang === "sk"
+                          ? `Stiahnuť a spustiť AI OCR pre všetky prepojené popisné sčítacie hárky, kde je „${highlightPersonQuery}“ uvedený ako majiteľ domu (${matchedOverviewLinkedSheetIds.length} hárkov)`
+                          : `Download and run AI OCR for all linked household census sheets where "${highlightPersonQuery}" is listed as house owner (${matchedOverviewLinkedSheetIds.length} sheets)`
+                      }
+                      className="px-3 py-1.5 min-h-[34px] rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition shadow-2xs"
+                    >
+                      {ocrOwnerBusy ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5 shrink-0" />
+                      )}
+                      <span>
+                        {lang === "sk"
+                          ? `Stiahnuť a OCR hárkov majiteľa (${matchedOverviewLinkedSheetIds.length})`
+                          : `Download & OCR owner's sheets (${matchedOverviewLinkedSheetIds.length})`}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {overview_houses.length === 0 ? (
             <div className="text-center py-8 text-stone-600 text-sm">

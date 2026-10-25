@@ -7757,31 +7757,56 @@ def reconstruct_overview_houses_from_existing_ocr(
         row_by_scan_and_idx = {(r.scan_id, r.row_index): r for r in record_rows}
         for sid in scan_ids:
             s_ord = scan_order_by_id.get(sid, 0)
-            bp = 1 if s_ord == 0 else (2 if s_ord == 1 else s_ord + 1)
+            bp_default = 1 if s_ord == 0 else (2 if s_ord == 1 else s_ord + 1)
             traces = session.exec(
                 select(WorkflowTrace)
                 .where(
                     WorkflowTrace.scan_id == sid,
-                    WorkflowTrace.stage == "ocr_left",
+                    WorkflowTrace.stage.in_(["ocr_left", "ocr_right"]),  # type: ignore[union-attr]
                     WorkflowTrace.status == "ok",
                 )
                 .order_by(WorkflowTrace.id.desc())
             ).all()
-            by_r_idx: dict[int, tuple[str, str]] = {}
+            by_r_idx_left: dict[int, tuple[str, str]] = {}
+            by_r_idx_right: dict[int, str] = {}
             for tr in traces:
                 if not tr.image_path or not tr.response_text:
                     continue
-                m_r = re.search(r"/row_0*(\d+)_left\.jpg$", tr.image_path)
-                if m_r:
-                    r_i = int(m_r.group(1))
-                    if r_i not in by_r_idx:
+                m_l = re.search(r"/row_0*(\d+)_left\.jpg$", tr.image_path)
+                if m_l:
+                    r_i = int(m_l.group(1))
+                    if r_i not in by_r_idx_left:
                         stitched_p = re.sub(r"_left\.jpg$", "_stitched.jpg", tr.image_path)
-                        by_r_idx[r_i] = (
+                        by_r_idx_left[r_i] = (
                             stitched_p,
                             html_table_to_pipe_text(tr.response_text).strip(" |"),
                         )
-            for r_i in sorted(by_r_idx.keys()):
-                stitched_p, ocr_t = by_r_idx[r_i]
+                    continue
+                m_r = re.search(r"/row_0*(\d+)_right\.jpg$", tr.image_path)
+                if m_r:
+                    r_i = int(m_r.group(1))
+                    if r_i not in by_r_idx_right:
+                        by_r_idx_right[r_i] = html_table_to_pipe_text(tr.response_text).strip(" |")
+            for r_i in sorted(set(by_r_idx_left.keys()) | set(by_r_idx_right.keys())):
+                l_pair = by_r_idx_left.get(r_i)
+                stitched_p = l_pair[0] if l_pair else f"/media/crops/scan_{sid}/row_{r_i:02d}_stitched.jpg"
+                l_t = l_pair[1] if l_pair else ""
+                r_t = by_r_idx_right.get(r_i, "")
+                ocr_t = f"{l_t} | {r_t}".strip(" |") if (l_t and r_t) else (l_t or r_t)
+                r_obj_match = row_by_scan_and_idx.get((sid, r_i))
+                bp = bp_default
+                if r_obj_match and r_obj_match.cell_crops_json:
+                    try:
+                        cc_t = json.loads(r_obj_match.cell_crops_json)
+                        if isinstance(cc_t, list) and cc_t and isinstance(cc_t[0], dict):
+                            if isinstance(cc_t[0].get("booklet_page"), int):
+                                bp = cc_t[0]["booklet_page"]
+                    except Exception:
+                        pass
+                elif s_ord == 0 and r_i >= 18:
+                    bp = 4
+                elif s_ord == 1 and r_i >= 26:
+                    bp = 3
                 if ocr_t:
                     trace_row_items.append(
                         (
@@ -7790,12 +7815,12 @@ def reconstruct_overview_houses_from_existing_ocr(
                             r_i,
                             None,
                             _StubSlice(stitched_p),
-                            row_by_scan_and_idx.get((sid, r_i)),
+                            r_obj_match,
                             ocr_t,
                         )
                     )
 
-    if trace_row_items and len(trace_row_items) > len(rows_with_ocr) and len(trace_row_items) >= len(md_rows or []):
+    if trace_row_items and len(trace_row_items) >= len(rows_with_ocr) and len(trace_row_items) >= len(md_rows or []):
         raw_ocr_items = trace_row_items
     elif rows_with_ocr and len(rows_with_ocr) >= len(md_rows or []):
         for r_rec in rows_with_ocr:

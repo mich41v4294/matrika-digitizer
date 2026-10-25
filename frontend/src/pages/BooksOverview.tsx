@@ -4,6 +4,7 @@ import {
   AlertCircle,
   BookOpen,
   CheckCircle2,
+  Download,
   Edit3,
   Eye,
   FileSpreadsheet,
@@ -121,6 +122,8 @@ interface CatalogSheetHit {
   street_name: string | null;
   house_number_raw: string | null;
   house_number_conscription: string | null;
+  sheet_type?: string | null;
+  household_owner?: string | null;
   is_blackened: boolean;
   pipeline_status: string;
 }
@@ -228,6 +231,7 @@ export default function BooksOverview({
   );
   const [showFullPageScan, setShowFullPageScan] = useState<boolean>(false);
   const [processingId, setProcessingId] = useState<number | null>(null);
+  const [ocrOwnerBusy, setOcrOwnerBusy] = useState<boolean>(false);
   const [livePipelineState, setLivePipelineState] = useState<PipelineState | null>(null);
   const [scanRefreshVersion, setScanRefreshVersion] = useState<number>(0);
   const [feedbackResetVersion, setFeedbackResetVersion] = useState<number>(0);
@@ -1230,6 +1234,76 @@ export default function BooksOverview({
     ? Math.max(10, Math.min(98, searchProgress.progress_pct || 20))
     : 100;
 
+  const catalogOwnerHouseholdSheets = catalogSheets.filter(
+    (cs) =>
+      cs.sheet_type !== "overview" &&
+      cs.sheet_type !== "municipal_overview" &&
+      Boolean(cs.house_number_conscription || cs.house_number_raw || cs.household_owner)
+  );
+  const catalogOwnerUndoneSheets = catalogOwnerHouseholdSheets.filter(
+    (cs) =>
+      cs.pipeline_status !== "ocr_done" &&
+      cs.pipeline_status !== "extracted" &&
+      cs.pipeline_status !== "matched"
+  );
+
+  const handleOcrCatalogOwnerSheets = async () => {
+    const qVal = searchQuery.trim();
+    if (!qVal) return;
+    setOcrOwnerBusy(true);
+    setActionError(null);
+    try {
+      const targetSheets =
+        catalogOwnerUndoneSheets.length > 0
+          ? catalogOwnerUndoneSheets
+          : catalogOwnerHouseholdSheets;
+      const targetIds = targetSheets.map((s) => s.id).filter(Boolean);
+      const onlyUndone = catalogOwnerUndoneSheets.length > 0;
+      const res = await fetch("/api/census/jobs/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name:
+            lang === "sk"
+              ? `OCR hárkov majiteľa domu: ${qVal}`
+              : `OCR house owner sheets: ${qVal}`,
+          job_type: "owner_linked",
+          municipality: villageFilter.trim() || null,
+          street: streetFilter.trim() || null,
+          owner_query: qVal,
+          include_cross_year: true,
+          sheet_ids: targetIds.length > 0 ? targetIds : undefined,
+          max_sheets: Math.max(targetIds.length, 50),
+          run_pipeline: true,
+          run_mcp: true,
+          only_undone: onlyUndone,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setActionError(
+          err.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa spustiť OCR prepojených hárkov."
+              : "Failed to start OCR for linked sheets.")
+        );
+      } else {
+        refreshStatus();
+        setTimeout(() => {
+          void loadData(true);
+        }, 1200);
+      }
+    } catch {
+      setActionError(
+        lang === "sk"
+          ? "Chyba spojenia pri spúšťaní OCR."
+          : "Network error while starting OCR."
+      );
+    } finally {
+      setOcrOwnerBusy(false);
+    }
+  };
+
   const unifiedSearchSection = (
     <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1314,6 +1388,40 @@ export default function BooksOverview({
             aria-label={lang === "sk" ? "Filtrovať podľa čísla domu" : "Filter by house number"}
             className="w-24 px-3 py-2 rounded-lg border border-stone-300 text-sm"
           />
+
+          {Boolean(searchQuery.trim()) && catalogOwnerHouseholdSheets.length > 0 && (
+            <button
+              type="button"
+              data-testid="unified-search-ocr-owner-sheets-btn"
+              onClick={handleOcrCatalogOwnerSheets}
+              disabled={ocrOwnerBusy}
+              title={
+                lang === "sk"
+                  ? `Stiahnuť a spustiť AI OCR pre všetky prepojené sčítacie hárky, kde je „${searchQuery.trim()}“ uvedený ako majiteľ domu (${catalogOwnerHouseholdSheets.length} hárkov)`
+                  : `Download and run AI OCR for all linked census sheets where "${searchQuery.trim()}" is listed as house owner (${catalogOwnerHouseholdSheets.length} sheets)`
+              }
+              className="px-3 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0 transition"
+            >
+              {ocrOwnerBusy ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+              ) : (
+                <Download className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span>
+                {lang === "sk"
+                  ? `Stiahnuť a OCR hárkov majiteľa (${
+                      catalogOwnerUndoneSheets.length > 0
+                        ? catalogOwnerUndoneSheets.length
+                        : catalogOwnerHouseholdSheets.length
+                    })`
+                  : `Download & OCR owner's sheets (${
+                      catalogOwnerUndoneSheets.length > 0
+                        ? catalogOwnerUndoneSheets.length
+                        : catalogOwnerHouseholdSheets.length
+                    })`}
+              </span>
+            </button>
+          )}
 
           {hasActiveSearchFilters && (
             <button
@@ -1434,13 +1542,42 @@ export default function BooksOverview({
 
       {catalogSheets.length > 0 && (
         <div className="bg-amber-50/70 rounded-xl p-3 border border-amber-200 space-y-2">
-          <div className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
-            <FileSpreadsheet className="w-4 h-4 text-amber-700" />
-            <span>
-              {lang === "sk"
-                ? `Nájdené sčítacie hárky v katalógu Slovakiana (${catalogSheets.length})`
-                : `Matching Cataloged Census Sheets (${catalogSheets.length})`}
-            </span>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+              <FileSpreadsheet className="w-4 h-4 text-amber-700" />
+              <span>
+                {lang === "sk"
+                  ? `Nájdené sčítacie hárky v katalógu Slovakiana (${catalogSheets.length})`
+                  : `Matching Cataloged Census Sheets (${catalogSheets.length})`}
+              </span>
+            </div>
+            {Boolean(searchQuery.trim()) && catalogOwnerHouseholdSheets.length > 0 && (
+              <button
+                type="button"
+                onClick={handleOcrCatalogOwnerSheets}
+                disabled={ocrOwnerBusy}
+                className="px-2.5 py-1 min-h-[28px] rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition"
+              >
+                {ocrOwnerBusy ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+                ) : (
+                  <Download className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>
+                  {lang === "sk"
+                    ? `Stiahnuť a OCR hárkov majiteľa (${
+                        catalogOwnerUndoneSheets.length > 0
+                          ? catalogOwnerUndoneSheets.length
+                          : catalogOwnerHouseholdSheets.length
+                      })`
+                    : `Download & OCR owner's sheets (${
+                        catalogOwnerUndoneSheets.length > 0
+                          ? catalogOwnerUndoneSheets.length
+                          : catalogOwnerHouseholdSheets.length
+                      })`}
+                </span>
+              </button>
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
             {catalogSheets.slice(0, 12).map((cs) => (
@@ -1465,6 +1602,7 @@ export default function BooksOverview({
                   {cs.house_number_conscription || cs.house_number_raw
                     ? ` č. ${cs.house_number_conscription || cs.house_number_raw}`
                     : ""}
+                  {cs.household_owner ? ` (${cs.household_owner})` : ""}
                 </span>
               </Link>
             ))}

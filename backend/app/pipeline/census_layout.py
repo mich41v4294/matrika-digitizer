@@ -577,7 +577,18 @@ def classify_overview_rows_structure(raw_ocr_texts: list[str]) -> str:
     for i in range(1, len(first_ints)):
         if 1 <= (first_ints[i] - first_ints[i - 1]) <= 2:
             seq_increments += 1
+    if seq_increments >= 2 and district_math_rows == 0:
+        return "overview"
     if seq_increments >= 4 and district_math_rows <= 1:
+        return "overview"
+
+    # Signal 2b: Per-house rows where Column 4 ('Dom je obývaný') has '1' and Column 8 has a single-house person count (1..25)
+    house_col4_rows = 0
+    for row_txt in non_empty:
+        r_ints = [int(x) for x in re.findall(r"\b\d{1,3}\b", row_txt)]
+        if len(r_ints) >= 3 and 1 in r_ints[:3] and 1 <= r_ints[-1] <= 25 and max(r_ints) <= 85:
+            house_col4_rows += 1
+    if house_col4_rows >= 3 and district_math_rows == 0:
         return "overview"
 
     # Signal 3: More than 10 data rows without district math rows
@@ -1066,7 +1077,7 @@ def _detect_overview_subpage_col_bounds(
     def_c6_0 = int(pw * (0.472 if is_r else 0.528))
     def_c6_1 = int(pw * (0.656 if is_r else 0.710))
     def_c8_1 = int(pw * (0.784 if is_r else 0.835))
-    if page_half not in ("left", "right") or pw < 1000:
+    if page_half not in ("left", "right") or pw < 800:
         return (
             int(pw * 0.352),
             int(pw * 0.412),
@@ -1134,7 +1145,7 @@ def _overview_row_has_handwriting(
     if roi_u8.size == 0:
         return False
 
-    is_highres_bifolio_half = page_half in ("left", "right") and rw >= 1800
+    is_highres_bifolio_half = page_half in ("left", "right") and rw >= 1600
     if is_highres_bifolio_half:
         if col6_bounds is not None:
             c6_x0 = max(0, min(rw - 10, col6_bounds[0] + 4))
@@ -1176,11 +1187,11 @@ def _overview_row_has_handwriting(
         # Require handwriting strokes in BOTH Column 6 (Owner Name) and Columns 3-5 (House Number / Occupancy)
         # so 'Spolu:' total rows (empty Col 6) and bottom-right commissioner signatures (empty Cols 3-5) are suppressed
         c6_ratio, c6_trans = _metrics_for(c6_u8)
-        if c6_ratio < 0.022 or c6_trans < max(10, int((y1 - y0) * 0.45)):
+        if c6_ratio < 0.022 or c6_trans < max(8, int((y1 - y0) * 0.40)):
             return False
         if c345_u8 is not None and c345_u8.size > 0:
             c345_ratio, c345_trans = _metrics_for(c345_u8)
-            if c345_ratio < 0.004 or c345_trans < max(6, int((y1 - y0) * 0.16)):
+            if c345_ratio < 0.004 or c345_trans < max(5, int((y1 - y0) * 0.14)):
                 return False
         return True
 
@@ -1215,33 +1226,43 @@ def _detect_overview_subpage_lines(
 
     bg = float(np.percentile(strip[::4, ::4], 78)) if strip.size >= 64 else float(np.percentile(strip, 78))
     inv_u8 = np.clip(bg - strip.astype(np.float32), 0.0, 255.0).astype(np.uint8)
-    inv_dil = cv2.dilate(inv_u8, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)))
-    morph_w = max(45, (x1 - x0) // 30)
+    is_bifold = gray.shape[1] > int(h * 1.15) and page_w <= int(gray.shape[1] * 0.60)
+    dil_h = max(3, int(round(h / 1200.0))) if is_bifold else 3
+    inv_dil = cv2.dilate(inv_u8, cv2.getStructuringElement(cv2.MORPH_RECT, (1, dil_h)))
+    morph_w = max(25 if is_bifold else 45, (x1 - x0) // 30)
     horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_w, 1))
     horiz_lines = cv2.morphologyEx(inv_dil, cv2.MORPH_OPEN, horiz_kernel)
 
     proj = _skew_compensated_row_projection(horiz_lines, x0, xc, tan_a, n_slices=12)
-    smooth = np.convolve(proj, np.ones(7) / 7.0, mode="same")
+    smooth_k = (max(5, int(round(h / 520.0)) | 1)) if is_bifold else 7
+    smooth = np.convolve(proj, np.ones(smooth_k) / float(smooth_k), mode="same")
 
     # Overview cover page (Page 1) has administrative header + column rubric down to ~0.24h..0.42h;
     # Continuation pages (Pages 2, 3, 4) have a shorter rubric header down to ~0.10h..0.22h.
     y_min_search = int(h * (0.24 if is_cover_page else 0.10))
     y_max_search = int(h * 0.94)
+    nms_rad = max(8, int(round(h * 0.0055))) if is_bifold else 20
 
     raw_peaks = [
         y
         for y in range(y_min_search, y_max_search)
-        if smooth[y] > 6.5 and smooth[y] == np.max(smooth[max(0, y - 20) : min(h, y + 21)])
+        if smooth[y] > (4.5 if is_bifold else 6.5)
+        and smooth[y] == np.max(smooth[max(0, y - nms_rad) : min(h, y + nms_rad + 1)])
     ]
     diffs = [float(d) for d in np.diff(raw_peaks) if h * 0.025 <= d <= h * 0.048] if len(raw_peaks) >= 2 else []
-    med_step = float(np.median(diffs)) if diffs else float(h * 0.032)
+    med_step = float(np.median(diffs)) if diffs else float(h * (0.0315 if is_bifold else 0.032))
 
     # Locate the strong bottom border of the column-number rubric band (1 2 3 4 5 6 7 8 9)
     start_y: int | None = None
     max_start_y = int(h * (0.48 if is_cover_page else 0.22))
+    min_start_peak = 24.0 if (not is_bifold or h >= 2200) else 20.0
     for y in raw_peaks:
-        if smooth[y] >= 24.0 and y < max_start_y:
-            if any(0.80 * med_step <= (y2 - y) <= 1.50 * med_step for y2 in raw_peaks):
+        if smooth[y] >= min_start_peak and y < max_start_y:
+            if any(
+                (0.80 * med_step <= (y2 - y) <= 1.50 * med_step)
+                or (is_bifold and not is_cover_page and 2.15 * med_step <= (y2 - y) <= 2.65 * med_step)
+                for y2 in raw_peaks
+            ):
                 if start_y is None or smooth[y] >= smooth[start_y] * 0.72:
                     start_y = y
     if start_y is None and not is_cover_page:
@@ -1262,7 +1283,19 @@ def _detect_overview_subpage_lines(
         if lo >= y_max_search:
             break
         sub = smooth[lo : min(y_max_search, hi + 1)]
-        if sub.size == 0 or float(np.max(sub)) < 6.0:
+        if sub.size == 0 or float(np.max(sub)) < (4.5 if is_bifold else 6.0):
+            # If Row 1's bottom line on a continuation page was faint at lower resolution, bridge across to Row 2's bottom line
+            if is_bifold and not is_cover_page and len(selected) == 1:
+                lo2 = int(round(cur + 2.15 * med_step))
+                hi2 = int(round(cur + 2.65 * med_step))
+                sub2 = smooth[lo2 : min(y_max_search, hi2 + 1)]
+                if sub2.size > 0 and float(np.max(sub2)) >= 6.0:
+                    y2_best = lo2 + int(np.argmax(sub2))
+                    r1_y = int(round(cur + (y2_best - cur) * 0.57))
+                    selected.append(r1_y)
+                    selected.append(y2_best)
+                    cur = y2_best
+                    continue
             break
         best_y = lo + int(np.argmax(sub))
         # Once past Row 1's taller Prenos band, prefer a clear grid line peak inside the tight
@@ -1270,12 +1303,12 @@ def _detect_overview_subpage_lines(
         if len(selected) > 1:
             t_lo = max(lo, int(round(cur + 0.91 * med_step)))
             t_hi = min(min(y_max_search, hi + 1), int(round(cur + 1.09 * med_step)) + 1)
-            if t_hi > t_lo and float(np.max(smooth[t_lo:t_hi])) >= 8.0:
+            if t_hi > t_lo and float(np.max(smooth[t_lo:t_hi])) >= (6.5 if is_bifold else 8.0):
                 best_y = t_lo + int(np.argmax(smooth[t_lo:t_hi]))
         selected.append(best_y)
         cur = best_y
         # Cover page (Page 1) of a 4-page bifolio has 17 house rows (18 boundary lines), followed by the bottom subtotal band
-        if is_cover_page and page_w >= 1800 and len(selected) >= 18 and (float(smooth[best_y]) >= 25.0 or best_y >= int(h * 0.89)):
+        if is_cover_page and is_bifold and len(selected) >= 18 and (float(smooth[best_y]) >= 20.0 or best_y >= int(h * 0.89)):
             break
         # Stop at the thick double border above 'Súhrn' on continuation pages
         if not is_cover_page and len(selected) >= 16 and float(smooth[best_y]) >= 55.0:
@@ -1445,7 +1478,7 @@ def slice_census_overview_sheet(
 
                 # Detect whether Column 4 (obývaný) is blank while Column 5 (neobývaný) has '1' and Columns 7-8 are blank
                 col5_uninhabited = False
-                if page_half in ("left", "right") and page_w >= 1800:
+                if page_half in ("left", "right") and page_w >= 900:
                     rh_st = stitched_strip.shape[0]
                     sub_st = stitched_strip[max(2, int(rh_st * 0.18)) : max(6, int(rh_st * 0.82)), :]
                     if sub_st.size > 0:

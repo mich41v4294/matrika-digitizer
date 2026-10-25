@@ -7,6 +7,9 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
+use crate::gazetteer::{
+    canonical_municipality_key_internal, normalize_house_number_internal,
+};
 use crate::{
     apply_digraphs_internal, clean_ascii_alnum, fold_text_diacritics_internal, open_sqlite,
     orthographic_fold_internal, phonetic_skeleton_internal, round4,
@@ -1392,7 +1395,7 @@ pub fn match_catalog_sheets_and_overview_owners_rs(
 
         let mut ovh_sql = String::from(
             "SELECT census_sheet_id, matched_sheet_id, municipality,
-                    owner_name, remarks, raw_ocr_text
+                    owner_name, remarks, raw_ocr_text, house_number, census_year
              FROM censusoverviewhouse WHERE 1=1",
         );
         if let Some(yf) = year_from {
@@ -1409,6 +1412,8 @@ pub fn match_catalog_sheets_and_overview_owners_rs(
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
+            i64,
         )> = Vec::new();
         {
             let mut stmt = conn
@@ -1423,6 +1428,8 @@ pub fn match_catalog_sheets_and_overview_owners_rs(
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
+                        r.get(6)?,
+                        r.get::<_, Option<i64>>(7)?.unwrap_or(1930),
                     ))
                 })
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -1436,9 +1443,9 @@ pub fn match_catalog_sheets_and_overview_owners_rs(
             }
         }
 
-        let ovh_matched_pairs: Vec<(Option<i64>, Option<i64>)> = ovh_rows
+        let ovh_matched_items: Vec<(Option<i64>, Option<i64>, String, Option<String>, i64)> = ovh_rows
             .par_iter()
-            .filter_map(|(csid, msid, _, ov_owner, ov_rem, ov_ocr)| {
+            .filter_map(|(csid, msid, ov_muni, ov_owner, ov_rem, ov_ocr, ov_hn, ov_cyear)| {
                 let mut ok = fuzzy_name_match_score_internal(
                     &q_clean,
                     &[ov_owner.clone(), ov_rem.clone()],
@@ -1462,7 +1469,7 @@ pub fn match_catalog_sheets_and_overview_owners_rs(
                     }
                 }
                 if ok {
-                    Some((*csid, *msid))
+                    Some((*csid, *msid, ov_muni.clone(), ov_hn.clone(), *ov_cyear))
                 } else {
                     None
                 }
@@ -1471,7 +1478,8 @@ pub fn match_catalog_sheets_and_overview_owners_rs(
 
         let mut seen: HashSet<i64> = HashSet::new();
         let mut out_ids: Vec<i64> = Vec::new();
-        for (csid_opt, msid_opt) in ovh_matched_pairs {
+        let mut needed_muni_year_hn: HashSet<(String, i64, String)> = HashSet::new();
+        for (csid_opt, msid_opt, ov_muni, ov_hn, ov_cyear) in ovh_matched_items {
             if let Some(csid) = csid_opt.filter(|&x| x > 0) {
                 if seen.insert(csid) {
                     out_ids.push(csid);
@@ -1480,6 +1488,43 @@ pub fn match_catalog_sheets_and_overview_owners_rs(
             if let Some(msid) = msid_opt.filter(|&x| x > 0) {
                 if seen.insert(msid) {
                     out_ids.push(msid);
+                }
+            }
+            let m_canon = canonical_municipality_key_internal(Some(&ov_muni));
+            let hn_norm = normalize_house_number_internal(ov_hn.as_deref());
+            if !m_canon.is_empty() && !hn_norm.is_empty() {
+                needed_muni_year_hn.insert((m_canon, ov_cyear, hn_norm));
+            }
+        }
+
+        if !needed_muni_year_hn.is_empty() {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, municipality, census_year, house_number, sheet_type
+                     FROM censussheet
+                     WHERE house_number IS NOT NULL AND house_number != ''",
+                )
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        r.get::<_, Option<i64>>(2)?.unwrap_or(1930),
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?
+                            .unwrap_or_else(|| "household".to_string()),
+                    ))
+                })
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            for (sid, muni, cyear, hn, stype) in rows.flatten() {
+                if matches!(stype.as_str(), "overview" | "municipal_overview") {
+                    continue;
+                }
+                let m_canon = canonical_municipality_key_internal(Some(&muni));
+                let hn_norm = normalize_house_number_internal(hn.as_deref());
+                if needed_muni_year_hn.contains(&(m_canon, cyear, hn_norm)) && seen.insert(sid) {
+                    out_ids.push(sid);
                 }
             }
         }

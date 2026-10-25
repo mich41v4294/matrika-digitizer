@@ -768,6 +768,8 @@ pub fn filter_census_sheets_and_previews_rs(
         struct SheetMeta {
             id: i64,
             slovakiana_key: String,
+            census_year: i64,
+            sheet_type: String,
             municipality: String,
             district: Option<String>,
             street_raw: Option<String>,
@@ -780,12 +782,13 @@ pub fn filter_census_sheets_and_previews_rs(
         let mut sheet_by_id: HashMap<i64, SheetMeta> =
             HashMap::with_capacity(candidate_sheet_ids.len());
         let mut available_streets: HashSet<String> = HashSet::new();
+        let mut hh_sheets_by_muni_year_hn: HashMap<(String, i64, String), Vec<i64>> = HashMap::new();
 
         for chunk in candidate_sheet_ids.chunks(450) {
             let ph: Vec<String> = (0..chunk.len()).map(|i| format!("?{}", i + 1)).collect();
             let sql = format!(
                 "SELECT id, slovakiana_key, municipality, district, street_raw,
-                        house_number, household_owner, commissioner_name
+                        house_number, household_owner, commissioner_name, census_year, sheet_type
                  FROM censussheet WHERE id IN ({})",
                 ph.join(", ")
             );
@@ -803,6 +806,10 @@ pub fn filter_census_sheets_and_previews_rs(
                         house_number: r.get(5)?,
                         household_owner: r.get(6)?,
                         commissioner_name: r.get(7)?,
+                        census_year: r.get::<_, Option<i64>>(8)?.unwrap_or(1930),
+                        sheet_type: r
+                            .get::<_, Option<String>>(9)?
+                            .unwrap_or_else(|| "household".to_string()),
                     })
                 })
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -811,6 +818,16 @@ pub fn filter_census_sheets_and_previews_rs(
                     let st_t = st.trim();
                     if !st_t.is_empty() && !matches!(st_t, "-" | "—" | "?") {
                         available_streets.insert(st_t.to_string());
+                    }
+                }
+                if !matches!(sm.sheet_type.as_str(), "overview" | "municipal_overview") {
+                    let m_canon = canonical_municipality_key_internal(Some(&sm.municipality));
+                    let hn_norm = normalize_house_number_internal(sm.house_number.as_deref());
+                    if !m_canon.is_empty() && !hn_norm.is_empty() {
+                        hh_sheets_by_muni_year_hn
+                            .entry((m_canon, sm.census_year, hn_norm))
+                            .or_default()
+                            .push(sm.id);
                     }
                 }
                 sheet_by_id.insert(sm.id, sm);
@@ -982,7 +999,8 @@ pub fn filter_census_sheets_and_previews_rs(
             let mut stmt = conn
                 .prepare(
                     "SELECT census_sheet_id, matched_sheet_id, row_index, house_number,
-                            settlement_name, owner_name, owner_surname_folded, remarks, raw_ocr_text
+                            settlement_name, owner_name, owner_surname_folded, remarks, raw_ocr_text,
+                            municipality, census_year
                      FROM censusoverviewhouse",
                 )
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -998,19 +1016,53 @@ pub fn filter_census_sheets_and_previews_rs(
                         r.get::<_, Option<String>>(6)?,
                         r.get::<_, Option<String>>(7)?,
                         r.get::<_, Option<String>>(8)?,
+                        r.get::<_, Option<String>>(9)?,
+                        r.get::<_, Option<i64>>(10)?.unwrap_or(1930),
                     ))
                 })
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            for (csid, msid_opt, r_idx, hn_opt, sett_opt, own_opt, own_f_opt, rem_opt, ocr_opt) in
-                rows.flatten()
+            for (
+                csid,
+                msid_opt,
+                r_idx,
+                hn_opt,
+                sett_opt,
+                own_opt,
+                own_f_opt,
+                rem_opt,
+                ocr_opt,
+                ov_muni_opt,
+                ov_cyear,
+            ) in rows.flatten()
             {
+                let hn_norm = normalize_house_number_internal(hn_opt.as_deref());
+                let ov_muni_canon = canonical_municipality_key_internal(
+                    ov_muni_opt.as_deref().or_else(|| {
+                        sheet_by_id.get(&csid).map(|sm| sm.municipality.as_str())
+                    }),
+                );
+                let mut target_sids: Vec<i64> = Vec::new();
+                if let Some(msid) = msid_opt {
+                    if cand_set.contains(&msid) {
+                        target_sids.push(msid);
+                    }
+                }
+                if !ov_muni_canon.is_empty() && !hn_norm.is_empty() {
+                    if let Some(cands) =
+                        hh_sheets_by_muni_year_hn.get(&(ov_muni_canon, ov_cyear, hn_norm.clone()))
+                    {
+                        for &cid in cands {
+                            if !target_sids.contains(&cid) {
+                                target_sids.push(cid);
+                            }
+                        }
+                    }
+                }
                 let in_cs = cand_set.contains(&csid);
-                let in_ms = msid_opt.map(|m| cand_set.contains(&m)).unwrap_or(false);
-                if !in_cs && !in_ms {
+                if !in_cs && target_sids.is_empty() {
                     continue;
                 }
-                let hn_norm = normalize_house_number_internal(hn_opt.as_deref());
                 let ov_k = (
                     csid,
                     if !hn_norm.is_empty() {
@@ -1019,7 +1071,7 @@ pub fn filter_census_sheets_and_previews_rs(
                         r_idx.to_string()
                     },
                 );
-                if seen_ovh.insert(ov_k) {
+                if in_cs && seen_ovh.insert(ov_k) {
                     *overview_counts.entry(csid).or_insert(0) += 1;
                     ovh_by_overview_sheet.entry(csid).or_default().push(OvhFilterData {
                         owner_name: own_opt.clone(),
@@ -1035,7 +1087,7 @@ pub fn filter_census_sheets_and_previews_rs(
                         available_streets.insert(st_t.to_string());
                     }
                 }
-                if let Some(msid) = msid_opt {
+                for msid in target_sids {
                     if let Some(ref st) = sett_opt {
                         if !st.is_empty() {
                             matched_ovh_settlements_by_sheet
@@ -1044,7 +1096,7 @@ pub fn filter_census_sheets_and_previews_rs(
                                 .push(st.clone());
                         }
                     }
-                    for tx in [own_opt, rem_opt].into_iter().flatten() {
+                    for tx in [own_opt.clone(), rem_opt.clone()].into_iter().flatten() {
                         if !tx.is_empty() {
                             matched_ovh_owners_by_sheet
                                 .entry(msid)
@@ -1245,6 +1297,7 @@ pub fn filter_census_sheets_and_previews_rs(
 
         let mut previews_by_sheet = serde_json::Map::new();
         let mut fallback_streets = serde_json::Map::new();
+        let mut fallback_owners = serde_json::Map::new();
         for &sid in &filtered_ids {
             if let Some(s_facts) = facts_by_sheet.get(&sid) {
                 let mut p_list = Vec::with_capacity(s_facts.len());
@@ -1275,6 +1328,9 @@ pub fn filter_census_sheets_and_previews_rs(
             if let Some(st_s) = fb_st {
                 fallback_streets.insert(sid.to_string(), Value::String(st_s.clone()));
             }
+            if let Some(own_s) = matched_ovh_owners_by_sheet.get(&sid).and_then(|v| v.first()) {
+                fallback_owners.insert(sid.to_string(), Value::String(own_s.clone()));
+            }
         }
 
         let mut sorted_streets: Vec<String> = available_streets.into_iter().collect();
@@ -1295,6 +1351,7 @@ pub fn filter_census_sheets_and_previews_rs(
             "overview_counts": Value::Object(ov_cnt_map),
             "municipal_districts_counts": Value::Object(md_cnt_map),
             "fallback_streets": Value::Object(fallback_streets),
+            "fallback_owners": Value::Object(fallback_owners),
             "previews_by_sheet": Value::Object(previews_by_sheet),
         });
         serde_json::to_string(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))

@@ -4904,10 +4904,15 @@ async def _extract_census_overview_sheet_locked(
         await ws_manager.broadcast(
             "state",
             {
+                "current_sheet_id": sheet.id,
+                "current_slovakiana_key": sheet.slovakiana_key,
+                "current_sheet_label": f"{sheet.municipality or ''} – Prehľad obvodu {sheet.obvod_number or ''}".strip(" –"),
                 "active_stage": "layout",
                 "active_model": "opencv:census_overview_slicer",
                 "current_scan_id": scan_obj.id,
                 "current_row_id": None,
+                "current_row_index": None,
+                "total_rows": None,
                 "progress_pct": 12 + int(8 * scan_order / max(1, len(scans_to_process))),
                 "message_sk": f"Rozdeľujem riadky prehľadu obvodu ({scan_obj.filename}, strana {scan_order + 1}/{len(scans_to_process)})...",
                 "message_en": f"Slicing district overview rows ({scan_obj.filename}, page {scan_order + 1}/{len(scans_to_process)})...",
@@ -5044,10 +5049,15 @@ async def _extract_census_overview_sheet_locked(
             await ws_manager.broadcast(
                 "state",
                 {
+                    "current_sheet_id": sheet.id,
+                    "current_slovakiana_key": sheet.slovakiana_key,
+                    "current_sheet_label": f"{sheet.municipality or ''} – Prehľad obvodu {sheet.obvod_number or ''}".strip(" –"),
                     "active_stage": "ocr",
                     "active_model": settings.model_ocr,
                     "current_scan_id": scan_obj.id,
                     "current_row_id": r_rec.id,
+                    "current_row_index": row_idx_in_scan,
+                    "total_rows": len(layout_res.rows),
                     "progress_pct": 22
                     + int(
                         48
@@ -5188,10 +5198,15 @@ async def _extract_census_overview_sheet_locked(
         await ws_manager.broadcast(
             "state",
             {
+                "current_sheet_id": sheet.id,
+                "current_slovakiana_key": sheet.slovakiana_key,
+                "current_sheet_label": f"{sheet.municipality or ''} – Prehľad obvodu {sheet.obvod_number or ''}".strip(" –"),
                 "active_stage": "extract",
                 "active_model": settings.model_extract,
                 "current_scan_id": scan_obj.id,
                 "current_row_id": r_rec.id,
+                "current_row_index": item_idx,
+                "total_rows": len(raw_ocr_items),
                 "progress_pct": 72 + int(24 * item_idx / max(1, len(raw_ocr_items))),
                 "message_sk": f"Extrakcia a párovanie domu {item_idx}/{len(raw_ocr_items)} z prehľadu obvodu ({sheet.municipality or ''})...",
                 "message_en": f"Extracting & matching house {item_idx}/{len(raw_ocr_items)} from district overview ({sheet.municipality or ''})...",
@@ -5372,18 +5387,22 @@ async def _extract_census_overview_sheet_locked(
     session.commit()
     for ov_house in created_houses:
         session.refresh(ov_house)
-    await ws_manager.broadcast(
-        "state",
-        {
-            "active_stage": "idle",
-            "active_model": None,
-            "current_scan_id": sheet.front_scan_id,
-            "current_row_id": None,
-            "progress_pct": 100,
-            "message_sk": f"Hotovo! Extrahovaných {len(created_houses)} domov z prehľadu obvodu ({sheet.municipality or ''}).",
-            "message_en": f"Completed! Extracted {len(created_houses)} houses from district overview ({sheet.municipality or ''}).",
-        },
-    )
+    if not ws_manager.latest_state.get("job_id"):
+        await ws_manager.broadcast(
+            "state",
+            {
+                "current_sheet_id": sheet.id,
+                "current_slovakiana_key": sheet.slovakiana_key,
+                "current_sheet_label": f"{sheet.municipality or ''} – Prehľad obvodu {sheet.obvod_number or ''}".strip(" –"),
+                "active_stage": "idle",
+                "active_model": None,
+                "current_scan_id": sheet.front_scan_id,
+                "current_row_id": None,
+                "progress_pct": 100,
+                "message_sk": f"Hotovo! Extrahovaných {len(created_houses)} domov z prehľadu obvodu ({sheet.municipality or ''}).",
+                "message_en": f"Completed! Extracted {len(created_houses)} houses from district overview ({sheet.municipality or ''}).",
+            },
+        )
     return created_houses
 
 
@@ -6095,10 +6114,15 @@ async def _extract_census_municipal_overview_sheet_locked(
         await ws_manager.broadcast(
             "state",
             {
+                "current_sheet_id": sheet.id,
+                "current_slovakiana_key": sheet.slovakiana_key,
+                "current_sheet_label": f"{sheet.municipality or ''} – Obecný prehľad".strip(" –"),
                 "active_stage": "layout",
                 "active_model": "opencv:census_overview_slicer",
                 "current_scan_id": scan_obj.id,
                 "current_row_id": None,
+                "current_row_index": None,
+                "total_rows": None,
                 "progress_pct": 12 + int(8 * scan_order / max(1, len(scans_to_process))),
                 "message_sk": f"Rozdeľujem riadky obecného prehľadu ({scan_obj.filename}, strana {scan_order + 1}/{len(scans_to_process)})...",
                 "message_en": f"Slicing municipal overview rows ({scan_obj.filename}, page {scan_order + 1}/{len(scans_to_process)})...",
@@ -6234,10 +6258,15 @@ async def _extract_census_municipal_overview_sheet_locked(
             await ws_manager.broadcast(
                 "state",
                 {
+                    "current_sheet_id": sheet.id,
+                    "current_slovakiana_key": sheet.slovakiana_key,
+                    "current_sheet_label": f"{sheet.municipality or ''} – Obecný prehľad".strip(" –"),
                     "active_stage": "ocr",
                     "active_model": settings.model_ocr,
                     "current_scan_id": scan_obj.id,
                     "current_row_id": r_rec.id,
+                    "current_row_index": row_idx_in_scan,
+                    "total_rows": len(layout_res.rows),
                     "progress_pct": 22
                     + int(
                         48
@@ -6338,10 +6367,15 @@ async def _extract_census_municipal_overview_sheet_locked(
         await ws_manager.broadcast(
             "state",
             {
+                "current_sheet_id": sheet.id,
+                "current_slovakiana_key": sheet.slovakiana_key,
+                "current_sheet_label": f"{sheet.municipality or ''} – Obecný prehľad".strip(" –"),
                 "active_stage": "extract",
                 "active_model": settings.model_extract,
                 "current_scan_id": scan_obj.id,
                 "current_row_id": r_rec.id,
+                "current_row_index": item_idx,
+                "total_rows": len(raw_ocr_items),
                 "progress_pct": 72 + int(22 * item_idx / max(1, len(raw_ocr_items))),
                 "message_sk": f"Extrakcia sčítacieho obvodu {item_idx}/{len(raw_ocr_items)} z obecného prehľadu ({sheet.municipality or ''})...",
                 "message_en": f"Extracting census district {item_idx}/{len(raw_ocr_items)} from municipal overview ({sheet.municipality or ''})...",
@@ -6489,18 +6523,22 @@ async def _extract_census_municipal_overview_sheet_locked(
     session.commit()
     for dr in created_rows:
         session.refresh(dr)
-    await ws_manager.broadcast(
-        "state",
-        {
-            "active_stage": "idle",
-            "active_model": None,
-            "current_scan_id": sheet.front_scan_id,
-            "current_row_id": None,
-            "progress_pct": 100,
-            "message_sk": f"Hotovo! Extrahovaných {len(district_only_rows)} obvodov z obecného prehľadu ({sheet.municipality or ''}).",
-            "message_en": f"Completed! Extracted {len(district_only_rows)} districts from municipal overview ({sheet.municipality or ''}).",
-        },
-    )
+    if not ws_manager.latest_state.get("job_id"):
+        await ws_manager.broadcast(
+            "state",
+            {
+                "current_sheet_id": sheet.id,
+                "current_slovakiana_key": sheet.slovakiana_key,
+                "current_sheet_label": f"{sheet.municipality or ''} – Obecný prehľad".strip(" –"),
+                "active_stage": "idle",
+                "active_model": None,
+                "current_scan_id": sheet.front_scan_id,
+                "current_row_id": None,
+                "progress_pct": 100,
+                "message_sk": f"Hotovo! Extrahovaných {len(district_only_rows)} obvodov z obecného prehľadu ({sheet.municipality or ''}).",
+                "message_en": f"Completed! Extracted {len(district_only_rows)} districts from municipal overview ({sheet.municipality or ''}).",
+            },
+        )
     return created_rows
 
 

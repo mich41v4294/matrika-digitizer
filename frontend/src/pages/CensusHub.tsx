@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import type { LinkedHouseSheet } from "../api";
+import { emitClientOcrNotification, type PipelineState } from "../App";
 import { useFeatureFlags } from "../featureFlags";
 import { foldText, matchesPersonNameQuery } from "../utils/fuzzyName";
 import {
@@ -86,6 +87,10 @@ interface CensusJob {
   current_page: number;
   error_message: string | null;
   is_paused_runtime?: boolean;
+  current_sheet_id?: number | null;
+  current_slovakiana_key?: string | null;
+  current_sheet_label?: string | null;
+  current_sheet_index?: number | null;
 }
 
 interface ExtractedPersonPreview {
@@ -611,6 +616,30 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   const hasLoadedCensusOnceRef = useRef<boolean>(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [processingSheetId, setProcessingSheetId] = useState<string | null>(null);
+  const [livePipelineState, setLivePipelineState] = useState<PipelineState | null>(null);
+  const [localSheetProgress, setLocalSheetProgress] = useState<{
+    sheetKey: string;
+    active_stage: string;
+    active_model: string | null;
+    progress_pct: number;
+    current_row_index: number | null;
+    total_rows: number | null;
+    message_sk: string;
+    message_en: string;
+    started_at_ms: number;
+    elapsed_sec: number;
+  } | null>(null);
+  const [recentlyCompletedSheets, setRecentlyCompletedSheets] = useState<
+    Record<
+      string,
+      {
+        message_sk: string;
+        message_en: string;
+        elapsed_sec: number;
+        finished_at_ms: number;
+      }
+    >
+  >({});
 
   const selectedYearTag = selectedYearFilter === "1940" ? "10003" : "10001";
 
@@ -630,8 +659,42 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     }
   };
 
-  // Listen for live search_progress broadcasts for census scope
+  // Listen for live search_progress, state, and sheet_updated broadcasts
   useEffect(() => {
+    const handleCustomState = (e: Event) => {
+      const custom = e as CustomEvent<PipelineState>;
+      if (custom.detail) {
+        const d = custom.detail;
+        setLivePipelineState(d);
+        if (d.active_stage && d.active_stage !== "idle") {
+          setLocalSheetProgress((prev) => {
+            if (!prev) return prev;
+            if (
+              d.current_slovakiana_key &&
+              d.current_slovakiana_key !== prev.sheetKey
+            ) {
+              return prev;
+            }
+            return {
+              ...prev,
+              active_stage: d.active_stage,
+              active_model: d.active_model ?? prev.active_model,
+              progress_pct: Math.max(prev.progress_pct, Math.min(99, Number(d.progress_pct || 12))),
+              current_row_index: d.current_row_index ?? prev.current_row_index,
+              total_rows: d.total_rows ?? prev.total_rows,
+              message_sk: d.message_sk || prev.message_sk,
+              message_en: d.message_en || prev.message_en,
+            };
+          });
+        }
+      }
+    };
+    const handleSheetUpdated = () => {
+      void loadWorkspaceData(true);
+    };
+    window.addEventListener("matrika:pipeline-state", handleCustomState);
+    window.addEventListener("matrika:sheet-updated", handleSheetUpdated);
+
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${proto}//${window.location.host}/ws/pipeline`;
     let ws: WebSocket | null = null;
@@ -652,6 +715,54 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 elapsed_ms: Number(d.elapsed_ms ?? prev.elapsed_ms),
               }));
             }
+          } else if (msg.type === "state" && msg.data) {
+            const d = msg.data as PipelineState;
+            setLivePipelineState(d);
+            if (d.active_stage && d.active_stage !== "idle") {
+              setLocalSheetProgress((prev) => {
+                if (!prev) return prev;
+                if (
+                  d.current_slovakiana_key &&
+                  d.current_slovakiana_key !== prev.sheetKey
+                ) {
+                  return prev;
+                }
+                return {
+                  ...prev,
+                  active_stage: d.active_stage,
+                  active_model: d.active_model ?? prev.active_model,
+                  progress_pct: Math.max(prev.progress_pct, Math.min(99, Number(d.progress_pct || 12))),
+                  current_row_index: d.current_row_index ?? prev.current_row_index,
+                  total_rows: d.total_rows ?? prev.total_rows,
+                  message_sk: d.message_sk || prev.message_sk,
+                  message_en: d.message_en || prev.message_en,
+                };
+              });
+            }
+          } else if (msg.type === "sheet_updated" && msg.data) {
+            const skKey = String(msg.data.slovakiana_key || "");
+            if (skKey) {
+              const cnt =
+                msg.data.persons_count ??
+                msg.data.overview_houses_count ??
+                msg.data.municipal_districts_count;
+              setRecentlyCompletedSheets((prev) => ({
+                ...prev,
+                [skKey]: {
+                  message_sk:
+                    cnt != null
+                      ? `AI OCR dokončené (${cnt} záznamov)`
+                      : "AI OCR čítanie hárku dokončené",
+                  message_en:
+                    cnt != null
+                      ? `AI OCR completed (${cnt} records)`
+                      : "Sheet AI OCR completed",
+                  elapsed_sec: 0,
+                  finished_at_ms: Date.now(),
+                },
+              }));
+            }
+            void loadWorkspaceData(true);
           }
         } catch {
           // ignore
@@ -661,9 +772,30 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       // ignore
     }
     return () => {
+      window.removeEventListener("matrika:pipeline-state", handleCustomState);
+      window.removeEventListener("matrika:sheet-updated", handleSheetUpdated);
       if (ws) ws.close();
     };
   }, []);
+
+  // Smooth client-side ticker while single sheet OCR is running in CensusHub
+  useEffect(() => {
+    if (!processingSheetId) return;
+    const ticker = window.setInterval(() => {
+      setLocalSheetProgress((prev) => {
+        if (!prev) return prev;
+        const elapsed = Math.max(1, Math.round((Date.now() - prev.started_at_ms) / 1000));
+        const step = prev.progress_pct < 35 ? 2 : prev.progress_pct < 75 ? 1 : 0.5;
+        const nextPct = Math.min(94, Math.floor(prev.progress_pct + step));
+        return {
+          ...prev,
+          elapsed_sec: elapsed,
+          progress_pct: Math.max(prev.progress_pct, nextPct),
+        };
+      });
+    }, 650);
+    return () => window.clearInterval(ticker);
+  }, [processingSheetId]);
 
   // Smooth client-side progress ticker while a census search request is in flight
   useEffect(() => {
@@ -1386,17 +1518,290 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   };
 
   const handleProcessSingleSheet = async (sheetKey: string) => {
+    const startMs = Date.now();
     setProcessingSheetId(sheetKey);
+    setRecentlyCompletedSheets((prev) => {
+      const next = { ...prev };
+      delete next[sheetKey];
+      return next;
+    });
+    setLocalSheetProgress({
+      sheetKey,
+      active_stage: "census_download",
+      active_model: "glm-ocr",
+      progress_pct: 10,
+      current_row_index: null,
+      total_rows: null,
+      message_sk: `Spúšťam sťahovanie a AI OCR čítanie hárku (${sheetKey})…`,
+      message_en: `Starting scan download and AI OCR for sheet (${sheetKey})…`,
+      started_at_ms: startMs,
+      elapsed_sec: 0,
+    });
     try {
-      await fetch(
+      const r = await fetch(
         `/api/census/sheets/${sheetKey}/download-and-process?run_pipeline=true&run_mcp=true`,
         { method: "POST" }
       );
+      const resData = r.ok ? await r.json().catch(() => ({})) : {};
+      const elapsedSec = Math.max(1, Math.round((Date.now() - startMs) / 1000));
+      const pRes = resData?.pipeline || {};
+      const rowsProc = Number(pRes.rows_processed ?? resData?.rows_processed ?? 0);
+      const personsCnt = pRes.persons_count;
+      const housesCnt = pRes.overview_houses_count;
+      const distsCnt = pRes.municipal_districts_count;
+
+      const summarySk =
+        personsCnt != null
+          ? `AI OCR dokončené: ${personsCnt} osôb (${rowsProc} riadkov)`
+          : housesCnt != null
+          ? `AI OCR dokončené: ${housesCnt} domov v prehľade`
+          : distsCnt != null
+          ? `AI OCR dokončené: ${distsCnt} obvodov`
+          : rowsProc > 0
+          ? `AI OCR dokončené (${rowsProc} riadkov)`
+          : "AI OCR čítanie hárku bolo úspešne dokončené.";
+      const summaryEn =
+        personsCnt != null
+          ? `AI OCR completed: ${personsCnt} people (${rowsProc} rows)`
+          : housesCnt != null
+          ? `AI OCR completed: ${housesCnt} houses in overview`
+          : distsCnt != null
+          ? `AI OCR completed: ${distsCnt} districts`
+          : rowsProc > 0
+          ? `AI OCR completed (${rowsProc} rows)`
+          : "Sheet AI OCR completed successfully.";
+
+      if (r.ok && !resData?.error && pRes?.status !== "error") {
+        setRecentlyCompletedSheets((prev) => ({
+          ...prev,
+          [sheetKey]: {
+            message_sk: summarySk,
+            message_en: summaryEn,
+            elapsed_sec: elapsedSec,
+            finished_at_ms: Date.now(),
+          },
+        }));
+        emitClientOcrNotification({
+          status: "completed",
+          kind: "census_sheet",
+          slovakiana_key: sheetKey,
+          rows_processed: rowsProc,
+          persons_count: personsCnt,
+          houses_count: housesCnt,
+          districts_count: distsCnt,
+          duration_sec: elapsedSec,
+          title_sk: "Sčítací hárok prečítaný",
+          title_en: "Census sheet OCR completed",
+          message_sk: `${summarySk} (${sheetKey})`,
+          message_en: `${summaryEn} (${sheetKey})`,
+          target_url: `/scitacie-harky/${sheetKey}`,
+        });
+      }
       await loadWorkspaceData();
       refreshStatus();
     } finally {
       setProcessingSheetId(null);
+      setLocalSheetProgress(null);
     }
+  };
+
+  const getAttachedSheetState = (sheetKey?: string | null, sheetId?: number | null) => {
+    if (!sheetKey && !sheetId) return null;
+    const isLocalActive = Boolean(sheetKey && processingSheetId === sheetKey);
+    const isBackendActive = Boolean(
+      livePipelineState?.active_stage &&
+        livePipelineState.active_stage !== "idle" &&
+        ((sheetKey && livePipelineState.current_slovakiana_key === sheetKey) ||
+          (sheetId != null && livePipelineState.current_sheet_id === sheetId))
+    );
+    if (isLocalActive || isBackendActive) {
+      const stage =
+        (isBackendActive ? livePipelineState?.active_stage : null) ||
+        localSheetProgress?.active_stage ||
+        "ocr";
+      const model =
+        (isBackendActive ? livePipelineState?.active_model : null) ||
+        localSheetProgress?.active_model ||
+        null;
+      const pct = Math.max(
+        8,
+        Math.min(
+          99,
+          Math.max(
+            isBackendActive ? Number(livePipelineState?.progress_pct || 12) : 0,
+            isLocalActive ? Number(localSheetProgress?.progress_pct || 10) : 0
+          )
+        )
+      );
+      const rowIdx =
+        (isBackendActive ? livePipelineState?.current_row_index : null) ??
+        localSheetProgress?.current_row_index ??
+        null;
+      const totRows =
+        (isBackendActive ? livePipelineState?.total_rows : null) ??
+        localSheetProgress?.total_rows ??
+        null;
+      const msgSk =
+        (isBackendActive ? livePipelineState?.message_sk : null) ||
+        localSheetProgress?.message_sk ||
+        "Prebieha AI OCR čítanie rukopisu…";
+      const msgEn =
+        (isBackendActive ? livePipelineState?.message_en : null) ||
+        localSheetProgress?.message_en ||
+        "Running handwriting AI OCR…";
+      const elapsedSec = localSheetProgress?.elapsed_sec || 0;
+      return {
+        active: true,
+        completed: false,
+        stage,
+        model,
+        pct,
+        rowIdx,
+        totRows,
+        msgSk,
+        msgEn,
+        elapsedSec,
+      };
+    }
+    if (sheetKey && recentlyCompletedSheets[sheetKey]) {
+      const comp = recentlyCompletedSheets[sheetKey];
+      return {
+        active: false,
+        completed: true,
+        stage: "idle",
+        model: null,
+        pct: 100,
+        rowIdx: null,
+        totRows: null,
+        msgSk: comp.message_sk,
+        msgEn: comp.message_en,
+        elapsedSec: comp.elapsed_sec,
+      };
+    }
+    return null;
+  };
+
+  const renderAttachedSheetProgress = (
+    sheetKey?: string | null,
+    sheetId?: number | null
+  ) => {
+    const st = getAttachedSheetState(sheetKey, sheetId);
+    if (!st) return null;
+    const stageOrder = ["census_download", "layout", "ocr", "extract", "mcp_match"];
+    const currentStageIdx = st.active ? Math.max(0, stageOrder.indexOf(st.stage)) : stageOrder.length;
+    const miniStages = [
+      { key: "census_download", sk: "1. Skeny", en: "1. Scans" },
+      { key: "layout", sk: "2. Riadky", en: "2. Rows" },
+      { key: "ocr", sk: "3. OCR", en: "3. OCR" },
+      { key: "extract", sk: "4. Extrakcia", en: "4. Extract" },
+      { key: "mcp_match", sk: "5. FS", en: "5. FS" },
+    ];
+
+    return (
+      <div
+        data-testid={`attached-sheet-progress-${sheetKey || sheetId}`}
+        className={`rounded-lg px-2.5 py-2 border space-y-1.5 text-xs transition-all ${
+          st.active
+            ? "bg-amber-50/95 border-amber-400 shadow-2xs"
+            : "bg-emerald-50/95 border-emerald-300"
+        }`}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-1.5">
+          <div className="flex items-center gap-1.5 font-bold text-stone-900 min-w-0">
+            {st.active ? (
+              <RefreshCw className="w-3.5 h-3.5 text-amber-700 animate-spin shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+            )}
+            <span className="truncate">
+              {lang === "sk" ? st.msgSk : st.msgEn}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {st.totRows != null && st.totRows > 0 && st.active && (
+              <span className="px-1.5 py-0.5 rounded bg-white border border-amber-300 text-amber-950 text-[11px] font-bold">
+                {lang === "sk"
+                  ? `Riadok ${st.rowIdx || 1}/${st.totRows}`
+                  : `Row ${st.rowIdx || 1}/${st.totRows}`}
+              </span>
+            )}
+            {st.elapsedSec > 0 && (
+              <span className="text-stone-600 font-semibold text-[11px]">
+                {st.elapsedSec} s
+              </span>
+            )}
+            <span
+              className={`px-2 py-0.5 rounded-full font-bold text-[11px] ${
+                st.active ? "bg-amber-600 text-white" : "bg-emerald-700 text-white"
+              }`}
+            >
+              {st.pct}%
+            </span>
+            {!st.active && sheetKey && (
+              <button
+                type="button"
+                onClick={() =>
+                  setRecentlyCompletedSheets((prev) => {
+                    const next = { ...prev };
+                    delete next[sheetKey];
+                    return next;
+                  })
+                }
+                title={lang === "sk" ? "Skryť" : "Dismiss"}
+                className="p-0.5 rounded hover:bg-emerald-200/70 text-stone-600 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div
+          role="progressbar"
+          aria-valuenow={st.pct}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          className={`w-full rounded-full h-2 overflow-hidden ${
+            st.active ? "bg-amber-200/80" : "bg-emerald-200"
+          }`}
+        >
+          <div
+            className={`h-full transition-all duration-300 ${
+              st.active ? "bg-amber-600 animate-pulse" : "bg-emerald-600"
+            }`}
+            style={{ width: `${st.pct}%` }}
+          />
+        </div>
+
+        {st.active && (
+          <div className="flex flex-wrap items-center gap-1 pt-0.5">
+            {miniStages.map((ms, idx) => {
+              const isDone = idx < currentStageIdx;
+              const isCurrent = idx === currentStageIdx;
+              return (
+                <span
+                  key={ms.key}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                    isCurrent
+                      ? "bg-amber-600 text-white"
+                      : isDone
+                      ? "bg-emerald-100 text-emerald-900 border border-emerald-300"
+                      : "bg-white/70 text-stone-500 border border-stone-200"
+                  }`}
+                >
+                  {lang === "sk" ? ms.sk : ms.en}
+                </span>
+              );
+            })}
+            {st.model && (
+              <span className="ml-auto px-1.5 py-0.5 rounded bg-stone-900 text-amber-300 font-mono text-[10px]">
+                {st.model}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const slovakianaMunicipalityUrl = useMemo(() => {
@@ -1470,6 +1875,29 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     () => activeJobs.find((j) => j.id !== dismissedActiveJobId) || null,
     [activeJobs, dismissedActiveJobId]
   );
+
+  // Fast poll of /api/census/jobs while any job is running so progress updates in real time
+  useEffect(() => {
+    if (runningJobsCount === 0 && !processingSheetId) return;
+    const fastTimer = window.setInterval(async () => {
+      if (document.visibilityState === "hidden") return;
+      try {
+        const jr = await fetch("/api/census/jobs");
+        if (jr.ok) {
+          const jd = await jr.json();
+          const nextJobs: CensusJob[] = jd.jobs || [];
+          setJobs(nextJobs);
+          if (nextJobs.filter((j) => j.status === "running").length === 0 && runningJobsCount > 0) {
+            void loadWorkspaceData(true);
+            refreshStatus();
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }, 1800);
+    return () => window.clearInterval(fastTimer);
+  }, [runningJobsCount, processingSheetId]);
 
   const [locationQuickFilter, setLocationQuickFilter] = useState<string>(() => {
     if (selectedMunicipality) return selectedMunicipality;
@@ -2423,8 +2851,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
 
           {/* Slim 1-Line Active Job Progress Bar (only when running or paused and not dismissed) */}
           {activeRunningJob && (
-            <div className="px-3 py-1.5 rounded-lg bg-amber-50/80 border border-amber-200 flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex items-center gap-2 min-w-0 flex-1">
+            <div className="px-3 py-2 rounded-lg bg-amber-50/90 border border-amber-300 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1">
                 {activeRunningJob.status === "running" ? (
                   <RefreshCw className="w-3.5 h-3.5 text-amber-600 animate-spin shrink-0" />
                 ) : (
@@ -2433,31 +2861,57 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 <span className="font-bold text-stone-900 truncate">
                   {activeRunningJob.name}
                 </span>
-                <div className="w-24 sm:w-32 h-1.5 bg-amber-200/80 rounded-full overflow-hidden shrink-0">
+                {(activeRunningJob.current_slovakiana_key ||
+                  livePipelineState?.current_slovakiana_key) && (
+                  <Link
+                    to={`/scitacie-harky/${
+                      activeRunningJob.current_slovakiana_key ||
+                      livePipelineState?.current_slovakiana_key
+                    }`}
+                    className="px-2 py-0.5 rounded bg-amber-200/90 hover:bg-amber-300 text-stone-900 border border-amber-400 font-mono font-bold text-[11px] inline-flex items-center gap-1 shrink-0"
+                  >
+                    <FileSpreadsheet className="w-3 h-3 text-amber-800" />
+                    <span>
+                      {activeRunningJob.current_slovakiana_key ||
+                        livePipelineState?.current_slovakiana_key}
+                      {activeRunningJob.current_sheet_label
+                        ? ` · ${activeRunningJob.current_sheet_label}`
+                        : ""}
+                    </span>
+                  </Link>
+                )}
+                <div className="w-28 sm:w-36 h-2 bg-amber-200/80 rounded-full overflow-hidden shrink-0">
                   <div
                     className="h-full bg-amber-600 rounded-full transition-all"
                     style={{
-                      width: `${Math.min(
-                        100,
-                        Math.round(
-                          ((activeRunningJob.job_type === "catalog_harvest"
-                            ? activeRunningJob.cataloged_sheets
-                            : Math.max(
-                                activeRunningJob.processed_sheets,
-                                activeRunningJob.downloaded_sheets
-                              )) /
-                            Math.max(
-                              activeRunningJob.total_sheets || 0,
-                              activeRunningJob.cataloged_sheets || 0,
-                              1
-                            )) *
-                            100
+                      width: `${Math.max(
+                        8,
+                        Math.min(
+                          100,
+                          Math.round(
+                            ((activeRunningJob.job_type === "catalog_harvest"
+                              ? activeRunningJob.cataloged_sheets
+                              : Math.max(
+                                  activeRunningJob.processed_sheets,
+                                  activeRunningJob.downloaded_sheets
+                                ) +
+                                (livePipelineState?.active_stage &&
+                                livePipelineState.active_stage !== "idle"
+                                  ? (livePipelineState.progress_pct || 10) / 100
+                                  : 0)) /
+                              Math.max(
+                                activeRunningJob.total_sheets || 0,
+                                activeRunningJob.cataloged_sheets || 0,
+                                1
+                              )) *
+                              100
+                          )
                         )
                       )}%`,
                     }}
                   />
                 </div>
-                <span className="text-stone-600 truncate">
+                <span className="text-stone-700 truncate">
                   Katalóg: <strong>{activeRunningJob.cataloged_sheets}</strong> · Stiahnuté:{" "}
                   <strong>
                     {activeRunningJob.downloaded_sheets}
@@ -3045,6 +3499,10 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                           </div>
                         </div>
 
+                        <div className="w-full">
+                          {renderAttachedSheetProgress(mov.slovakiana_id, mov.id)}
+                        </div>
+
                         <div className="flex flex-wrap items-center gap-2">
                           <Link
                             to={buildSheetDetailLink(mov.slovakiana_id)}
@@ -3060,16 +3518,20 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                           <button
                             type="button"
                             onClick={() => handleProcessSingleSheet(mov.slovakiana_id)}
-                            disabled={processingSheetId === mov.slovakiana_id}
+                            disabled={Boolean(getAttachedSheetState(mov.slovakiana_id, mov.id)?.active)}
                             className="px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                           >
-                            {processingSheetId === mov.slovakiana_id ? (
+                            {getAttachedSheetState(mov.slovakiana_id, mov.id)?.active ? (
                               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                             ) : (
                               <Download className="w-3.5 h-3.5" />
                             )}
                             <span>
-                              {lang === "sk" ? "Prečítať OCR" : "Read OCR"}
+                              {getAttachedSheetState(mov.slovakiana_id, mov.id)?.active
+                                ? `OCR (${getAttachedSheetState(mov.slovakiana_id, mov.id)?.pct}%)…`
+                                : lang === "sk"
+                                ? "Prečítať OCR"
+                                : "Read OCR"}
                             </span>
                           </button>
                         </div>
@@ -3175,6 +3637,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                               </div>
                             </div>
 
+                            {renderAttachedSheetProgress(ov.slovakiana_id, ov.id)}
+
                             <div className="flex items-center justify-between gap-2 pt-2 border-t border-purple-200/70">
                               <Link
                                 to={buildSheetDetailLink(ov.slovakiana_id)}
@@ -3190,16 +3654,18 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                               <button
                                 type="button"
                                 onClick={() => handleProcessSingleSheet(ov.slovakiana_id)}
-                                disabled={processingSheetId === ov.slovakiana_id}
+                                disabled={Boolean(getAttachedSheetState(ov.slovakiana_id, ov.id)?.active)}
                                 className="px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                               >
-                                {processingSheetId === ov.slovakiana_id ? (
+                                {getAttachedSheetState(ov.slovakiana_id, ov.id)?.active ? (
                                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                                 ) : (
                                   <Download className="w-3.5 h-3.5" />
                                 )}
                                 <span>
-                                  {lang === "sk"
+                                  {getAttachedSheetState(ov.slovakiana_id, ov.id)?.active
+                                    ? `OCR (${getAttachedSheetState(ov.slovakiana_id, ov.id)?.pct}%)…`
+                                    : lang === "sk"
                                     ? "Prečítať OCR obvodu"
                                     : "Read district OCR"}
                                 </span>
@@ -3417,6 +3883,10 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                                     entry.extracted_members ||
                                       entry.sheet?.extracted_persons_preview
                                   )}
+                                  {renderAttachedSheetProgress(
+                                    entry.slovakiana_key,
+                                    entry.sheet_id
+                                  )}
                                 </div>
                               ) : (
                                 <span className="text-stone-600 italic text-xs">
@@ -3448,18 +3918,36 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                                     onClick={() =>
                                       handleProcessSingleSheet(entry.slovakiana_key!)
                                     }
-                                    disabled={
-                                      processingSheetId === entry.slovakiana_key
-                                    }
+                                    disabled={Boolean(
+                                      getAttachedSheetState(
+                                        entry.slovakiana_key,
+                                        entry.sheet_id
+                                      )?.active
+                                    )}
                                     title="Spustiť AI OCR pre tento dom"
                                     className="px-2.5 py-1.5 min-h-[32px] rounded-md bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
                                   >
-                                    {processingSheetId === entry.slovakiana_key ? (
+                                    {getAttachedSheetState(
+                                      entry.slovakiana_key,
+                                      entry.sheet_id
+                                    )?.active ? (
                                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                                     ) : (
                                       <Download className="w-3.5 h-3.5" />
                                     )}
-                                    <span>OCR</span>
+                                    <span>
+                                      {getAttachedSheetState(
+                                        entry.slovakiana_key,
+                                        entry.sheet_id
+                                      )?.active
+                                        ? `OCR (${
+                                            getAttachedSheetState(
+                                              entry.slovakiana_key,
+                                              entry.sheet_id
+                                            )?.pct
+                                          }%)`
+                                        : "OCR"}
+                                    </span>
                                   </button>
                                 </div>
                               ) : entry.overview_sheet_id ? (
@@ -3649,7 +4137,9 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                       <div
                         key={s.slovakiana_id}
                         className={`rounded-xl p-3.5 border flex flex-col justify-between gap-3 transition ${
-                          isMunicipalOverview
+                          getAttachedSheetState(s.slovakiana_id, s.id)?.active
+                            ? "bg-amber-50/70 border-amber-500 ring-2 ring-amber-400/70 shadow-sm"
+                            : isMunicipalOverview
                             ? "bg-indigo-50/40 border-indigo-200 hover:border-indigo-500"
                             : isOverview
                             ? "bg-purple-50/40 border-purple-200 hover:border-purple-500"
@@ -3806,6 +4296,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                           </div>
                         )}
 
+                        {renderAttachedSheetProgress(s.slovakiana_id, s.id)}
+
                         <div className="flex items-center justify-between gap-2 pt-1 border-t border-stone-200/80">
                           <Link
                             to={buildSheetDetailLink(s.slovakiana_id, {
@@ -3824,18 +4316,24 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                             onClick={() =>
                               handleProcessSingleSheet(s.slovakiana_id)
                             }
-                            disabled={processingSheetId === s.slovakiana_id}
+                            disabled={Boolean(
+                              getAttachedSheetState(s.slovakiana_id, s.id)?.active
+                            )}
                             className="px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                           >
-                            {processingSheetId === s.slovakiana_id ? (
+                            {getAttachedSheetState(s.slovakiana_id, s.id)?.active ? (
                               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                             ) : (
                               <Download className="w-3.5 h-3.5" />
                             )}
                             <span>
-                              {s.download_status === "downloaded" ||
-                              s.download_status === "extracted" ||
-                              s.download_status === "matched"
+                              {getAttachedSheetState(s.slovakiana_id, s.id)?.active
+                                ? `OCR (${
+                                    getAttachedSheetState(s.slovakiana_id, s.id)?.pct
+                                  }%)…`
+                                : s.download_status === "downloaded" ||
+                                  s.download_status === "extracted" ||
+                                  s.download_status === "matched"
                                 ? lang === "sk"
                                   ? "Znova prečítať OCR"
                                   : "Re-run OCR"

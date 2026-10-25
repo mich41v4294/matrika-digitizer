@@ -209,6 +209,32 @@ async def run_layout_for_scan_async(session: Session, scan: ScanImage) -> list[R
     return _persist_layout_result(session, scan, layout_res, dur_ms)
 
 
+def _sheet_context_dict(sheet: CensusSheet | None, fallback_label: str = "") -> dict[str, Any]:
+    if not sheet:
+        return {
+            "current_sheet_id": None,
+            "current_slovakiana_key": None,
+            "current_sheet_label": fallback_label or None,
+        }
+    muni = (sheet.municipality or "").strip()
+    if sheet.sheet_type == "municipal_overview":
+        label = f"{muni} – Obecný prehľad".strip(" –")
+    elif sheet.sheet_type == "overview":
+        obv = f" č. {sheet.obvod_number}" if sheet.obvod_number else ""
+        label = f"{muni} – Prehľad obvodu{obv}".strip(" –")
+    elif sheet.house_number:
+        label = f"{muni} – dom č. {sheet.house_number}".strip(" –")
+    elif sheet.sheet_number:
+        label = f"{muni} – hárok č. {sheet.sheet_number}".strip(" –")
+    else:
+        label = muni or sheet.slovakiana_key or fallback_label
+    return {
+        "current_sheet_id": sheet.id,
+        "current_slovakiana_key": sheet.slovakiana_key,
+        "current_sheet_label": label or sheet.slovakiana_key,
+    }
+
+
 async def process_single_scan_pipeline(
     scan_id: int,
     *,
@@ -225,25 +251,27 @@ async def process_single_scan_pipeline(
     Stage 4: All underdog-saluki-27b-1.0 extraction calls while saluki stays warm
     Stage 5: FamilySearch MCP place + record matching
     """
+    t0 = time.perf_counter()
     with Session(engine) as session:
         scan = session.get(ScanImage, scan_id)
         if not scan:
             raise ValueError(f"Scan {scan_id} not found")
-        if finalize_idle and scan.census_sheet_id:
-            parent_sh = session.get(CensusSheet, scan.census_sheet_id)
-            if parent_sh and parent_sh.sheet_type in ("overview", "municipal_overview"):
-                res_ov = await process_census_sheet_pipeline(
-                    scan.census_sheet_id,
-                    max_rows=max_rows,
-                    run_mcp=run_mcp,
-                )
-                return {
-                    "scan_id": scan.id,
-                    "rows_processed": int(res_ov.get("rows_processed", 0)),
-                    "matched_count": 0,
-                    "detected_year": scan.detected_year,
-                    "detected_type": scan.detected_type,
-                }
+        parent_sh = session.get(CensusSheet, scan.census_sheet_id) if scan.census_sheet_id else None
+        sheet_ctx = _sheet_context_dict(parent_sh, fallback_label=scan.filename)
+        if finalize_idle and scan.census_sheet_id and parent_sh and parent_sh.sheet_type in ("overview", "municipal_overview"):
+            res_ov = await process_census_sheet_pipeline(
+                scan.census_sheet_id,
+                max_rows=max_rows,
+                run_mcp=run_mcp,
+                finalize_idle=finalize_idle,
+            )
+            return {
+                "scan_id": scan.id,
+                "rows_processed": int(res_ov.get("rows_processed", 0)),
+                "matched_count": 0,
+                "detected_year": scan.detected_year,
+                "detected_type": scan.detected_type,
+            }
 
         try:
             from backend.app.pipeline.feedback import reset_ocr_feedback
@@ -262,6 +290,7 @@ async def process_single_scan_pipeline(
             await ws_manager.broadcast(
                 "state",
                 {
+                    **sheet_ctx,
                     "active_stage": "layout",
                     "active_model": (
                         "opencv:census_sheet_slicer"
@@ -269,14 +298,17 @@ async def process_single_scan_pipeline(
                         else "opencv:two_page_spread_slicer"
                     ),
                     "current_scan_id": scan.id,
+                    "current_row_id": None,
+                    "current_row_index": None,
+                    "total_rows": None,
                     "progress_pct": 10,
                     "message_sk": (
-                        f"Rozdeľujem riadky sčítacieho hárku ({scan.filename})..."
+                        f"Rozdeľujem riadky sčítacieho hárku ({sheet_ctx['current_sheet_label'] or scan.filename})..."
                         if scan.detected_type == "census"
                         else f"Rozdeľujem dvojstranu a riadky matriky ({scan.filename})..."
                     ),
                     "message_en": (
-                        f"Slicing census sheet rows ({scan.filename})..."
+                        f"Slicing census sheet rows ({sheet_ctx['current_sheet_label'] or scan.filename})..."
                         if scan.detected_type == "census"
                         else f"Slicing two-page spread and rows ({scan.filename})..."
                     ),
@@ -292,17 +324,22 @@ async def process_single_scan_pipeline(
                 rows = await run_layout_for_scan_async(session, scan)
 
             target_rows = rows[:max_rows] if max_rows else rows
+            total_target = len(target_rows)
 
             # STAGE 2: GLM-OCR Batch
             await ws_manager.broadcast(
                 "state",
                 {
+                    **sheet_ctx,
                     "active_stage": "ocr",
                     "active_model": settings.model_ocr,
                     "current_scan_id": scan.id,
-                    "progress_pct": 25,
-                    "message_sk": f"Čítam rukopis pomocou {settings.model_ocr} ({len(target_rows)} riadkov)...",
-                    "message_en": f"Running GLM-OCR batch on header + {len(target_rows)} rows...",
+                    "current_row_id": None,
+                    "current_row_index": 0,
+                    "total_rows": total_target,
+                    "progress_pct": 22,
+                    "message_sk": f"Čítam záhlavie a rukopis pomocou {settings.model_ocr} ({total_target} riadkov)...",
+                    "message_en": f"Running GLM-OCR batch on header + {total_target} rows...",
                 },
             )
             await run_ocr_for_scan_header(session, scan)
@@ -313,6 +350,7 @@ async def process_single_scan_pipeline(
                         scan.census_sheet_id,
                         max_rows=max_rows,
                         run_mcp=run_mcp,
+                        finalize_idle=finalize_idle,
                     )
                     return {
                         "scan_id": scan.id,
@@ -325,13 +363,16 @@ async def process_single_scan_pipeline(
                 await ws_manager.broadcast(
                     "state",
                     {
+                        **sheet_ctx,
                         "active_stage": "ocr",
                         "active_model": settings.model_ocr,
                         "current_scan_id": scan.id,
                         "current_row_id": row.id,
-                        "progress_pct": 25 + int(25 * idx / max(1, len(target_rows))),
-                        "message_sk": f"OCR čítanie riadku {idx}/{len(target_rows)} ({scan.filename})...",
-                        "message_en": f"GLM-OCR row {idx}/{len(target_rows)}...",
+                        "current_row_index": idx,
+                        "total_rows": total_target,
+                        "progress_pct": 25 + int(25 * idx / max(1, total_target)),
+                        "message_sk": f"OCR čítanie riadku {idx}/{total_target} ({sheet_ctx['current_sheet_label'] or scan.filename})...",
+                        "message_en": f"GLM-OCR row {idx}/{total_target} ({sheet_ctx['current_sheet_label'] or scan.filename})...",
                     },
                 )
                 await run_ocr_for_row(session, scan, row)
@@ -351,13 +392,16 @@ async def process_single_scan_pipeline(
                     await ws_manager.broadcast(
                         "state",
                         {
+                            **sheet_ctx,
                             "active_stage": "decision",
                             "active_model": settings.model_decision,
                             "current_scan_id": scan.id,
                             "current_row_id": row.id,
-                            "progress_pct": 50 + int(20 * idx / max(1, len(target_rows))),
-                            "message_sk": f"Kontrola čitateľnosti ({settings.model_decision}) – riadok {idx}/{len(target_rows)}...",
-                            "message_en": f"Decision model triage row {idx}/{len(target_rows)}...",
+                            "current_row_index": idx,
+                            "total_rows": total_target,
+                            "progress_pct": 50 + int(20 * idx / max(1, total_target)),
+                            "message_sk": f"Kontrola čitateľnosti ({settings.model_decision}) – riadok {idx}/{total_target}...",
+                            "message_en": f"Decision model triage row {idx}/{total_target}...",
                         },
                     )
                     await run_decision_for_row(session, scan, row, prev_ocr)
@@ -381,13 +425,16 @@ async def process_single_scan_pipeline(
                 await ws_manager.broadcast(
                     "state",
                     {
+                        **sheet_ctx,
                         "active_stage": "extract",
                         "active_model": settings.model_extract,
                         "current_scan_id": scan.id,
                         "current_row_id": row.id,
-                        "progress_pct": 70 + int(18 * idx / max(1, len(target_rows))),
-                        "message_sk": f"Extrakcia mien, obcí a poznámok ({settings.model_extract}) – riadok {idx}/{len(target_rows)}...",
-                        "message_en": f"Extracting structured facts row {idx}/{len(target_rows)}...",
+                        "current_row_index": idx,
+                        "total_rows": total_target,
+                        "progress_pct": 70 + int(18 * idx / max(1, total_target)),
+                        "message_sk": f"Extrakcia mien, obcí a poznámok ({settings.model_extract}) – riadok {idx}/{total_target}...",
+                        "message_en": f"Extracting structured facts row {idx}/{total_target}...",
                     },
                 )
                 if is_census:
@@ -418,10 +465,13 @@ async def process_single_scan_pipeline(
                         await ws_manager.broadcast(
                             "state",
                             {
+                                **sheet_ctx,
                                 "active_stage": "mcp_match",
                                 "active_model": "familysearch-mcp",
                                 "current_scan_id": scan.id,
                                 "current_row_id": None,
+                                "current_row_index": None,
+                                "total_rows": len(extracted_facts),
                                 "progress_pct": 88,
                                 "message_sk": f"Párujem osoby z hárku s matrikou a FamilySearch ({sheet.municipality or scan.filename})...",
                                 "message_en": f"Matching sheet persons with parish records & FamilySearch ({sheet.municipality or scan.filename})...",
@@ -435,10 +485,13 @@ async def process_single_scan_pipeline(
                         await ws_manager.broadcast(
                             "state",
                             {
+                                **sheet_ctx,
                                 "active_stage": "mcp_match",
                                 "active_model": "familysearch-mcp",
                                 "current_scan_id": scan.id,
                                 "current_row_id": row.id,
+                                "current_row_index": idx,
+                                "total_rows": len(extracted_facts),
                                 "progress_pct": 88 + int(11 * idx / max(1, len(extracted_facts))),
                                 "message_sk": f"Porovnávam s FamilySearch ({fact.given_name_sk or ''} {fact.surname_normalized or ''})...",
                                 "message_en": f"Matching row {idx}/{len(extracted_facts)} via familysearch-mcp...",
@@ -452,23 +505,54 @@ async def process_single_scan_pipeline(
             session.add(scan)
             session.commit()
 
+            dur_sec = max(1, int(round(time.perf_counter() - t0)))
             if finalize_idle:
+                done_sk = f"Hotovo! Spracovaných {total_target} riadkov ({len(extracted_facts)} osôb) zo skenu {scan.filename}."
+                done_en = f"Completed {total_target} rows ({len(extracted_facts)} people) for {scan.filename}."
                 await ws_manager.broadcast(
                     "state",
                     {
+                        **sheet_ctx,
                         "active_stage": "idle",
                         "active_model": None,
                         "current_scan_id": scan.id,
                         "current_row_id": None,
+                        "current_row_index": None,
+                        "total_rows": total_target,
                         "progress_pct": 100,
-                        "message_sk": f"Hotovo! Spracovaných {len(target_rows)} riadkov zo skenu {scan.filename}.",
-                        "message_en": f"Completed {len(target_rows)} rows for {scan.filename}.",
+                        "message_sk": done_sk,
+                        "message_en": done_en,
                     },
+                )
+                await ws_manager.emit_completion(
+                    {
+                        "status": "completed",
+                        "kind": "census_sheet" if sheet_ctx["current_sheet_id"] else "matrika_scan",
+                        "sheet_id": sheet_ctx["current_sheet_id"],
+                        "slovakiana_key": sheet_ctx["current_slovakiana_key"],
+                        "sheet_label": sheet_ctx["current_sheet_label"],
+                        "scan_id": scan.id,
+                        "scan_filename": scan.filename,
+                        "rows_processed": total_target,
+                        "persons_count": len(extracted_facts),
+                        "matched_count": matched_count,
+                        "duration_sec": dur_sec,
+                        "title_sk": "OCR skenu dokončené",
+                        "title_en": "Scan OCR completed",
+                        "message_sk": done_sk,
+                        "message_en": done_en,
+                        "target_url": (
+                            f"/scitacie-harky/{sheet_ctx['current_slovakiana_key'] or sheet_ctx['current_sheet_id']}"
+                            if sheet_ctx["current_sheet_id"]
+                            else f"/knihy?scan={scan.id}"
+                        ),
+                    }
                 )
 
             return {
                 "scan_id": scan.id,
-                "rows_processed": len(target_rows),
+                "rows_processed": total_target,
+                "persons_count": len(extracted_facts),
                 "matched_count": matched_count,
                 "detected_year": scan.detected_year,
                 "detected_type": scan.detected_type,
@@ -478,18 +562,37 @@ async def process_single_scan_pipeline(
             scan.error_message = str(exc)[:500]
             session.add(scan)
             session.commit()
+            err_sk = f"Chyba pri spracovaní {scan.filename}: {exc}"
+            err_en = f"Error processing {scan.filename}: {exc}"
             await ws_manager.broadcast(
                 "state",
                 {
+                    **sheet_ctx,
                     "active_stage": "idle",
                     "active_model": None,
                     "current_scan_id": scan.id,
                     "current_row_id": None,
                     "progress_pct": 0,
-                    "message_sk": f"Chyba pri spracovaní {scan.filename}: {exc}",
-                    "message_en": f"Error processing {scan.filename}: {exc}",
+                    "message_sk": err_sk,
+                    "message_en": err_en,
                 },
             )
+            if finalize_idle:
+                await ws_manager.emit_completion(
+                    {
+                        "status": "error",
+                        "kind": "census_sheet" if sheet_ctx["current_sheet_id"] else "matrika_scan",
+                        "sheet_id": sheet_ctx["current_sheet_id"],
+                        "slovakiana_key": sheet_ctx["current_slovakiana_key"],
+                        "sheet_label": sheet_ctx["current_sheet_label"],
+                        "scan_id": scan.id,
+                        "scan_filename": scan.filename,
+                        "title_sk": "Chyba pri OCR skenu",
+                        "title_en": "Scan OCR failed",
+                        "message_sk": err_sk,
+                        "message_en": err_en,
+                    }
+                )
             return {
                 "scan_id": scan.id,
                 "status": "error",
@@ -512,6 +615,7 @@ async def process_batch_stage_queued(
     4. All pending scans -> underdog-saluki-27b-1.0 Extractor (no model swap during entire extraction phase!)
     5. All pending scans -> familysearch-mcp Matching
     """
+    t0 = time.perf_counter()
     with Session(engine) as session:
         batch = session.get(Batch, batch_id)
         if not batch:
@@ -544,15 +648,31 @@ async def process_batch_stage_queued(
             batch.processed_scans = len(all_scans)
             session.add(batch)
             session.commit()
+            done_sk = f"Všetky skeny v dávke '{batch.name}' sú už spracované ({skipped_count} hotových)."
+            done_en = f"All scans in batch '{batch.name}' are already processed ({skipped_count} done)."
             await ws_manager.broadcast(
                 "state",
                 {
                     "active_stage": "idle",
                     "active_model": None,
                     "progress_pct": 100,
-                    "message_sk": f"Všetky skeny v dávke '{batch.name}' sú už spracované ({skipped_count} hotových).",
-                    "message_en": f"All scans in batch '{batch.name}' are already processed ({skipped_count} done).",
+                    "message_sk": done_sk,
+                    "message_en": done_en,
                 },
+            )
+            await ws_manager.emit_completion(
+                {
+                    "status": "completed",
+                    "kind": "matrika_batch",
+                    "batch_id": batch_id,
+                    "scans_processed": 0,
+                    "persons_count": 0,
+                    "title_sk": "Dávka je už spracovaná",
+                    "title_en": "Batch already processed",
+                    "message_sk": done_sk,
+                    "message_en": done_en,
+                    "target_url": "/knihy",
+                }
             )
             return {
                 "batch_id": batch_id,
@@ -568,7 +688,21 @@ async def process_batch_stage_queued(
 
             # Phase 1: Layout Slicing across all pending scans
             scan_rows_map: dict[int, list[RecordRow]] = {}
-            for s in scans:
+            for idx_s, s in enumerate(scans, start=1):
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "layout",
+                        "active_model": "opencv:two_page_spread_slicer",
+                        "current_scan_id": s.id,
+                        "current_row_id": None,
+                        "current_row_index": None,
+                        "total_rows": None,
+                        "progress_pct": 5 + int(15 * idx_s / max(1, len(scans))),
+                        "message_sk": f"[Dávka {idx_s}/{len(scans)}] Rozdeľujem riadky ({s.filename})...",
+                        "message_en": f"[Batch {idx_s}/{len(scans)}] Slicing rows ({s.filename})...",
+                    },
+                )
                 rows = session.exec(
                     select(RecordRow).where(RecordRow.scan_id == s.id).order_by(RecordRow.row_index)
                 ).all()
@@ -576,11 +710,14 @@ async def process_batch_stage_queued(
                     rows = await run_layout_for_scan_async(session, s)
                 scan_rows_map[s.id] = rows[:max_rows_per_scan] if max_rows_per_scan else rows
 
+            total_batch_rows = max(1, sum(len(r_list) for r_list in scan_rows_map.values()))
+
             # Phase 2: All GLM-OCR calls across all pending scans
             batch.status = "ocr_stage"
             session.add(batch)
             session.commit()
-            for s in scans:
+            ocr_row_counter = 0
+            for idx_s, s in enumerate(scans, start=1):
                 target_rows = scan_rows_map[s.id]
                 if (
                     only_undone
@@ -588,10 +725,12 @@ async def process_batch_stage_queued(
                     and target_rows
                     and all(bool(r.raw_ocr_combined) for r in target_rows)
                 ):
+                    ocr_row_counter += len(target_rows)
                     continue
                 if not (only_undone and s.header_raw_ocr):
                     await run_ocr_for_scan_header(session, s)
-                for r in target_rows:
+                for idx_r, r in enumerate(target_rows, start=1):
+                    ocr_row_counter += 1
                     if only_undone and r.raw_ocr_combined and r.status in (
                         "ocr_done",
                         "triaged",
@@ -607,8 +746,11 @@ async def process_batch_stage_queued(
                             "active_model": settings.model_ocr,
                             "current_scan_id": s.id,
                             "current_row_id": r.id,
-                            "message_sk": f"[Dávka OCR] {s.filename} – riadok {r.row_index}",
-                            "message_en": f"[Batch OCR] {s.filename} – row {r.row_index}",
+                            "current_row_index": idx_r,
+                            "total_rows": len(target_rows),
+                            "progress_pct": 20 + int(30 * ocr_row_counter / total_batch_rows),
+                            "message_sk": f"[Dávka OCR {idx_s}/{len(scans)}] {s.filename} – riadok {idx_r}/{len(target_rows)}",
+                            "message_en": f"[Batch OCR {idx_s}/{len(scans)}] {s.filename} – row {idx_r}/{len(target_rows)}",
                         },
                     )
                     await run_ocr_for_row(session, s, r)
@@ -621,22 +763,27 @@ async def process_batch_stage_queued(
             batch.status = "decision_stage"
             session.add(batch)
             session.commit()
-            for s in scans:
+            dec_row_counter = 0
+            for idx_s, s in enumerate(scans, start=1):
+                target_rows = scan_rows_map[s.id]
                 if only_undone and s.status == "triaged":
+                    dec_row_counter += len(target_rows)
                     continue
                 s_is_census = bool(s.detected_type == "census" or s.census_sheet_id is not None)
                 if s_is_census:
-                    for r in scan_rows_map[s.id]:
+                    for r in target_rows:
                         r.decision_action = "auto_accept"
                         r.decision_confidence = 0.95
                         r.status = "auto_accepted"
                         session.add(r)
+                    dec_row_counter += len(target_rows)
                     s.status = "triaged"
                     session.add(s)
                     session.commit()
                     continue
                 prev_ocr = None
-                for r in scan_rows_map[s.id]:
+                for idx_r, r in enumerate(target_rows, start=1):
+                    dec_row_counter += 1
                     await ws_manager.broadcast(
                         "state",
                         {
@@ -644,8 +791,11 @@ async def process_batch_stage_queued(
                             "active_model": settings.model_decision,
                             "current_scan_id": s.id,
                             "current_row_id": r.id,
-                            "message_sk": f"[Dávka Triage] {s.filename} – riadok {r.row_index}",
-                            "message_en": f"[Batch Triage] {s.filename} – row {r.row_index}",
+                            "current_row_index": idx_r,
+                            "total_rows": len(target_rows),
+                            "progress_pct": 50 + int(15 * dec_row_counter / total_batch_rows),
+                            "message_sk": f"[Dávka Triage {idx_s}/{len(scans)}] {s.filename} – riadok {idx_r}/{len(target_rows)}",
+                            "message_en": f"[Batch Triage {idx_s}/{len(scans)}] {s.filename} – row {idx_r}/{len(target_rows)}",
                         },
                     )
                     await run_decision_for_row(session, s, r, prev_ocr)
@@ -659,11 +809,14 @@ async def process_batch_stage_queued(
             session.add(batch)
             session.commit()
             all_facts: list[tuple[PersonFact, RecordRow]] = []
+            ext_row_counter = 0
             for idx_s, s in enumerate(scans, start=1):
+                target_rows = scan_rows_map[s.id]
                 s_is_census = bool(s.detected_type == "census" or s.census_sheet_id is not None)
                 prev_fact = None
                 scan_facts: list[tuple[PersonFact, RecordRow]] = []
-                for r in scan_rows_map[s.id]:
+                for idx_r, r in enumerate(target_rows, start=1):
+                    ext_row_counter += 1
                     await ws_manager.broadcast(
                         "state",
                         {
@@ -671,8 +824,11 @@ async def process_batch_stage_queued(
                             "active_model": settings.model_extract,
                             "current_scan_id": s.id,
                             "current_row_id": r.id,
-                            "message_sk": f"[Dávka Extrakcia] {s.filename} – riadok {r.row_index}",
-                            "message_en": f"[Batch Extract] {s.filename} – row {r.row_index}",
+                            "current_row_index": idx_r,
+                            "total_rows": len(target_rows),
+                            "progress_pct": 65 + int(25 * ext_row_counter / total_batch_rows),
+                            "message_sk": f"[Dávka Extrakcia {idx_s}/{len(scans)}] {s.filename} – riadok {idx_r}/{len(target_rows)}",
+                            "message_en": f"[Batch Extract {idx_s}/{len(scans)}] {s.filename} – row {idx_r}/{len(target_rows)}",
                         },
                     )
                     if s_is_census:
@@ -705,8 +861,22 @@ async def process_batch_stage_queued(
                 batch.status = "matching"
                 session.add(batch)
                 session.commit()
-                for fact, r in all_facts:
+                for idx_f, (fact, r) in enumerate(all_facts, start=1):
                     if _matches_watchlist(fact, batch.watchlist_filter):
+                        await ws_manager.broadcast(
+                            "state",
+                            {
+                                "active_stage": "mcp_match",
+                                "active_model": "familysearch-mcp",
+                                "current_scan_id": fact.scan_id,
+                                "current_row_id": r.id,
+                                "current_row_index": idx_f,
+                                "total_rows": len(all_facts),
+                                "progress_pct": 90 + int(9 * idx_f / max(1, len(all_facts))),
+                                "message_sk": f"[Dávka FamilySearch {idx_f}/{len(all_facts)}] Párujem záznam...",
+                                "message_en": f"[Batch FamilySearch {idx_f}/{len(all_facts)}] Matching record...",
+                            },
+                        )
                         await fs_mcp_manager.match_person_fact(session, fact, r)
                 for s in scans:
                     s.status = "matched"
@@ -718,15 +888,33 @@ async def process_batch_stage_queued(
             session.add(batch)
             session.commit()
 
+            dur_sec = max(1, int(round(time.perf_counter() - t0)))
+            done_sk = f"Dávka '{batch.name}' bola úspešne spracovaná ({len(scans)} skenov, {len(all_facts)} osôb)!"
+            done_en = f"Batch '{batch.name}' completed ({len(scans)} scans, {len(all_facts)} people)!"
             await ws_manager.broadcast(
                 "state",
                 {
                     "active_stage": "idle",
                     "active_model": None,
                     "progress_pct": 100,
-                    "message_sk": f"Dávka '{batch.name}' bola úspešne spracovaná!",
-                    "message_en": f"Batch '{batch.name}' completed!",
+                    "message_sk": done_sk,
+                    "message_en": done_en,
                 },
+            )
+            await ws_manager.emit_completion(
+                {
+                    "status": "completed",
+                    "kind": "matrika_batch",
+                    "batch_id": batch_id,
+                    "scans_processed": len(scans),
+                    "persons_count": len(all_facts),
+                    "duration_sec": dur_sec,
+                    "title_sk": "Dávka OCR dokončená",
+                    "title_en": "Batch OCR completed",
+                    "message_sk": done_sk,
+                    "message_en": done_en,
+                    "target_url": "/knihy",
+                }
             )
             return {
                 "batch_id": batch_id,
@@ -738,15 +926,28 @@ async def process_batch_stage_queued(
             batch.status = "error"
             session.add(batch)
             session.commit()
+            err_sk = f"Chyba pri spracovaní dávky '{batch.name}': {exc}"
+            err_en = f"Error processing batch '{batch.name}': {exc}"
             await ws_manager.broadcast(
                 "state",
                 {
                     "active_stage": "idle",
                     "active_model": None,
                     "progress_pct": 0,
-                    "message_sk": f"Chyba pri spracovaní dávky '{batch.name}': {exc}",
-                    "message_en": f"Error processing batch '{batch.name}': {exc}",
+                    "message_sk": err_sk,
+                    "message_en": err_en,
                 },
+            )
+            await ws_manager.emit_completion(
+                {
+                    "status": "error",
+                    "kind": "matrika_batch",
+                    "batch_id": batch_id,
+                    "title_sk": "Chyba pri spracovaní dávky",
+                    "title_en": "Batch processing error",
+                    "message_sk": err_sk,
+                    "message_en": err_en,
+                }
             )
             return {"batch_id": batch_id, "status": "error", "error": str(exc)}
 
@@ -757,6 +958,7 @@ async def process_census_sheet_pipeline(
     max_rows: int | None = None,
     run_mcp: bool = True,
     force_sheet_type: str | None = None,
+    finalize_idle: bool = True,
     overview_only: bool = False,
 ) -> dict[str, Any]:
     """
@@ -768,6 +970,7 @@ async def process_census_sheet_pipeline(
     full-extracting only `overview` and `municipal_overview` sheets and stopping before row OCR
     if the sheet is a regular `household` sheet.
     """
+    t0 = time.perf_counter()
     with Session(engine) as session:
         sheet = session.get(CensusSheet, sheet_id)
         if not sheet:
@@ -805,12 +1008,41 @@ async def process_census_sheet_pipeline(
                 force_municipal_overview=(force_sheet_type == "municipal_overview"),
             )
             session.refresh(sheet)
+            dist_cnt = len([d for d in districts if not d.is_summary_row])
+            await ws_manager.broadcast(
+                "sheet_updated",
+                {
+                    "sheet_id": sheet.id,
+                    "slovakiana_key": sheet.slovakiana_key,
+                    "sheet_type": sheet.sheet_type,
+                    "download_status": sheet.download_status,
+                    "municipal_districts_count": dist_cnt,
+                },
+            )
+            if finalize_idle:
+                await ws_manager.emit_completion(
+                    {
+                        "status": "completed",
+                        "kind": "census_municipal_overview",
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_label": _sheet_context_dict(sheet)["current_sheet_label"],
+                        "rows_processed": len(districts),
+                        "districts_count": dist_cnt,
+                        "duration_sec": max(1, int(round(time.perf_counter() - t0))),
+                        "title_sk": "Obecný prehľad prečítaný",
+                        "title_en": "Municipal overview OCR completed",
+                        "message_sk": f"Hotovo! Extrahovaných {dist_cnt} obvodov z obecného prehľadu ({sheet.municipality or sheet.slovakiana_key}).",
+                        "message_en": f"Completed! Extracted {dist_cnt} districts from municipal overview ({sheet.municipality or sheet.slovakiana_key}).",
+                        "target_url": f"/scitacie-harky/{sheet.slovakiana_key or sheet.id}",
+                    }
+                )
             return {
                 "census_sheet_id": sheet.id,
                 "slovakiana_key": sheet.slovakiana_key,
                 "sheet_type": sheet.sheet_type,
                 "rows_processed": len(districts),
-                "municipal_districts_count": len([d for d in districts if not d.is_summary_row]),
+                "municipal_districts_count": dist_cnt,
                 "download_status": sheet.download_status,
             }
 
@@ -825,6 +1057,34 @@ async def process_census_sheet_pipeline(
                 force_district_overview=(force_sheet_type == "overview"),
             )
             session.refresh(sheet)
+            await ws_manager.broadcast(
+                "sheet_updated",
+                {
+                    "sheet_id": sheet.id,
+                    "slovakiana_key": sheet.slovakiana_key,
+                    "sheet_type": sheet.sheet_type,
+                    "download_status": sheet.download_status,
+                    "overview_houses_count": len(houses),
+                },
+            )
+            if finalize_idle:
+                await ws_manager.emit_completion(
+                    {
+                        "status": "completed",
+                        "kind": "census_overview",
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_label": _sheet_context_dict(sheet)["current_sheet_label"],
+                        "rows_processed": len(houses),
+                        "houses_count": len(houses),
+                        "duration_sec": max(1, int(round(time.perf_counter() - t0))),
+                        "title_sk": "Prehľad obvodu prečítaný",
+                        "title_en": "District overview OCR completed",
+                        "message_sk": f"Hotovo! Extrahovaných {len(houses)} domov z prehľadu obvodu ({sheet.municipality or sheet.slovakiana_key}).",
+                        "message_en": f"Completed! Extracted {len(houses)} houses from district overview ({sheet.municipality or sheet.slovakiana_key}).",
+                        "target_url": f"/scitacie-harky/{sheet.slovakiana_key or sheet.id}",
+                    }
+                )
             return {
                 "census_sheet_id": sheet.id,
                 "slovakiana_key": sheet.slovakiana_key,
@@ -844,30 +1104,33 @@ async def process_census_sheet_pipeline(
         back_scan = session.get(ScanImage, back_scan_id) if back_scan_id else None
         enable_overview = bool(settings.get_feature_flags().get("census_overview_sheets", True))
         if sheet and front_scan:
+            sheet_ctx = _sheet_context_dict(sheet, fallback_label=front_scan.filename)
             if not front_scan.header_crop_path:
                 await ws_manager.broadcast(
                     "state",
                     {
+                        **sheet_ctx,
                         "active_stage": "layout",
                         "active_model": "opencv:census_sheet_slicer",
                         "current_scan_id": front_scan.id,
                         "current_row_id": None,
                         "progress_pct": 12,
-                        "message_sk": f"Rozdeľujem riadky a záhlavie sčítacieho hárku ({front_scan.filename})...",
-                        "message_en": f"Slicing census sheet header and rows ({front_scan.filename})...",
+                        "message_sk": f"Rozdeľujem riadky a záhlavie sčítacieho hárku ({sheet_ctx['current_sheet_label']})...",
+                        "message_en": f"Slicing census sheet header and rows ({sheet_ctx['current_sheet_label']})...",
                     },
                 )
                 await run_layout_for_scan_async(session, front_scan)
             await ws_manager.broadcast(
                 "state",
                 {
+                    **sheet_ctx,
                     "active_stage": "ocr",
                     "active_model": settings.model_ocr,
                     "current_scan_id": front_scan.id,
                     "current_row_id": None,
                     "progress_pct": 18,
-                    "message_sk": f"Čítam záhlavie sčítacieho hárku pomocou {settings.model_ocr} ({front_scan.filename})...",
-                    "message_en": f"Reading census sheet header via {settings.model_ocr} ({front_scan.filename})...",
+                    "message_sk": f"Čítam záhlavie sčítacieho hárku pomocou {settings.model_ocr} ({sheet_ctx['current_sheet_label']})...",
+                    "message_en": f"Reading census sheet header via {settings.model_ocr} ({sheet_ctx['current_sheet_label']})...",
                 },
             )
             await run_ocr_for_scan_header(session, front_scan)
@@ -887,12 +1150,42 @@ async def process_census_sheet_pipeline(
                     back_scan,
                     force_municipal_overview=(force_sheet_type == "municipal_overview"),
                 )
+                session.refresh(sheet)
+                dist_cnt = len([d for d in districts if not d.is_summary_row])
+                await ws_manager.broadcast(
+                    "sheet_updated",
+                    {
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_type": "municipal_overview",
+                        "download_status": sheet.download_status,
+                        "municipal_districts_count": dist_cnt,
+                    },
+                )
+                if finalize_idle:
+                    await ws_manager.emit_completion(
+                        {
+                            "status": "completed",
+                            "kind": "census_municipal_overview",
+                            "sheet_id": sheet.id,
+                            "slovakiana_key": sheet.slovakiana_key,
+                            "sheet_label": _sheet_context_dict(sheet)["current_sheet_label"],
+                            "rows_processed": len(districts),
+                            "districts_count": dist_cnt,
+                            "duration_sec": max(1, int(round(time.perf_counter() - t0))),
+                            "title_sk": "Obecný prehľad prečítaný",
+                            "title_en": "Municipal overview OCR completed",
+                            "message_sk": f"Hotovo! Extrahovaných {dist_cnt} obvodov z obecného prehľadu ({sheet.municipality or sheet.slovakiana_key}).",
+                            "message_en": f"Completed! Extracted {dist_cnt} districts from municipal overview ({sheet.municipality or sheet.slovakiana_key}).",
+                            "target_url": f"/scitacie-harky/{sheet.slovakiana_key or sheet.id}",
+                        }
+                    )
                 return {
                     "census_sheet_id": sheet.id,
                     "slovakiana_key": sheet.slovakiana_key,
                     "sheet_type": "municipal_overview",
                     "rows_processed": len(districts),
-                    "municipal_districts_count": len([d for d in districts if not d.is_summary_row]),
+                    "municipal_districts_count": dist_cnt,
                     "download_status": sheet.download_status,
                 }
             if enable_overview and force_sheet_type != "household" and (
@@ -907,6 +1200,34 @@ async def process_census_sheet_pipeline(
                     force_district_overview=(force_sheet_type == "overview"),
                 )
                 session.refresh(sheet)
+                await ws_manager.broadcast(
+                    "sheet_updated",
+                    {
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_type": sheet.sheet_type,
+                        "download_status": sheet.download_status,
+                        "overview_houses_count": len(houses),
+                    },
+                )
+                if finalize_idle:
+                    await ws_manager.emit_completion(
+                        {
+                            "status": "completed",
+                            "kind": "census_overview",
+                            "sheet_id": sheet.id,
+                            "slovakiana_key": sheet.slovakiana_key,
+                            "sheet_label": _sheet_context_dict(sheet)["current_sheet_label"],
+                            "rows_processed": len(houses),
+                            "houses_count": len(houses),
+                            "duration_sec": max(1, int(round(time.perf_counter() - t0))),
+                            "title_sk": "Prehľad obvodu prečítaný",
+                            "title_en": "District overview OCR completed",
+                            "message_sk": f"Hotovo! Extrahovaných {len(houses)} domov z prehľadu obvodu ({sheet.municipality or sheet.slovakiana_key}).",
+                            "message_en": f"Completed! Extracted {len(houses)} houses from district overview ({sheet.municipality or sheet.slovakiana_key}).",
+                            "target_url": f"/scitacie-harky/{sheet.slovakiana_key or sheet.id}",
+                        }
+                    )
                 return {
                     "census_sheet_id": sheet.id,
                     "slovakiana_key": sheet.slovakiana_key,
@@ -945,6 +1266,7 @@ async def process_census_sheet_pipeline(
         finalize_idle=False,
     )
     total_rows_processed = int(res_front.get("rows_processed", 0))
+    total_persons_extracted = int(res_front.get("persons_count", 0))
 
     if back_scan_id:
         should_process_back = False
@@ -958,16 +1280,18 @@ async def process_census_sheet_pipeline(
                 and back_scan.original_path
                 and Path(back_scan.original_path).exists()
             ):
+                sheet_ctx = _sheet_context_dict(sheet, fallback_label=back_scan.filename)
                 await ws_manager.broadcast(
                     "state",
                     {
+                        **sheet_ctx,
                         "active_stage": "layout",
                         "active_model": "opencv:census_sheet_slicer",
                         "current_scan_id": back_scan.id,
                         "current_row_id": None,
                         "progress_pct": 85,
-                        "message_sk": f"Kontrolujem zadnú stranu sčítacieho hárku ({back_scan.filename})...",
-                        "message_en": f"Checking back side of census sheet ({back_scan.filename})...",
+                        "message_sk": f"Kontrolujem zadnú stranu sčítacieho hárku ({sheet_ctx['current_sheet_label']})...",
+                        "message_en": f"Checking back side of census sheet ({sheet_ctx['current_sheet_label']})...",
                     },
                 )
                 back_rows = await run_layout_for_scan_async(session, back_scan)
@@ -980,10 +1304,12 @@ async def process_census_sheet_pipeline(
                 finalize_idle=False,
             )
             total_rows_processed += int(res_back.get("rows_processed", 0))
+            total_persons_extracted += int(res_back.get("persons_count", 0))
 
     with Session(engine) as session:
         sheet = session.get(CensusSheet, sheet_id)
         if sheet:
+            sheet_ctx = _sheet_context_dict(sheet)
             enable_overview = bool(settings.get_feature_flags().get("census_overview_sheets", True))
             if enable_overview and force_sheet_type != "household" and sheet.sheet_type == "municipal_overview":
                 front_scan = session.get(ScanImage, sheet.front_scan_id) if sheet.front_scan_id else None
@@ -995,12 +1321,41 @@ async def process_census_sheet_pipeline(
                     back_scan,
                     force_municipal_overview=(force_sheet_type == "municipal_overview"),
                 )
+                dist_cnt = len([d for d in districts if not d.is_summary_row])
+                await ws_manager.broadcast(
+                    "sheet_updated",
+                    {
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_type": "municipal_overview",
+                        "download_status": sheet.download_status,
+                        "municipal_districts_count": dist_cnt,
+                    },
+                )
+                if finalize_idle:
+                    await ws_manager.emit_completion(
+                        {
+                            "status": "completed",
+                            "kind": "census_municipal_overview",
+                            "sheet_id": sheet.id,
+                            "slovakiana_key": sheet.slovakiana_key,
+                            "sheet_label": _sheet_context_dict(sheet)["current_sheet_label"],
+                            "rows_processed": len(districts),
+                            "districts_count": dist_cnt,
+                            "duration_sec": max(1, int(round(time.perf_counter() - t0))),
+                            "title_sk": "Obecný prehľad prečítaný",
+                            "title_en": "Municipal overview OCR completed",
+                            "message_sk": f"Hotovo! Extrahovaných {dist_cnt} obvodov z obecného prehľadu ({sheet.municipality or sheet.slovakiana_key}).",
+                            "message_en": f"Completed! Extracted {dist_cnt} districts from municipal overview ({sheet.municipality or sheet.slovakiana_key}).",
+                            "target_url": f"/scitacie-harky/{sheet.slovakiana_key or sheet.id}",
+                        }
+                    )
                 return {
                     "census_sheet_id": sheet.id,
                     "slovakiana_key": sheet.slovakiana_key,
                     "sheet_type": "municipal_overview",
                     "rows_processed": len(districts),
-                    "municipal_districts_count": len([d for d in districts if not d.is_summary_row]),
+                    "municipal_districts_count": dist_cnt,
                     "download_status": sheet.download_status,
                 }
             if enable_overview and force_sheet_type != "household" and sheet.sheet_type == "overview":
@@ -1014,6 +1369,34 @@ async def process_census_sheet_pipeline(
                     force_district_overview=(force_sheet_type == "overview"),
                 )
                 session.refresh(sheet)
+                await ws_manager.broadcast(
+                    "sheet_updated",
+                    {
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_type": sheet.sheet_type,
+                        "download_status": sheet.download_status,
+                        "overview_houses_count": len(houses),
+                    },
+                )
+                if finalize_idle:
+                    await ws_manager.emit_completion(
+                        {
+                            "status": "completed",
+                            "kind": "census_overview",
+                            "sheet_id": sheet.id,
+                            "slovakiana_key": sheet.slovakiana_key,
+                            "sheet_label": _sheet_context_dict(sheet)["current_sheet_label"],
+                            "rows_processed": len(houses),
+                            "houses_count": len(houses),
+                            "duration_sec": max(1, int(round(time.perf_counter() - t0))),
+                            "title_sk": "Prehľad obvodu prečítaný",
+                            "title_en": "District overview OCR completed",
+                            "message_sk": f"Hotovo! Extrahovaných {len(houses)} domov z prehľadu obvodu ({sheet.municipality or sheet.slovakiana_key}).",
+                            "message_en": f"Completed! Extracted {len(houses)} houses from district overview ({sheet.municipality or sheet.slovakiana_key}).",
+                            "target_url": f"/scitacie-harky/{sheet.slovakiana_key or sheet.id}",
+                        }
+                    )
                 return {
                     "census_sheet_id": sheet.id,
                     "slovakiana_key": sheet.slovakiana_key,
@@ -1025,30 +1408,33 @@ async def process_census_sheet_pipeline(
             await ws_manager.broadcast(
                 "state",
                 {
+                    **sheet_ctx,
                     "active_stage": "extract",
                     "active_model": settings.model_extract,
                     "current_scan_id": sheet.front_scan_id,
                     "current_row_id": None,
                     "progress_pct": 88,
-                    "message_sk": f"Zjednocujem vzťahy v domácnosti ({sheet.municipality or ''} č. {sheet.house_number or sheet.sheet_number or ''})...",
-                    "message_en": f"Reconciling household relationships ({sheet.municipality or ''})...",
+                    "message_sk": f"Zjednocujem vzťahy v domácnosti ({sheet_ctx['current_sheet_label']})...",
+                    "message_en": f"Reconciling household relationships ({sheet_ctx['current_sheet_label']})...",
                 },
             )
             household = reconcile_census_household_relationships(session, sheet.id)
+            matched_count = 0
             if run_mcp:
                 await ws_manager.broadcast(
                     "state",
                     {
+                        **sheet_ctx,
                         "active_stage": "mcp_match",
                         "active_model": "familysearch-mcp",
                         "current_scan_id": sheet.front_scan_id,
                         "current_row_id": None,
                         "progress_pct": 90,
-                        "message_sk": f"Párujem osoby z hárku s matrikou a FamilySearch ({sheet.municipality or ''})...",
-                        "message_en": f"Matching sheet persons with parish records & FamilySearch ({sheet.municipality or ''})...",
+                        "message_sk": f"Párujem osoby z hárku s matrikou a FamilySearch ({sheet_ctx['current_sheet_label']})...",
+                        "message_en": f"Matching sheet persons with parish records & FamilySearch ({sheet_ctx['current_sheet_label']})...",
                     },
                 )
-                await fs_mcp_manager.match_census_sheet(session, sheet)
+                matched_count = await fs_mcp_manager.match_census_sheet(session, sheet)
             sheet.download_status = "matched" if run_mcp else "extracted"
             session.add(sheet)
             for sid in (sheet.front_scan_id, sheet.back_scan_id):
@@ -1058,23 +1444,58 @@ async def process_census_sheet_pipeline(
                         sc.status = "matched" if run_mcp else "extracted"
                         session.add(sc)
             session.commit()
+            persons_cnt = household.member_count if (household and household.member_count) else total_persons_extracted
             await ws_manager.broadcast(
-                "state",
+                "sheet_updated",
                 {
-                    "active_stage": "idle",
-                    "active_model": None,
-                    "current_scan_id": sheet.front_scan_id,
-                    "current_row_id": None,
-                    "progress_pct": 100,
-                    "message_sk": f"Hotovo! Spracovaných {total_rows_processed} riadkov hárku ({sheet.municipality or ''} č. {sheet.house_number or sheet.sheet_number or ''}).",
-                    "message_en": f"Completed {total_rows_processed} rows for census sheet ({sheet.municipality or ''}).",
+                    "sheet_id": sheet.id,
+                    "slovakiana_key": sheet.slovakiana_key,
+                    "sheet_type": sheet.sheet_type,
+                    "download_status": sheet.download_status,
+                    "persons_count": persons_cnt,
                 },
             )
+            done_sk = f"Hotovo! Spracovaných {total_rows_processed} riadkov ({persons_cnt} osôb) hárku ({sheet_ctx['current_sheet_label']})."
+            done_en = f"Completed {total_rows_processed} rows ({persons_cnt} people) for census sheet ({sheet_ctx['current_sheet_label']})."
+            if finalize_idle:
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        **sheet_ctx,
+                        "active_stage": "idle",
+                        "active_model": None,
+                        "current_scan_id": sheet.front_scan_id,
+                        "current_row_id": None,
+                        "progress_pct": 100,
+                        "message_sk": done_sk,
+                        "message_en": done_en,
+                    },
+                )
+                await ws_manager.emit_completion(
+                    {
+                        "status": "completed",
+                        "kind": "census_sheet",
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_label": sheet_ctx["current_sheet_label"],
+                        "scan_id": sheet.front_scan_id,
+                        "rows_processed": total_rows_processed,
+                        "persons_count": persons_cnt,
+                        "matched_count": matched_count,
+                        "duration_sec": max(1, int(round(time.perf_counter() - t0))),
+                        "title_sk": "Sčítací hárok prečítaný",
+                        "title_en": "Census sheet OCR completed",
+                        "message_sk": done_sk,
+                        "message_en": done_en,
+                        "target_url": f"/scitacie-harky/{sheet.slovakiana_key or sheet.id}",
+                    }
+                )
             return {
                 "census_sheet_id": sheet.id,
                 "slovakiana_key": sheet.slovakiana_key,
                 "sheet_type": sheet.sheet_type,
                 "rows_processed": total_rows_processed,
+                "persons_count": persons_cnt,
                 "household_id": household.id if household else None,
                 "download_status": sheet.download_status,
             }

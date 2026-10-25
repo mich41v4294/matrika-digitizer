@@ -22,6 +22,7 @@ from backend.app.census.slovakiana_client import (
 from backend.app.config import settings
 from backend.app.census.worker import (
     download_and_process_single_census_sheet,
+    get_job_runtime_info,
     is_job_running_in_memory,
     request_job_pause,
     run_catalog_harvest_job,
@@ -832,17 +833,32 @@ def list_census_jobs(session: SessionDep) -> dict[str, Any]:
     out: list[dict[str, Any]] = []
     for j in jobs:
         flt = json.loads(j.filter_json or "{}")
+        rt = get_job_runtime_info(j.id) if j.id is not None else None
+        dl_sheets = (
+            max(j.completed_items, int(rt.get("downloaded_sheets") or 0))
+            if (j.job_type != "catalog_harvest" and rt)
+            else (j.completed_items if j.job_type != "catalog_harvest" else 0)
+        )
+        proc_sheets = (
+            max(j.completed_items, int(rt.get("processed_sheets") or 0))
+            if (j.job_type == "full_pipeline" and rt)
+            else (j.completed_items if j.job_type == "full_pipeline" else 0)
+        )
         out.append(
             {
                 **j.model_dump(),
                 "name": flt.get("name") or f"{j.job_type} #{j.id}",
                 "total_sheets": j.total_items,
                 "cataloged_sheets": j.completed_items if j.job_type == "catalog_harvest" else j.total_items,
-                "downloaded_sheets": j.completed_items if j.job_type != "catalog_harvest" else 0,
-                "processed_sheets": j.completed_items if j.job_type == "full_pipeline" else 0,
+                "downloaded_sheets": dl_sheets,
+                "processed_sheets": proc_sheets,
                 "failed_sheets": j.failed_items,
                 "current_page": j.cursor_page,
                 "is_active_runtime": bool(j.id and is_job_running_in_memory(j.id)),
+                "current_sheet_id": rt.get("current_sheet_id") if rt else None,
+                "current_slovakiana_key": rt.get("current_slovakiana_key") if rt else None,
+                "current_sheet_label": rt.get("current_sheet_label") if rt else None,
+                "current_sheet_index": rt.get("current_sheet_index") if rt else None,
             }
         )
     return {"jobs": out}
@@ -3844,6 +3860,25 @@ async def set_census_sheet_type(
                     back_scan,
                     force_municipal_overview=True,
                 )
+                from backend.app.api.ws import ws_manager
+
+                dist_cnt = len([d for d in municipal_districts if not d.is_summary_row])
+                await ws_manager.emit_completion(
+                    {
+                        "status": "completed",
+                        "kind": "census_municipal_overview",
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_label": f"{sheet.municipality or ''} – Obecný prehľad".strip(" –"),
+                        "rows_processed": len(municipal_districts),
+                        "districts_count": dist_cnt,
+                        "title_sk": "Obecný prehľad prečítaný",
+                        "title_en": "Municipal overview OCR completed",
+                        "message_sk": f"Hotovo! Extrahovaných {dist_cnt} obvodov z obecného prehľadu ({sheet.municipality or sheet.slovakiana_key}).",
+                        "message_en": f"Completed! Extracted {dist_cnt} districts from municipal overview ({sheet.municipality or sheet.slovakiana_key}).",
+                        "target_url": f"/scitacie-harky/{sheet.slovakiana_key or sheet.id}",
+                    }
+                )
             else:
                 municipal_districts = reconstruct_municipal_overview_districts_from_existing_ocr(
                     session, sheet
@@ -3882,6 +3917,24 @@ async def set_census_sheet_type(
             elif front_exists:
                 overview_houses = await extract_census_overview_sheet(
                     session, sheet, front_scan, back_scan, force_district_overview=True
+                )
+                from backend.app.api.ws import ws_manager
+
+                await ws_manager.emit_completion(
+                    {
+                        "status": "completed",
+                        "kind": "census_overview",
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_label": f"{sheet.municipality or ''} – Prehľad obvodu {sheet.obvod_number or ''}".strip(" –"),
+                        "rows_processed": len(overview_houses),
+                        "houses_count": len(overview_houses),
+                        "title_sk": "Prehľad obvodu prečítaný",
+                        "title_en": "District overview OCR completed",
+                        "message_sk": f"Hotovo! Extrahovaných {len(overview_houses)} domov z prehľadu obvodu ({sheet.municipality or sheet.slovakiana_key}).",
+                        "message_en": f"Completed! Extracted {len(overview_houses)} houses from district overview ({sheet.municipality or sheet.slovakiana_key}).",
+                        "target_url": f"/scitacie-harky/{sheet.slovakiana_key or sheet.id}",
+                    }
                 )
             else:
                 overview_houses = reconstruct_overview_houses_from_existing_ocr(session, sheet)
@@ -3986,6 +4039,12 @@ def delete_municipal_overview_district(district_id: int, session: SessionDep) ->
     if not md:
         raise HTTPException(status_code=404, detail="CensusMunicipalOverviewDistrict not found")
     reset_ocr_feedback(session, municipal_district_id=district_id, commit=False)
+    if md.scan_id:
+        for rr in session.exec(
+            select(RecordRow).where(RecordRow.scan_id == md.scan_id)
+        ).all():
+            if (md.stitched_crop_path and rr.stitched_crop_path == md.stitched_crop_path) or rr.row_index == md.row_index:
+                session.delete(rr)
     session.delete(md)
     session.commit()
     return {"status": "deleted", "district_id": district_id}
@@ -4059,6 +4118,12 @@ def delete_overview_house(house_id: int, session: SessionDep) -> dict[str, Any]:
     if not ovh:
         raise HTTPException(status_code=404, detail="CensusOverviewHouse not found")
     reset_ocr_feedback(session, overview_house_id=house_id, commit=False)
+    if ovh.scan_id:
+        for rr in session.exec(
+            select(RecordRow).where(RecordRow.scan_id == ovh.scan_id)
+        ).all():
+            if (ovh.stitched_crop_path and rr.stitched_crop_path == ovh.stitched_crop_path) or rr.row_index == ovh.row_index:
+                session.delete(rr)
     session.delete(ovh)
     session.commit()
     return {"status": "deleted", "house_id": house_id}

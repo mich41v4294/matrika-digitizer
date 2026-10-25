@@ -2030,18 +2030,19 @@ async def trigger_auto_fs_match_for_fact(fact_id: int) -> FamilySearchMatch | No
 
         if is_matched and match is not None:
             try:
-                await ws_manager.broadcast(
-                    "state",
-                    {
-                        "active_stage": "idle",
-                        "active_model": "familysearch-mcp",
-                        "current_scan_id": scan_id,
-                        "current_row_id": row_id,
-                        "progress_pct": 100,
-                        "message_sk": f"Nájdená zhoda vo FamilySearch pre {person_label} ({match.fs_person_id}).",
-                        "message_en": f"Found FamilySearch match for {person_label} ({match.fs_person_id}).",
-                    },
-                )
+                if ws_manager.latest_state.get("active_stage") in (None, "idle"):
+                    await ws_manager.broadcast(
+                        "state",
+                        {
+                            "active_stage": "idle",
+                            "active_model": "familysearch-mcp",
+                            "current_scan_id": scan_id,
+                            "current_row_id": row_id,
+                            "progress_pct": 100,
+                            "message_sk": f"Nájdená zhoda vo FamilySearch pre {person_label} ({match.fs_person_id}).",
+                            "message_en": f"Found FamilySearch match for {person_label} ({match.fs_person_id}).",
+                        },
+                    )
             except Exception:
                 pass
         return match

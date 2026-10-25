@@ -16,12 +16,29 @@ static TRACE_BASE_CACHE: Lazy<Mutex<HashMap<(String, i64, i64, String, String, S
 fn open_sqlite(db_path: &str) -> Result<Connection, rusqlite::Error> {
     let conn = Connection::open(db_path)?;
     conn.busy_timeout(Duration::from_secs(30))?;
-    let _ = conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
+    let requested_mode = std::env::var("SQLITE_JOURNAL_MODE")
+        .unwrap_or_else(|_| "WAL".to_string())
+        .trim()
+        .to_ascii_uppercase();
+    let mode = match requested_mode.as_str() {
+        "WAL" | "DELETE" | "TRUNCATE" | "PERSIST" | "MEMORY" | "OFF" => requested_mode.as_str(),
+        _ => "WAL",
+    };
+    let pragma_sql = format!(
+        "PRAGMA journal_mode={};
          PRAGMA synchronous=NORMAL;
          PRAGMA temp_store=MEMORY;
          PRAGMA cache_size=-64000;",
+        mode
     );
+    if conn.execute_batch(&pragma_sql).is_err() {
+        let _ = conn.execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA temp_store=MEMORY;
+             PRAGMA cache_size=-64000;",
+        );
+    }
     Ok(conn)
 }
 

@@ -339,40 +339,59 @@ async def rerun_single_row_stage(
         or scan.census_sheet_id is not None
     )
 
-    if req.stage == "all":
-        ocr_out = await run_ocr_for_row(session, scan, row)
-        if is_census:
-            fact = await run_census_extraction_for_row(session, scan, row)
-            if scan.census_sheet_id:
-                reconcile_census_household_relationships(session, scan.census_sheet_id)
-                if fact:
-                    session.refresh(fact)
-            evaluate_census_row_deterministic(session, scan, row, fact, log_trace=False)
-            return {"stage": "all", "ocr": ocr_out, "fact": fact, "skipped_decision": True}
-        dec_out = await run_decision_for_row(session, scan, row)
-        fact = await run_extraction_for_row(session, scan, row)
-        return {"stage": "all", "ocr": ocr_out, "decision": dec_out, "fact": fact}
+    await ws_manager.broadcast(
+        "state",
+        {
+            "current_sheet_id": scan.census_sheet_id,
+            "current_scan_id": scan.id,
+            "current_row_id": row.id,
+            "current_row_index": row.row_index,
+            "total_rows": 1,
+            "active_stage": "ocr" if req.stage in ("all", "ocr") else req.stage,
+            "active_model": settings.model_ocr if req.stage in ("all", "ocr") else settings.model_extract,
+            "progress_pct": 35,
+            "message_sk": f"Opakujem fázu '{req.stage}' pre riadok #{row.row_index} ({scan.filename})...",
+            "message_en": f"Re-running stage '{req.stage}' for row #{row.row_index} ({scan.filename})...",
+        },
+    )
 
-    if req.stage == "ocr":
-        out = await run_ocr_for_row(session, scan, row)
-        return {"stage": "ocr", "result": out}
-    if req.stage == "decision":
-        out = await run_decision_for_row(session, scan, row)
-        return {"stage": "decision", "result": out}
-    if req.stage == "extract":
-        if is_census:
-            fact = await run_census_extraction_for_row(session, scan, row)
-            if scan.census_sheet_id:
-                reconcile_census_household_relationships(session, scan.census_sheet_id)
-                if fact:
-                    session.refresh(fact)
-            evaluate_census_row_deterministic(session, scan, row, fact, log_trace=False)
-        else:
-            fact = await run_extraction_for_row(session, scan, row)
-        return {"stage": "extract", "fact": fact}
-    if req.stage == "mcp":
-        fact = session.exec(select(PersonFact).where(PersonFact.row_id == row.id)).first()
-        if not fact:
+    try:
+        if req.stage == "all":
+            ocr_out = await run_ocr_for_row(session, scan, row)
+            if is_census:
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "current_sheet_id": scan.census_sheet_id,
+                        "current_scan_id": scan.id,
+                        "current_row_id": row.id,
+                        "current_row_index": row.row_index,
+                        "total_rows": 1,
+                        "active_stage": "extract",
+                        "active_model": settings.model_extract,
+                        "progress_pct": 75,
+                        "message_sk": f"Extrahujem údaje riadku #{row.row_index} ({scan.filename})...",
+                        "message_en": f"Extracting row #{row.row_index} ({scan.filename})...",
+                    },
+                )
+                fact = await run_census_extraction_for_row(session, scan, row)
+                if scan.census_sheet_id:
+                    reconcile_census_household_relationships(session, scan.census_sheet_id)
+                    if fact:
+                        session.refresh(fact)
+                evaluate_census_row_deterministic(session, scan, row, fact, log_trace=False)
+                out_payload: dict[str, Any] = {"stage": "all", "ocr": ocr_out, "fact": fact, "skipped_decision": True}
+            else:
+                dec_out = await run_decision_for_row(session, scan, row)
+                fact = await run_extraction_for_row(session, scan, row)
+                out_payload = {"stage": "all", "ocr": ocr_out, "decision": dec_out, "fact": fact}
+        elif req.stage == "ocr":
+            out = await run_ocr_for_row(session, scan, row)
+            out_payload = {"stage": "ocr", "result": out}
+        elif req.stage == "decision":
+            out = await run_decision_for_row(session, scan, row)
+            out_payload = {"stage": "decision", "result": out}
+        elif req.stage == "extract":
             if is_census:
                 fact = await run_census_extraction_for_row(session, scan, row)
                 if scan.census_sheet_id:
@@ -382,10 +401,69 @@ async def rerun_single_row_stage(
                 evaluate_census_row_deterministic(session, scan, row, fact, log_trace=False)
             else:
                 fact = await run_extraction_for_row(session, scan, row)
-        match = await fs_mcp_manager.match_person_fact(session, fact, row)
-        return {"stage": "mcp", "match": match}
+            out_payload = {"stage": "extract", "fact": fact}
+        elif req.stage == "mcp":
+            fact = session.exec(select(PersonFact).where(PersonFact.row_id == row.id)).first()
+            if not fact:
+                if is_census:
+                    fact = await run_census_extraction_for_row(session, scan, row)
+                    if scan.census_sheet_id:
+                        reconcile_census_household_relationships(session, scan.census_sheet_id)
+                        if fact:
+                            session.refresh(fact)
+                    evaluate_census_row_deterministic(session, scan, row, fact, log_trace=False)
+                else:
+                    fact = await run_extraction_for_row(session, scan, row)
+            match = await fs_mcp_manager.match_person_fact(session, fact, row)
+            out_payload = {"stage": "mcp", "match": match}
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown stage {req.stage}")
 
-    raise HTTPException(status_code=400, detail=f"Unknown stage {req.stage}")
+        done_sk = f"Hotovo! Fáza '{req.stage}' pre riadok #{row.row_index} ({scan.filename}) dokončená."
+        done_en = f"Completed stage '{req.stage}' for row #{row.row_index} ({scan.filename})."
+        await ws_manager.broadcast(
+            "state",
+            {
+                "current_sheet_id": scan.census_sheet_id,
+                "current_scan_id": scan.id,
+                "current_row_id": row.id,
+                "active_stage": "idle",
+                "active_model": None,
+                "progress_pct": 100,
+                "message_sk": done_sk,
+                "message_en": done_en,
+            },
+        )
+        await ws_manager.emit_completion(
+            {
+                "status": "completed",
+                "kind": "row_rerun",
+                "sheet_id": scan.census_sheet_id,
+                "scan_id": scan.id,
+                "scan_filename": scan.filename,
+                "rows_processed": 1,
+                "title_sk": f"Riadok #{row.row_index} prečítaný ({req.stage})",
+                "title_en": f"Row #{row.row_index} completed ({req.stage})",
+                "message_sk": done_sk,
+                "message_en": done_en,
+                "target_url": f"/debug/{scan.id}?row={row.id}",
+            }
+        )
+        return out_payload
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await ws_manager.broadcast(
+            "state",
+            {
+                "active_stage": "idle",
+                "active_model": None,
+                "progress_pct": 0,
+                "message_sk": f"Chyba pri opakovaní riadku #{row.row_index}: {exc}",
+                "message_en": f"Error re-running row #{row.row_index}: {exc}",
+            },
+        )
+        raise
 
 
 @router.post("/custom-prompt")

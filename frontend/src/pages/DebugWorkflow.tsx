@@ -422,6 +422,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
     () => searchParams.get("stage") || ""
   );
   const [rerunningRowId, setRerunningRowId] = useState<number | null>(null);
+  const [rerunningStageName, setRerunningStageName] = useState<string | null>(null);
   const [reslicingScan, setReslicingScan] = useState<boolean>(false);
   const [cacheRev, setCacheRev] = useState<number>(() => Date.now());
 
@@ -1043,6 +1044,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
 
   const handleRerunRow = async (rowId: number, stage: string) => {
     setRerunningRowId(rowId);
+    setRerunningStageName(stage);
     setFeedbackResetVersion((v) => v + 1);
     setScanDetail((prev) =>
       prev
@@ -1072,6 +1074,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
       refreshStatus();
     } finally {
       setRerunningRowId(null);
+      setRerunningStageName(null);
     }
   };
 
@@ -2646,25 +2649,45 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
                       {(scanDetail.scan.detected_type === "census"
                         ? (["all", "ocr", "extract", "mcp"] as const)
                         : (["all", "ocr", "decision", "extract", "mcp"] as const)
-                      ).map((st) => (
-                        <button
-                          key={st}
-                          disabled={rerunningRowId === row.id}
-                          onClick={() => handleRerunRow(row.id, st)}
-                          className={`px-2.5 py-1 min-h-[28px] rounded-md text-white text-xs font-mono flex items-center gap-1 cursor-pointer ${
-                            st === "all"
-                              ? "bg-amber-600 hover:bg-amber-700"
-                              : "bg-stone-800 hover:bg-stone-700"
-                          }`}
-                        >
-                          <Play className="w-3 h-3" />{" "}
-                          {st === "all" && scanDetail.scan.detected_type === "census"
-                            ? "ocr→extract"
-                            : st}
-                        </button>
-                      ))}
+                      ).map((st) => {
+                        const isRunningThis =
+                          rerunningRowId === row.id && rerunningStageName === st;
+                        return (
+                          <button
+                            key={st}
+                            disabled={rerunningRowId === row.id}
+                            onClick={() => handleRerunRow(row.id, st)}
+                            className={`px-2.5 py-1 min-h-[28px] rounded-md text-white text-xs font-mono flex items-center gap-1 cursor-pointer disabled:opacity-50 ${
+                              st === "all"
+                                ? "bg-amber-600 hover:bg-amber-700"
+                                : "bg-stone-800 hover:bg-stone-700"
+                            }`}
+                          >
+                            {isRunningThis ? (
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Play className="w-3 h-3" />
+                            )}{" "}
+                            {st === "all" && scanDetail.scan.detected_type === "census"
+                              ? "ocr→extract"
+                              : st}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
+                  {rerunningRowId === row.id && (
+                    <div className="bg-amber-50 border border-amber-300 rounded-lg px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs text-amber-950 font-semibold">
+                      <span className="flex items-center gap-1.5">
+                        <RefreshCw className="w-3.5 h-3.5 text-amber-700 animate-spin" />
+                        <span>
+                          {lang === "sk"
+                            ? `Prebieha opakovanie fázy '${rerunningStageName}' pre riadok #${row.row_index}…`
+                            : `Re-running stage '${rerunningStageName}' for row #${row.row_index}…`}
+                        </span>
+                      </span>
+                    </div>
+                  )}
                   {row.stitched_crop_url && (
                     <img
                       src={`${row.stitched_crop_url}?v=${cacheRev}`}

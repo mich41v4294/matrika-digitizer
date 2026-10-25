@@ -538,7 +538,7 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(page.locator("body")).toContainText("cair-test001");
     await expect(page.getByTestId("sheet-year-btn-1930")).toHaveAttribute("aria-pressed", "true");
 
-    // F. Clicking "Znova spustiť AI OCR & párovanie" on a sheet shows live progress bar card
+    // F. Clicking "Znova spustiť AI OCR & párovanie" on a sheet shows live progress bar card + popup toast notification
     await page.route("**/api/census/sheets/*/download-and-process*", async (route) => {
       await new Promise((r) => setTimeout(r, 350));
       await route.fulfill({
@@ -548,7 +548,7 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
           sheet_id: 1,
           slovakiana_key: "cair-test001",
           scan_ids: [2],
-          pipeline: { status: "ok", rows_processed: 3 },
+          pipeline: { status: "ok", rows_processed: 3, persons_count: 2 },
         }),
       });
     });
@@ -559,6 +559,19 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(rerunBtn).toContainText("Prebieha AI OCR & párovanie");
     await expect(page.getByTestId("sheet-ocr-progress-card")).toContainText(
       "AI OCR čítanie a párovanie hárku bolo úspešne dokončené."
+    );
+    await expect(page.getByTestId("ocr-toast-notification").first()).toBeVisible();
+    await expect(page.getByTestId("ocr-toast-notification").first()).toContainText(
+      "cair-test001"
+    );
+
+    // G. In CensusHub (/scitacie-harky), clicking OCR on a sheet attaches progress directly to that sheet card
+    await page.goto("/scitacie-harky?obec=Obec+Testov%C3%A1", { waitUntil: "networkidle" });
+    const hubOcrBtn = page.getByRole("button", { name: /^OCR$/ }).first();
+    await hubOcrBtn.click();
+    await expect(page.getByTestId("attached-sheet-progress-cair-test001")).toBeVisible();
+    await expect(page.getByTestId("attached-sheet-progress-cair-test001")).toContainText(
+      "AI OCR dokončené"
     );
     await page.unroute("**/api/census/sheets/*/download-and-process*");
 

@@ -18,6 +18,7 @@ import {
 import ZoomableScanViewer, { HoverZoomRowCrop } from "../components/ZoomableScanViewer";
 import OcrFeedbackControls, { type OcrFeedbackItem } from "../components/OcrFeedbackControls";
 import { useFeatureFlags } from "../featureFlags";
+import type { PipelineState } from "../App";
 
 interface ScanSummary {
   id: number;
@@ -222,6 +223,8 @@ export default function BooksOverview({
     searchParams.get("mode") === "original" ? "original" : "overlay"
   );
   const [processingId, setProcessingId] = useState<number | null>(null);
+  const [livePipelineState, setLivePipelineState] = useState<PipelineState | null>(null);
+  const [scanRefreshVersion, setScanRefreshVersion] = useState<number>(0);
   const [feedbackResetVersion, setFeedbackResetVersion] = useState<number>(0);
 
   // Inline Edit & Delete State for Records
@@ -269,8 +272,21 @@ export default function BooksOverview({
     houseNumberFilter,
   ]);
 
-  // Listen for live search_progress broadcasts over /ws/pipeline
+  // Listen for live search_progress and pipeline state broadcasts over /ws/pipeline
   useEffect(() => {
+    const handlePipelineState = (e: Event) => {
+      const custom = e as CustomEvent<PipelineState>;
+      if (custom.detail) {
+        const d = custom.detail;
+        setLivePipelineState(d);
+        if (d.active_stage === "idle" && d.progress_pct >= 100) {
+          void loadData(true);
+          setScanRefreshVersion((v) => v + 1);
+        }
+      }
+    };
+    window.addEventListener("matrika:pipeline-state", handlePipelineState);
+
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${proto}//${window.location.host}/ws/pipeline`;
     let ws: WebSocket | null = null;
@@ -295,6 +311,16 @@ export default function BooksOverview({
                 elapsed_ms: Number(d.elapsed_ms ?? prev.elapsed_ms),
               }));
             }
+          } else if (msg.type === "state" && msg.data) {
+            const d = msg.data as PipelineState;
+            setLivePipelineState(d);
+            if (d.active_stage === "idle" && d.progress_pct >= 100) {
+              void loadData(true);
+              setScanRefreshVersion((v) => v + 1);
+            }
+          } else if (msg.type === "ocr_completed") {
+            void loadData(true);
+            setScanRefreshVersion((v) => v + 1);
           }
         } catch {
           // ignore ws parse error
@@ -304,6 +330,7 @@ export default function BooksOverview({
       // ignore ws connection error
     }
     return () => {
+      window.removeEventListener("matrika:pipeline-state", handlePipelineState);
       if (ws) ws.close();
     };
   }, []);
@@ -528,10 +555,11 @@ export default function BooksOverview({
     return () => {
       cancelled = true;
     };
-  }, [selectedScanId]);
+  }, [selectedScanId, scanRefreshVersion]);
 
   const handleProcessScan = async (scanId: number, maxRows: number | null = null) => {
     setProcessingId(scanId);
+    setSelectedScanId(scanId);
     setActionError(null);
     setFeedbackResetVersion((v) => v + 1);
     setSelectedScanDetail((prev) =>
@@ -564,7 +592,8 @@ export default function BooksOverview({
       }
       refreshStatus();
       setTimeout(() => {
-        void loadData();
+        void loadData(true);
+        setScanRefreshVersion((v) => v + 1);
         setFeedbackResetVersion((v) => v + 1);
       }, 1500);
     } catch {
@@ -838,50 +867,100 @@ export default function BooksOverview({
           </div>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {visibleScans.map((s) => (
-              <div
-                key={s.id}
-                className={`rounded-lg px-3.5 py-2 border text-sm flex items-center gap-3 min-w-0 ${
-                  selectedScanId === s.id
-                    ? "bg-amber-50 border-amber-500 ring-1 ring-amber-400"
-                    : "bg-stone-50 border-stone-200"
-                }`}
-              >
-                <button
-                  onClick={() => setSelectedScanId((prev) => (prev === s.id ? null : s.id))}
-                  className="text-left min-w-0 cursor-pointer"
-                  title={s.error_message || s.filename}
+            {visibleScans.map((s) => {
+              const isScanActive = Boolean(
+                processingId === s.id ||
+                  (livePipelineState?.active_stage &&
+                    livePipelineState.active_stage !== "idle" &&
+                    livePipelineState.current_scan_id === s.id)
+              );
+              const scanPct = isScanActive
+                ? Math.max(8, Math.min(99, Number(livePipelineState?.progress_pct || 12)))
+                : 100;
+              return (
+                <div
+                  key={s.id}
+                  data-testid={`scan-card-${s.id}`}
+                  className={`rounded-lg px-3.5 py-2 border text-sm flex flex-col gap-1.5 min-w-0 transition ${
+                    isScanActive
+                      ? "bg-amber-50 border-amber-500 ring-2 ring-amber-400/70"
+                      : selectedScanId === s.id
+                      ? "bg-amber-50 border-amber-500 ring-1 ring-amber-400"
+                      : "bg-stone-50 border-stone-200"
+                  }`}
                 >
-                  <div className="font-semibold text-stone-900 break-all sm:break-normal flex flex-wrap items-center gap-1.5">
-                    <span className="text-xs font-mono text-stone-600">#{s.id}</span>
-                    <span>{s.filename}</span>
-                  </div>
-                  <div className="text-xs text-stone-600">
-                    {s.batch_id && batchesById.get(s.batch_id)?.parish_or_book
-                      ? `${batchesById.get(s.batch_id)?.parish_or_book} · `
-                      : ""}
-                    {s.detected_year ? `${s.detected_year} · ` : ""}
-                    {s.status} · {s.rows_count} {lang === "sk" ? "riadkov" : "rows"}
-                  </div>
-                  {s.error_message && (
-                    <div
-                      className="text-xs text-red-700"
-                      title={s.error_message}
+                  <div className="flex items-center gap-3 min-w-0">
+                    <button
+                      onClick={() => setSelectedScanId((prev) => (prev === s.id ? null : s.id))}
+                      className="text-left min-w-0 cursor-pointer"
+                      title={s.error_message || s.filename}
                     >
-                      {s.error_message}
+                      <div className="font-semibold text-stone-900 break-all sm:break-normal flex flex-wrap items-center gap-1.5">
+                        <span className="text-xs font-mono text-stone-600">#{s.id}</span>
+                        <span>{s.filename}</span>
+                      </div>
+                      <div className="text-xs text-stone-600">
+                        {s.batch_id && batchesById.get(s.batch_id)?.parish_or_book
+                          ? `${batchesById.get(s.batch_id)?.parish_or_book} · `
+                          : ""}
+                        {s.detected_year ? `${s.detected_year} · ` : ""}
+                        {s.status} · {s.rows_count} {lang === "sk" ? "riadkov" : "rows"}
+                      </div>
+                      {s.error_message && (
+                        <div className="text-xs text-red-700" title={s.error_message}>
+                          {s.error_message}
+                        </div>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => handleProcessScan(s.id)}
+                      disabled={isScanActive}
+                      className="px-3 py-1.5 min-h-[32px] rounded-md bg-stone-900 hover:bg-stone-800 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-60"
+                    >
+                      {isScanActive ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                      ) : (
+                        <Play className="w-3.5 h-3.5" />
+                      )}
+                      {isScanActive
+                        ? `${scanPct}%`
+                        : lang === "sk"
+                        ? "Prečítať"
+                        : "Read"}
+                    </button>
+                  </div>
+
+                  {isScanActive && (
+                    <div
+                      data-testid={`attached-scan-progress-${s.id}`}
+                      className="space-y-1 pt-1 border-t border-amber-200/80 text-xs"
+                    >
+                      <div className="flex items-center justify-between gap-2 text-amber-950 font-semibold">
+                        <span className="truncate max-w-[260px]">
+                          {lang === "sk"
+                            ? livePipelineState?.message_sk || "Prebieha AI OCR strany…"
+                            : livePipelineState?.message_en || "Running scan AI OCR…"}
+                        </span>
+                        {livePipelineState?.total_rows != null &&
+                          livePipelineState.total_rows > 0 && (
+                            <span className="px-1.5 py-0.5 rounded bg-white border border-amber-300 text-[10px] font-bold shrink-0">
+                              {lang === "sk"
+                                ? `Riadok ${livePipelineState.current_row_index || 1}/${livePipelineState.total_rows}`
+                                : `Row ${livePipelineState.current_row_index || 1}/${livePipelineState.total_rows}`}
+                            </span>
+                          )}
+                      </div>
+                      <div className="w-full bg-amber-200/80 rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className="bg-amber-600 h-full transition-all duration-300 animate-pulse"
+                          style={{ width: `${scanPct}%` }}
+                        />
+                      </div>
                     </div>
                   )}
-                </button>
-                <button
-                  onClick={() => handleProcessScan(s.id)}
-                  disabled={processingId === s.id}
-                  className="px-3 py-1.5 min-h-[32px] rounded-md bg-stone-900 hover:bg-stone-800 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer shrink-0"
-                >
-                  <Play className="w-3.5 h-3.5" />
-                  {lang === "sk" ? "Prečítať" : "Read"}
-                </button>
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

@@ -27,6 +27,7 @@ import ZoomableScanViewer, { HoverZoomRowCrop } from "../components/ZoomableScan
 import OcrFeedbackControls, { type OcrFeedbackItem } from "../components/OcrFeedbackControls";
 import { useFeatureFlags } from "../featureFlags";
 import type { CensusSheetDetail, LinkedHouseSheet } from "../api";
+import { emitClientOcrNotification, type PipelineState } from "../App";
 import { matchesPersonNameQuery, stripFemSuffix } from "../utils/fuzzyName";
 
 export interface RelationPresetGroup {
@@ -982,6 +983,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     active_stage: string;
     active_model: string | null;
     progress_pct: number;
+    current_row_index: number | null;
+    total_rows: number | null;
     message_sk: string;
     message_en: string;
     started_at_ms: number;
@@ -992,6 +995,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
     active_stage: "idle",
     active_model: null,
     progress_pct: 0,
+    current_row_index: null,
+    total_rows: null,
     message_sk: "",
     message_en: "",
     started_at_ms: 0,
@@ -1168,6 +1173,82 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
   // Listen for live pipeline state & FamilySearch matching broadcasts over /ws/pipeline
   useEffect(() => {
+    const matchesCurrentSheet = (d: PipelineState) => {
+      if (!sheetId && !detail?.sheet) return false;
+      const curKey = detail?.sheet?.slovakiana_id || sheetId;
+      const curId = detail?.sheet?.id;
+      const frontScanId = detail?.front_scan?.id;
+      const backScanId = detail?.back_scan?.id;
+      if (d.current_slovakiana_key && curKey && d.current_slovakiana_key === curKey) {
+        return true;
+      }
+      if (d.current_sheet_id != null && curId != null && d.current_sheet_id === curId) {
+        return true;
+      }
+      if (
+        d.current_scan_id != null &&
+        (d.current_scan_id === frontScanId || d.current_scan_id === backScanId)
+      ) {
+        return true;
+      }
+      return false;
+    };
+
+    const handlePipelineStateEvent = (e: Event) => {
+      const custom = e as CustomEvent<PipelineState>;
+      const d = custom.detail;
+      if (!d) return;
+      const st = String(d.active_stage || "idle");
+      const isThisSheet = matchesCurrentSheet(d);
+      if (st !== "idle" && (processing || switchingType || isThisSheet)) {
+        setSheetProgress((prev) => {
+          const incomingPct = Number(d.progress_pct ?? 12);
+          return {
+            ...prev,
+            active: true,
+            active_stage: st,
+            active_model: d.active_model ?? prev.active_model,
+            progress_pct: Math.max(prev.progress_pct, Math.min(99, incomingPct)),
+            current_row_index: d.current_row_index ?? prev.current_row_index,
+            total_rows: d.total_rows ?? prev.total_rows,
+            message_sk: String(d.message_sk || prev.message_sk),
+            message_en: String(d.message_en || prev.message_en),
+            started_at_ms: prev.started_at_ms || (d.started_at ? d.started_at * 1000 : Date.now()),
+          };
+        });
+      }
+    };
+
+    const handleSheetUpdatedEvent = (e: Event) => {
+      const custom = e as CustomEvent<any>;
+      const d = custom.detail;
+      const curKey = detail?.sheet?.slovakiana_id || sheetId;
+      const curId = detail?.sheet?.id;
+      if (
+        d &&
+        ((d.slovakiana_key && d.slovakiana_key === curKey) ||
+          (d.sheet_id != null && d.sheet_id === curId))
+      ) {
+        void loadDetail();
+        setSheetProgress((prev) =>
+          prev.active && !processing && !switchingType
+            ? {
+                ...prev,
+                active: false,
+                completedJustNow: true,
+                active_stage: "idle",
+                progress_pct: 100,
+                message_sk: "AI OCR čítanie a párovanie hárku bolo úspešne dokončené.",
+                message_en: "AI OCR reading and sheet matching completed successfully.",
+              }
+            : prev
+        );
+      }
+    };
+
+    window.addEventListener("matrika:pipeline-state", handlePipelineStateEvent);
+    window.addEventListener("matrika:sheet-updated", handleSheetUpdatedEvent);
+
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${proto}//${window.location.host}/ws/pipeline`;
     let ws: WebSocket | null = null;
@@ -1177,11 +1258,12 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         try {
           const msg = JSON.parse(ev.data);
           if (msg.type === "state" && msg.data) {
-            const d = msg.data;
+            const d = msg.data as PipelineState;
             const st = String(d.active_stage || "idle");
+            const isThisSheet = matchesCurrentSheet(d);
             if (st !== "idle") {
               setSheetProgress((prev) => {
-                if (!prev.active && !processing && !switchingType) return prev;
+                if (!prev.active && !processing && !switchingType && !isThisSheet) return prev;
                 const incomingPct = Number(d.progress_pct ?? 12);
                 return {
                   ...prev,
@@ -1189,8 +1271,12 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                   active_stage: st,
                   active_model: d.active_model ?? prev.active_model,
                   progress_pct: Math.max(prev.progress_pct, Math.min(99, incomingPct)),
+                  current_row_index: d.current_row_index ?? prev.current_row_index,
+                  total_rows: d.total_rows ?? prev.total_rows,
                   message_sk: String(d.message_sk || prev.message_sk),
                   message_en: String(d.message_en || prev.message_en),
+                  started_at_ms:
+                    prev.started_at_ms || (d.started_at ? d.started_at * 1000 : Date.now()),
                 };
               });
             }
@@ -1209,6 +1295,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                   active_stage: "mcp_match",
                   active_model: "familysearch-mcp",
                   progress_pct: Math.max(prev.progress_pct, pct),
+                  current_row_index: proc || prev.current_row_index,
+                  total_rows: tot || prev.total_rows,
                   message_sk: person
                     ? `Párujem s matrikou a FamilySearch (${proc}/${tot}): ${person}…`
                     : prev.message_sk,
@@ -1227,9 +1315,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       // ignore ws errors; polling + ticker fallback below
     }
     return () => {
+      window.removeEventListener("matrika:pipeline-state", handlePipelineStateEvent);
+      window.removeEventListener("matrika:sheet-updated", handleSheetUpdatedEvent);
       if (ws) ws.close();
     };
-  }, [processing, switchingType]);
+  }, [processing, switchingType, sheetId, detail?.sheet?.id, detail?.sheet?.slovakiana_id]);
 
   // Smooth client-side progress ticker + status poll while OCR & matching is running on this sheet
   useEffect(() => {
@@ -1389,6 +1479,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       active_stage: isReprocess ? "ocr" : "census_download",
       active_model: isReprocess ? "glm-ocr" : "slovakiana-iiif",
       progress_pct: 8,
+      current_row_index: null,
+      total_rows: null,
       message_sk: isReprocess
         ? "Spúšťam opätovné AI OCR čítanie rukopisu, extrakciu a párovanie hárku…"
         : "Sťahujem skeny (_v + _r) zo Slovakiany a spúšťam AI OCR hárku…",
@@ -1421,6 +1513,11 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       setFeedbackResetVersion((v) => v + 1);
       refreshStatus();
       const totalElapsed = Math.max(1, Math.round((Date.now() - startMs) / 1000));
+      const pRes = resData?.pipeline || {};
+      const rowsProc = Number(pRes.rows_processed ?? resData?.rows_processed ?? 0);
+      const personsCnt = pRes.persons_count;
+      const doneMsgSk = "AI OCR čítanie a párovanie hárku bolo úspešne dokončené.";
+      const doneMsgEn = "AI OCR reading and sheet matching completed successfully.";
       setSheetProgress((prev) => ({
         ...prev,
         active: false,
@@ -1429,9 +1526,22 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         active_model: null,
         progress_pct: 100,
         elapsed_sec: totalElapsed,
-        message_sk: "AI OCR čítanie a párovanie hárku bolo úspešne dokončené.",
-        message_en: "AI OCR reading and sheet matching completed successfully.",
+        message_sk: doneMsgSk,
+        message_en: doneMsgEn,
       }));
+      emitClientOcrNotification({
+        status: "completed",
+        kind: "census_sheet",
+        sheet_id: detail?.sheet?.id ?? resData?.sheet_id ?? null,
+        slovakiana_key: detail?.sheet?.slovakiana_id || resData?.slovakiana_key || sheetId,
+        rows_processed: rowsProc,
+        persons_count: personsCnt,
+        duration_sec: totalElapsed,
+        title_sk: "AI OCR hárku dokončené!",
+        title_en: "Sheet AI OCR completed!",
+        message_sk: doneMsgSk,
+        message_en: doneMsgEn,
+      });
     } catch (err: any) {
       setActionError(
         err?.message ||
@@ -1476,6 +1586,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       active_stage: "layout",
       active_model: "glm-ocr",
       progress_pct: 10,
+      current_row_index: null,
+      total_rows: null,
       message_sk: "Mením typ hárku a spúšťam AI OCR extrakciu riadkov…",
       message_en: "Switching sheet type and running AI OCR row extraction…",
       started_at_ms: startMs,
@@ -1505,6 +1617,8 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       setFeedbackResetVersion((v) => v + 1);
       refreshStatus();
       const totalElapsed = Math.max(1, Math.round((Date.now() - startMs) / 1000));
+      const doneMsgSk = "Typ hárku bol zmenený a AI OCR extrakcia bola dokončená.";
+      const doneMsgEn = "Sheet type updated and AI OCR extraction completed.";
       setSheetProgress((prev) => ({
         ...prev,
         active: false,
@@ -1513,9 +1627,20 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         active_model: null,
         progress_pct: 100,
         elapsed_sec: totalElapsed,
-        message_sk: "Typ hárku bol zmenený a AI OCR extrakcia bola dokončená.",
-        message_en: "Sheet type updated and AI OCR extraction completed.",
+        message_sk: doneMsgSk,
+        message_en: doneMsgEn,
       }));
+      emitClientOcrNotification({
+        status: "completed",
+        kind: "census_sheet",
+        sheet_id: detail?.sheet?.id ?? null,
+        slovakiana_key: sheetRef,
+        duration_sec: totalElapsed,
+        title_sk: "Extrakcia hárku dokončená!",
+        title_en: "Sheet extraction completed!",
+        message_sk: doneMsgSk,
+        message_en: doneMsgEn,
+      });
     } catch (err: any) {
       setDetail((prev) =>
         prev
@@ -2736,6 +2861,15 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
+                    {isRunning &&
+                      sheetProgress.total_rows != null &&
+                      sheetProgress.total_rows > 0 && (
+                        <span className="px-2 py-0.5 rounded bg-white border border-amber-300 text-amber-950 font-bold text-[11px]">
+                          {lang === "sk"
+                            ? `Riadok ${sheetProgress.current_row_index || 1}/${sheetProgress.total_rows}`
+                            : `Row ${sheetProgress.current_row_index || 1}/${sheetProgress.total_rows}`}
+                        </span>
+                      )}
                     {sheetProgress.elapsed_sec > 0 && (
                       <span className="text-stone-600 font-medium">
                         {sheetProgress.elapsed_sec} s

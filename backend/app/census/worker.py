@@ -34,6 +34,11 @@ from backend.app.pipeline.lexicon import (
 from backend.app.search.fts import bulk_index_census_sheets, index_census_sheet
 
 _ACTIVE_JOB_FLAGS: dict[int, bool] = {}
+_ACTIVE_JOB_RUNTIME: dict[int, dict[str, Any]] = {}
+
+
+def get_job_runtime_info(job_id: int) -> dict[str, Any] | None:
+    return _ACTIVE_JOB_RUNTIME.get(job_id)
 
 DONE_PIPELINE_STATUSES: tuple[str, ...] = ("ocr_done", "extracted", "matched")
 DONE_DOWNLOAD_ONLY_STATUSES: tuple[str, ...] = (
@@ -377,6 +382,7 @@ async def run_catalog_harvest_job(
                 await ws_manager.broadcast(
                     "state",
                     {
+                        "job_id": job_id,
                         "active_stage": "census_harvest",
                         "active_model": "slovakiana-wcm-api",
                         "progress_pct": pct,
@@ -406,16 +412,32 @@ async def run_catalog_harvest_job(
                     session.add(job)
                     session.commit()
 
+            done_sk = f"Katalóg sčítacích hárkov aktualizovaný ({total_harvested:,} hárkov)."
+            done_en = f"Census catalog harvest finished ({total_harvested:,} sheets)."
             await ws_manager.broadcast(
                 "state",
                 {
                     "active_stage": "idle",
                     "active_model": None,
                     "progress_pct": 100,
-                    "message_sk": f"Katalóg sčítacích hárkov aktualizovaný ({total_harvested:,} hárkov).",
-                    "message_en": f"Census catalog harvest finished ({total_harvested:,} sheets).",
+                    "message_sk": done_sk,
+                    "message_en": done_en,
                 },
             )
+            if total_harvested > 0:
+                await ws_manager.emit_completion(
+                    {
+                        "status": "completed",
+                        "kind": "census_harvest",
+                        "job_id": job_id,
+                        "rows_processed": total_harvested,
+                        "title_sk": "Katalóg Slovakiana stiahnutý",
+                        "title_en": "Slovakiana catalog harvested",
+                        "message_sk": done_sk,
+                        "message_en": done_en,
+                        "target_url": "/scitacie-harky",
+                    }
+                )
         return {
             "job_id": job_id,
             "harvested": total_harvested,
@@ -447,6 +469,7 @@ async def run_catalog_harvest_job(
     finally:
         if finalize_job:
             _ACTIVE_JOB_FLAGS.pop(job_id, None)
+            _ACTIVE_JOB_RUNTIME.pop(job_id, None)
 
 
 async def download_and_process_single_census_sheet(
@@ -456,6 +479,7 @@ async def download_and_process_single_census_sheet(
     run_mcp: bool = True,
     max_rows: int | None = None,
     force_sheet_type: str | None = None,
+    finalize_idle: bool = True,
     overview_only: bool = False,
 ) -> dict[str, Any]:
     """
@@ -481,10 +505,15 @@ async def download_and_process_single_census_sheet(
     await ws_manager.broadcast(
         "state",
         {
+            "current_sheet_id": sheet_id,
+            "current_slovakiana_key": slovakiana_key,
+            "current_sheet_label": sheet_label,
             "active_stage": "census_download",
             "active_model": "slovakiana-iiif",
             "current_scan_id": initial_scan_id,
             "current_row_id": None,
+            "current_row_index": None,
+            "total_rows": None,
             "progress_pct": 5,
             "message_sk": f"Sťahujem metadátový záznam a skeny zo Slovakiany ({sheet_label})…",
             "message_en": f"Fetching metadata and scans from Slovakiana ({sheet_label})…",
@@ -508,18 +537,22 @@ async def download_and_process_single_census_sheet(
             sheet.has_images = False
             session.add(sheet)
             session.commit()
-            await ws_manager.broadcast(
-                "state",
-                {
-                    "active_stage": "idle",
-                    "active_model": None,
-                    "current_scan_id": None,
-                    "current_row_id": None,
-                    "progress_pct": 100,
-                    "message_sk": f"Hárok {sheet_label} nemá v Slovakiane priradené skeny.",
-                    "message_en": f"Sheet {sheet_label} has no scan images on Slovakiana.",
-                },
-            )
+            if finalize_idle:
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "current_sheet_id": sheet_id,
+                        "current_slovakiana_key": slovakiana_key,
+                        "current_sheet_label": sheet_label,
+                        "active_stage": "idle",
+                        "active_model": None,
+                        "current_scan_id": None,
+                        "current_row_id": None,
+                        "progress_pct": 100,
+                        "message_sk": f"Hárok {sheet_label} nemá v Slovakiane priradené skeny.",
+                        "message_en": f"Sheet {sheet_label} has no scan images on Slovakiana.",
+                    },
+                )
             return {"sheet_id": sheet_id, "status": "no_images"}
 
         # Ensure a Batch exists for this municipality & census year
@@ -570,6 +603,9 @@ async def download_and_process_single_census_sheet(
         await ws_manager.broadcast(
             "state",
             {
+                "current_sheet_id": sheet_id,
+                "current_slovakiana_key": slovakiana_key,
+                "current_sheet_label": sheet_label,
                 "active_stage": "census_download",
                 "active_model": "slovakiana-iiif",
                 "current_scan_id": initial_scan_id,
@@ -635,6 +671,10 @@ async def download_and_process_single_census_sheet(
             if scan.id is not None:
                 downloaded_scan_ids.append(scan.id)
 
+    for jid, rt in list(_ACTIVE_JOB_RUNTIME.items()):
+        if rt.get("current_sheet_id") == sheet_id:
+            rt["downloaded_sheets"] = int(rt.get("downloaded_sheets") or 0) + 1
+
     if run_pipeline and downloaded_scan_ids:
         if overview_only:
             with Session(engine) as session:
@@ -661,6 +701,7 @@ async def download_and_process_single_census_sheet(
             max_rows=max_rows,
             run_mcp=run_mcp,
             force_sheet_type=force_sheet_type,
+            finalize_idle=finalize_idle,
             overview_only=overview_only,
         )
         return {
@@ -670,18 +711,38 @@ async def download_and_process_single_census_sheet(
             "pipeline": pipeline_res,
         }
 
-    await ws_manager.broadcast(
-        "state",
-        {
-            "active_stage": "idle",
-            "active_model": None,
-            "current_scan_id": downloaded_scan_ids[0] if downloaded_scan_ids else None,
-            "current_row_id": None,
-            "progress_pct": 100,
-            "message_sk": f"Hotovo: stiahnuté skeny pre hárok {sheet_label}.",
-            "message_en": f"Done: downloaded scans for sheet {sheet_label}.",
-        },
-    )
+    if finalize_idle:
+        done_sk = f"Hotovo: stiahnuté skeny pre hárok {sheet_label}."
+        done_en = f"Done: downloaded scans for sheet {sheet_label}."
+        await ws_manager.broadcast(
+            "state",
+            {
+                "current_sheet_id": sheet_id,
+                "current_slovakiana_key": slovakiana_key,
+                "current_sheet_label": sheet_label,
+                "active_stage": "idle",
+                "active_model": None,
+                "current_scan_id": downloaded_scan_ids[0] if downloaded_scan_ids else None,
+                "current_row_id": None,
+                "progress_pct": 100,
+                "message_sk": done_sk,
+                "message_en": done_en,
+            },
+        )
+        await ws_manager.emit_completion(
+            {
+                "status": "completed",
+                "kind": "census_sheet",
+                "sheet_id": sheet_id,
+                "slovakiana_key": slovakiana_key,
+                "sheet_label": sheet_label,
+                "title_sk": "Skeny hárku stiahnuté",
+                "title_en": "Sheet scans downloaded",
+                "message_sk": done_sk,
+                "message_en": done_en,
+                "target_url": f"/scitacie-harky/{slovakiana_key or sheet_id}",
+            }
+        )
     return {
         "sheet_id": sheet_id,
         "slovakiana_key": slovakiana_key,
@@ -726,6 +787,17 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
         )
         existing_total_count = len(all_matches)
         already_done_count = max(0, existing_total_count - len(undone_matches))
+
+    _ACTIVE_JOB_RUNTIME[job_id] = {
+        "job_id": job_id,
+        "downloaded_sheets": 0,
+        "processed_sheets": 0,
+        "total_sheets": len(undone_matches[:limit_sheets]),
+        "current_sheet_id": None,
+        "current_slovakiana_key": None,
+        "current_sheet_label": None,
+        "current_sheet_index": 0,
+    }
 
     # If the local DB has fewer than `limit_sheets` undone sheets (or when `overview_only=True`
     # and we need the full village catalog so overview sheets at the end of the remote pagination
@@ -773,6 +845,7 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
             break
 
     candidates = undone_matches[:limit_sheets]
+    _ACTIVE_JOB_RUNTIME[job_id]["total_sheets"] = len(candidates)
 
     with Session(engine) as session:
         job = session.get(CensusDownloadJob, job_id)
@@ -791,25 +864,50 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
             break
         if sheet.id is None:
             continue
+        sheet_label = f"{sheet.municipality or ''} č. {sheet.house_number or sheet.sheet_number or sheet.slovakiana_key}".strip()
+        _ACTIVE_JOB_RUNTIME[job_id].update(
+            {
+                "current_sheet_id": sheet.id,
+                "current_slovakiana_key": sheet.slovakiana_key,
+                "current_sheet_label": sheet_label,
+                "current_sheet_index": idx + 1,
+                "total_sheets": len(candidates),
+            }
+        )
         try:
             await ws_manager.broadcast(
                 "state",
                 {
+                    "job_id": job_id,
+                    "job_sheet_index": idx + 1,
+                    "job_total_sheets": len(candidates),
+                    "current_sheet_id": sheet.id,
+                    "current_slovakiana_key": sheet.slovakiana_key,
+                    "current_sheet_label": sheet_label,
                     "active_stage": "census_download",
                     "active_model": "slovakiana-iiif",
-                    "progress_pct": int(100 * idx / max(1, len(candidates))),
-                    "message_sk": f"Sťahujem a spracúvam hárok {idx + 1}/{len(candidates)}: {sheet.municipality} č. {sheet.house_number or sheet.sheet_number or ''}",
-                    "message_en": f"Downloading & processing sheet {idx + 1}/{len(candidates)}: {sheet.municipality}",
+                    "progress_pct": max(5, int(100 * idx / max(1, len(candidates)))),
+                    "message_sk": f"Sťahujem a spracúvam hárok {idx + 1}/{len(candidates)}: {sheet_label}",
+                    "message_en": f"Downloading & processing sheet {idx + 1}/{len(candidates)}: {sheet_label}",
                 },
             )
+            dp_kwargs: dict[str, Any] = {
+                "run_pipeline": run_ocr,
+                "run_mcp": run_mcp,
+                "max_rows": max_rows,
+            }
+            if overview_only:
+                dp_kwargs["overview_only"] = overview_only
             await download_and_prepare_or_process(
                 sheet.id,
-                run_pipeline=run_ocr,
-                run_mcp=run_mcp,
-                max_rows=max_rows,
-                overview_only=overview_only,
+                **dp_kwargs,
             )
             processed += 1
+            _ACTIVE_JOB_RUNTIME[job_id]["processed_sheets"] = processed
+            _ACTIVE_JOB_RUNTIME[job_id]["downloaded_sheets"] = max(
+                int(_ACTIVE_JOB_RUNTIME[job_id].get("downloaded_sheets") or 0),
+                processed,
+            )
         except Exception as exc:
             failed += 1
             with Session(engine) as session:
@@ -829,15 +927,17 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
                 session.add(job)
                 session.commit()
 
+    was_not_paused = _ACTIVE_JOB_FLAGS.get(job_id, True)
     with Session(engine) as session:
         job = session.get(CensusDownloadJob, job_id)
         if job:
-            job.status = "completed" if _ACTIVE_JOB_FLAGS.get(job_id, True) else "paused"
+            job.status = "completed" if was_not_paused else "paused"
             job.updated_at = utcnow()
             session.add(job)
             session.commit()
 
     _ACTIVE_JOB_FLAGS.pop(job_id, None)
+    _ACTIVE_JOB_RUNTIME.pop(job_id, None)
 
     done_msg_sk = (
         f"Všetky vybrané sčítacie hárky sú už spracované ({already_done_count} hotových, 0 zostávajúcich)."
@@ -855,11 +955,28 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
         {
             "active_stage": "idle",
             "active_model": None,
+            "current_sheet_id": None,
+            "current_slovakiana_key": None,
+            "current_sheet_label": None,
             "progress_pct": 100,
             "message_sk": done_msg_sk,
             "message_en": done_msg_en,
         },
     )
+    if was_not_paused:
+        await ws_manager.emit_completion(
+            {
+                "status": "completed" if failed == 0 or processed > 0 else "error",
+                "kind": "census_job",
+                "job_id": job_id,
+                "rows_processed": processed,
+                "title_sk": "Hromadné OCR dokončené" if run_ocr else "Hromadné sťahovanie dokončené",
+                "title_en": "Batch census OCR completed" if run_ocr else "Batch census download completed",
+                "message_sk": done_msg_sk,
+                "message_en": done_msg_en,
+                "target_url": "/scitacie-harky",
+            }
+        )
     return {
         "job_id": job_id,
         "processed": processed,
@@ -881,5 +998,6 @@ async def download_and_prepare_or_process(
         run_pipeline=run_pipeline,
         run_mcp=run_mcp,
         max_rows=max_rows,
+        finalize_idle=False,
         overview_only=overview_only,
     )

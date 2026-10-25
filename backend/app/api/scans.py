@@ -136,6 +136,24 @@ def list_scans(
     is_census: bool | None = None,
 ) -> dict[str, Any]:
     stmt = select(ScanImage).order_by(ScanImage.id.desc())
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "list_scans_rs"):
+            c_root, m_root, u_root = _get_resolved_media_roots()
+            return json.loads(
+                _rust_db.list_scans_rs(
+                    db_p,
+                    scan_type=scan_type,
+                    is_census=is_census,
+                    census_root=str(c_root) if c_root else None,
+                    matrika_root=str(m_root) if m_root else None,
+                    upload_root=str(u_root) if u_root else None,
+                )
+            )
+    except Exception:
+        pass
     if scan_type == "matrika" or is_census is False:
         stmt = stmt.where(
             ScanImage.census_sheet_id.is_(None),  # type: ignore[union-attr]

@@ -344,8 +344,19 @@ _COUNTRY = frozenset(
 )
 
 
+try:
+    import matrika_db_rs as _rust_cmp
+except ImportError:
+    _rust_cmp = None
+
+
 def _fold(text: str) -> str:
     """Lower-case, strip accents and punctuation, collapse spaces."""
+    if not text:
+        return ""
+    if _rust_cmp is not None:
+        folded = str(_rust_cmp.fold_text_diacritics_rs(text))
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", folded)).strip()
     text = unicodedata.normalize("NFKD", text or "")
     text = "".join(c for c in text if not unicodedata.combining(c)).lower()
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", text)).strip()
@@ -363,7 +374,11 @@ def place_parts(text: str) -> list[str]:
 
 def _alike(a: str, b: str) -> bool:
     """Whether two folded words or names are the same allowing a spelling slip."""
-    return a == b or SequenceMatcher(None, a, b).ratio() >= 0.85
+    if a == b:
+        return True
+    if _rust_cmp is not None and hasattr(_rust_cmp, "sequence_ratio_rs"):
+        return float(_rust_cmp.sequence_ratio_rs(a, b)) >= 0.85
+    return SequenceMatcher(None, a, b).ratio() >= 0.85
 
 
 def _within(short: list[str], long: list[str]) -> bool:

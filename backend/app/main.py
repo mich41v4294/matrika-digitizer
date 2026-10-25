@@ -73,7 +73,11 @@ async def verify_optional_api_key(request: Request, call_next):
     if configured_key:
         path = request.url.path
         method = request.method.upper()
-        needs_auth = path.startswith("/api/debug") or (
+        is_public_feature_flags_get = method == "GET" and path in {
+            "/api/debug/feature-flags",
+            "/api/feature-flags",
+        }
+        needs_auth = (path.startswith("/api/debug") and not is_public_feature_flags_get) or (
             path.startswith("/api/") and method in {"POST", "PUT", "PATCH", "DELETE"}
         )
         if needs_auth:
@@ -400,7 +404,13 @@ async def system_status() -> dict[str, Any]:
         },
         "counts": counts_payload,
         "pipeline_state": ws.ws_manager.latest_state,
+        "feature_flags": settings.get_feature_flags(),
     }
+
+
+@app.get("/api/feature-flags")
+def get_public_feature_flags() -> dict[str, Any]:
+    return {"flags": settings.get_feature_flags()}
 
 
 if settings.frontend_dist_dir.exists():

@@ -311,6 +311,31 @@ class TestLLMTypeSafety(unittest.TestCase):
         r_tr_mcp = client.get("/api/debug/traces?stage=mcp_search")
         self.assertEqual(r_tr_mcp.status_code, 200)
 
+        # 5. Global feature flags sync across all endpoints (/api/debug/feature-flags, /api/feature-flags, /api/status)
+        orig_flags = client.get("/api/debug/feature-flags").json().get("flags", {})
+        try:
+            r_set_flags = client.post(
+                "/api/debug/feature-flags",
+                json={"flags": {"tab_questions": False, "manual_scan_zoom": False}},
+            )
+            self.assertEqual(r_set_flags.status_code, 200)
+            updated_flags = r_set_flags.json()["flags"]
+            self.assertFalse(updated_flags["tab_questions"])
+            self.assertFalse(updated_flags["manual_scan_zoom"])
+
+            r_pub_flags = client.get("/api/feature-flags")
+            self.assertEqual(r_pub_flags.status_code, 200)
+            self.assertFalse(r_pub_flags.json()["flags"]["tab_questions"])
+            self.assertFalse(r_pub_flags.json()["flags"]["manual_scan_zoom"])
+
+            r_status = client.get("/api/status")
+            self.assertEqual(r_status.status_code, 200)
+            self.assertFalse(r_status.json()["feature_flags"]["tab_questions"])
+            self.assertFalse(r_status.json()["feature_flags"]["manual_scan_zoom"])
+        finally:
+            if orig_flags:
+                client.post("/api/debug/feature-flags", json={"flags": orig_flags})
+
 
 class TestAreaPeriodNameMatching(unittest.TestCase):
     def test_yargo_and_kowacs_surname_matches(self) -> None:
@@ -641,6 +666,179 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
             )
             self.assertNotIn("Priezvisko má byť Kováčová, nie Koráčová", md_after_reset)
             self.assertIn("_No OCR feedback entries recorded yet._", md_after_reset)
+
+    def test_rust_db_pool_queries_export_and_image_ops(self) -> None:
+        import json
+        import numpy as np
+        from sqlmodel import Session, SQLModel, create_engine
+        import matrika_db_rs as _rust_db
+        from backend.app.db.models import CensusSheet, PersonFact, RecordRow, ScanImage
+        from backend.app.search.fts import ensure_fts_schema
+
+        # 1. HTML table to pipe text & base64 encoding
+        html_in = "<table><tr><td> 1. </td><td> Ján &amp; Mária </td></tr><tr><td>2.</td><td>Kováč</td></tr></table>"
+        self.assertEqual(
+            _rust_db.html_table_to_pipe_text_rs(html_in),
+            "1. | Ján & Mária\n2. | Kováč",
+        )
+        self.assertEqual(_rust_db.base64_encode_bytes_rs(b"Matrika"), "TWF0cmlrYQ==")
+
+        # 2. Auditor crayon suppression in Rust
+        synth = np.full((32, 48, 3), 240, dtype=np.uint8)
+        synth[10:20, 10:20] = [40, 200, 40]  # bright green crayon
+        synth[5:8, 5:8] = [20, 20, 20]  # dark ink
+        cleaned_bytes = _rust_db.suppress_auditor_crayon_bytes_rs(synth.tobytes(), 32, 48)
+        cleaned = np.frombuffer(cleaned_bytes, dtype=np.uint8).reshape((32, 48, 3))
+        self.assertGreater(int(cleaned[15, 15, 0]), 150)  # green crayon attenuated to warm paper
+        self.assertLess(int(cleaned[6, 6, 0]), 50)  # dark ink preserved
+
+        # 3. File-backed SQLite pooled queries, FTS bulk index, local cross-match & GEDCOM/CSV export
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_file = Path(tmpdir) / "test_rust_pool.db"
+            f_engine = create_engine(f"sqlite:///{db_file}")
+            SQLModel.metadata.create_all(f_engine)
+            ensure_fts_schema(f_engine)
+
+            with Session(f_engine) as session:
+                s30 = CensusSheet(
+                    slovakiana_key="cair-rs1930",
+                    census_year=1930,
+                    district="Trnava",
+                    municipality="Horný Čepeň",
+                    municipality_folded="horny cepen",
+                    municipality_key="10232",
+                    street_raw="Škovránková",
+                    house_number="12",
+                    house_number_int=12,
+                    sheet_number="0012",
+                    household_owner="Ján Kováč",
+                    sheet_type="household",
+                    download_status="extracted",
+                )
+                s40 = CensusSheet(
+                    slovakiana_key="cair-rs1940",
+                    census_year=1940,
+                    district="Trnava",
+                    municipality="Horný Čepeň",
+                    municipality_folded="horny cepen",
+                    municipality_key="10232",
+                    street_raw="Škovránková",
+                    house_number="12",
+                    house_number_int=12,
+                    sheet_number="0112",
+                    household_owner="Ján Kováč",
+                    sheet_type="household",
+                    download_status="cataloged",
+                )
+                session.add_all([s30, s40])
+                session.commit()
+                session.refresh(s30)
+                session.refresh(s40)
+
+                sc = ScanImage(
+                    census_sheet_id=s30.id,
+                    filename="cair-rs1930_front.jpg",
+                    original_path="/media/uploads/slovakiana/cair-rs1930_front.jpg",
+                    detected_type="census",
+                    status="extracted",
+                )
+                session.add(sc)
+                session.commit()
+                session.refresh(sc)
+
+                rr = RecordRow(scan_id=sc.id or 0, row_index=1, status="extracted", record_type="census")
+                session.add(rr)
+                session.commit()
+                session.refresh(rr)
+
+                bapt = PersonFact(
+                    row_id=rr.id or 0,
+                    scan_id=sc.id or 0,
+                    record_type="baptism",
+                    event_year=1895,
+                    given_name_raw="Joannes",
+                    given_name_sk="Ján",
+                    surname_raw="Kovács",
+                    surname_normalized="Kováč",
+                    sex="M",
+                )
+                cens = PersonFact(
+                    row_id=rr.id or 0,
+                    scan_id=sc.id or 0,
+                    census_sheet_id=s30.id,
+                    record_type="census",
+                    event_year=1930,
+                    birth_year_est=1895,
+                    birth_or_event_date="14.05.1895",
+                    given_name_raw="Ján",
+                    given_name_sk="Ján",
+                    surname_raw="Kováč",
+                    surname_normalized="Kováč",
+                    relation_to_head="hlava domácnosti",
+                    sex="M",
+                    birth_place_municipality="Horný Čepeň",
+                    village_sk="Horný Čepeň",
+                    house_number="12",
+                )
+                session.add_all([bapt, cens])
+                session.commit()
+                session.refresh(bapt)
+                session.refresh(cens)
+                s30_id = int(s30.id or 0)
+                bapt_id = int(bapt.id or 0)
+                cens_id = int(cens.id or 0)
+
+            db_p = str(db_file)
+            self.assertEqual(_rust_db.bulk_index_person_facts_rs(db_p, None), 2)
+            self.assertEqual(_rust_db.bulk_index_census_sheets_rs(db_p, None), 2)
+
+            muni_sum = json.loads(_rust_db.get_municipalities_summary_rs(db_p, 1930, None))
+            self.assertEqual(muni_sum["total_municipalities"], 1)
+            self.assertEqual(muni_sum["municipalities"][0]["municipality"], "Horný Čepeň")
+            self.assertEqual(muni_sum["municipalities"][0]["extracted_persons_count"], 1)
+
+            flt_res = json.loads(
+                _rust_db.filter_census_sheets_and_previews_rs(
+                    db_p,
+                    [s30_id],
+                    person_name="Ján Kováč",
+                    birth_year="1895±1",
+                )
+            )
+            self.assertEqual(flt_res["filtered_sheet_ids"], [s30_id])
+
+            linked = json.loads(_rust_db.batch_find_linked_house_sheets_rs(db_p, [s30_id]))
+            self.assertEqual(linked[str(s30_id)][0]["cair_id"], "cair-rs1940")
+
+            lrm = json.loads(
+                _rust_db.match_census_to_local_matrika_rs(db_p, cens_id, "2026-10-25T12:00:00Z")
+            )
+            self.assertEqual(len(lrm), 1)
+            self.assertEqual(lrm[0]["matrika_fact_id"], bapt_id)
+
+            csv_out = _rust_db.export_facts_to_csv_rs(db_p, False)
+            self.assertIn("cair-rs1930", csv_out)
+            ged_out = _rust_db.export_facts_to_gedcom_rs(db_p, "25 OCT 2026", False)
+            self.assertIn("1 NAME Ján /Kováč/", ged_out)
+            self.assertIn("2 DATE 14 MAY 1895", ged_out)
+
+            loc_ids, loc_streets = _rust_db.query_census_sheet_ids_by_location_rs(
+                db_p, 1930, "Horný Čepeň", "Galanta", None, True
+            )
+            self.assertEqual(loc_ids, [s30_id])
+            self.assertIn("Škovránková", loc_streets)
+
+            fts_expr = _rust_db.build_fts_match_expression_rs("Kováčová Ján", True)
+            self.assertIn("kovac*", fts_expr)
+            self.assertIn("joannes", fts_expr)
+
+            cat_sids = _rust_db.match_catalog_sheets_and_overview_owners_rs(
+                db_p, "Jan Kovac", 1930, 1930, "Horný Čepeň", None
+            )
+            self.assertIn(s30_id, cat_sids)
+
+            self.assertAlmostEqual(_rust_db.sequence_ratio_rs("slovenska", "slovensko"), 16.0 / 18.0)
+            _rust_db.clear_db_pool_rs(db_p)
 
 
 

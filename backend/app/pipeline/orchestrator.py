@@ -152,6 +152,7 @@ def _persist_layout_result(
         census_sheet_id=scan.census_sheet_id,
         scan_id=scan.id,
         commit=False,
+        persist_report=False,
     )
     session.add(trace)
     session.commit()

@@ -949,6 +949,7 @@ def reset_ocr_feedback(
     overview_house_id: int | None = None,
     municipal_district_id: int | None = None,
     commit: bool = True,
+    persist_report: bool = True,
 ) -> int:
     """
     Deletes all `OCRFeedback` records (verdicts and comments) associated with the specified
@@ -979,10 +980,15 @@ def reset_ocr_feedback(
                         person_fact_id=person_fact_id,
                         overview_house_id=overview_house_id,
                         municipal_district_id=municipal_district_id,
+                        persist_files=persist_report,
                     )
                 )
             except Exception:
                 pass
+
+    all_fb = list(session.exec(select(OCRFeedback)).all())
+    if not all_fb:
+        return 0
 
     target_sheet_ids: set[int] = {census_sheet_id} if census_sheet_id else set()
     target_scan_ids: set[int] = set(scan_ids or [])
@@ -1087,9 +1093,6 @@ def reset_ocr_feedback(
                     ):
                         target_dist_ids.add(md.id)
 
-    all_fb = list(session.exec(select(OCRFeedback)).all())
-    if not all_fb:
-        return 0
     deleted_count = 0
     for fb in all_fb:
         should_delete = False
@@ -1117,9 +1120,10 @@ def reset_ocr_feedback(
     if deleted_count > 0:
         if commit:
             session.commit()
+            if persist_report:
+                persist_llm_debug_report_files(session)
         else:
             session.flush()
-        persist_llm_debug_report_files(session)
 
     return deleted_count
 

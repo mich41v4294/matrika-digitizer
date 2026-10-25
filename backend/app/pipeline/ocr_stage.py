@@ -26,6 +26,13 @@ def html_table_to_pipe_text(raw_html_or_text: str) -> str:
         return ""
     if "<table" not in raw_html_or_text.lower() and "<td" not in raw_html_or_text.lower():
         return raw_html_or_text.strip()
+    try:
+        from backend.app.pipeline.lexicon import _rust_lex
+
+        if _rust_lex is not None and hasattr(_rust_lex, "html_table_to_pipe_text_rs"):
+            return str(_rust_lex.html_table_to_pipe_text_rs(raw_html_or_text))
+    except Exception:
+        pass
     soup = BeautifulSoup(raw_html_or_text, "html.parser")
     rows_out: list[str] = []
     for tr in soup.find_all("tr"):
@@ -298,6 +305,7 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
             census_sheet_id=sheet.id if sheet else None,
             scan_id=scan.id,
             commit=False,
+            persist_report=False,
         )
     session.add(scan)
     session.commit()
@@ -506,6 +514,6 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
     session.add(row)
     from backend.app.pipeline.feedback import reset_ocr_feedback
 
-    reset_ocr_feedback(session, row_id=row.id, commit=False)
+    reset_ocr_feedback(session, row_id=row.id, commit=False, persist_report=False)
     session.commit()
     return {"left": left_text, "right": right_text}

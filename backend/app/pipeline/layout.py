@@ -161,6 +161,25 @@ def _detect_vertical_column_angle_prior(gray: np.ndarray, x0: int, x1: int) -> f
     b_profs_arr = np.array(b_profs, dtype=np.float32)
     b_ys_arr = np.array(b_ys, dtype=np.float32)
 
+    try:
+        from backend.app.pipeline.lexicon import _rust_lex
+
+        if _rust_lex is not None and hasattr(_rust_lex, "sheared_radon_best_angle_rs"):
+            best_a_rs, _ = _rust_lex.sheared_radon_best_angle_rs(
+                b_profs_arr.ravel().tolist(),
+                len(b_ys_arr),
+                sw,
+                (-b_ys_arr).tolist(),
+                -7.5,
+                7.5,
+                151,
+                0,
+                sw,
+            )
+            return float(best_a_rs)
+    except Exception:
+        pass
+
     best_a = 0.0
     best_sc = -1.0
     for a in np.linspace(-7.5, 7.5, 151):
@@ -233,18 +252,42 @@ def _analyze_half_page_candidates(
 
     by0, by1 = int(h * 0.12), int(h * 0.96)
     best_a = 0.0
-    best_sc = -1.0
-    for a in np.linspace(search_min, search_max, 141):
-        tan_a = float(np.tan(np.radians(a)))
-        acc = _sheared_projection(profs, xs, tan_a, h)
-        diff = np.diff(acc[by0:by1])
-        sc = float(np.sum(diff * diff))
-        if sc > best_sc:
-            best_sc = sc
-            best_a = float(a)
+    acc: np.ndarray | None = None
+    try:
+        from backend.app.pipeline.lexicon import _rust_lex
 
-    tan_a = float(np.tan(np.radians(best_a)))
-    acc = _sheared_projection(profs, xs, tan_a, h)
+        if _rust_lex is not None and hasattr(_rust_lex, "sheared_radon_best_angle_rs"):
+            best_a_rs, acc_list = _rust_lex.sheared_radon_best_angle_rs(
+                profs.ravel().tolist(),
+                n_strips,
+                h,
+                xs.tolist(),
+                float(search_min),
+                float(search_max),
+                141,
+                by0,
+                by1,
+            )
+            best_a = float(best_a_rs)
+            acc = np.array(acc_list, dtype=np.float32)
+    except Exception:
+        acc = None
+
+    if acc is None:
+        best_sc = -1.0
+        for a in np.linspace(search_min, search_max, 141):
+            tan_a_cand = float(np.tan(np.radians(a)))
+            acc_cand = _sheared_projection(profs, xs, tan_a_cand, h)
+            diff = np.diff(acc_cand[by0:by1])
+            sc = float(np.sum(diff * diff))
+            if sc > best_sc:
+                best_sc = sc
+                best_a = float(a)
+        tan_a = float(np.tan(np.radians(best_a)))
+        acc = _sheared_projection(profs, xs, tan_a, h)
+    else:
+        tan_a = float(np.tan(np.radians(best_a)))
+
     smooth = np.convolve(acc, np.ones(11) / 11.0, mode="same")
     thresh = max(float(np.percentile(smooth[by0:by1], 80)), 14.0)
 
@@ -564,9 +607,47 @@ def _detect_angled_vertical_columns(
             dtype=np.float32,
         )
         best_a = 0.0
-        best_sc = -1.0
-        for a in np.linspace(-6.5, 6.5, 131):
-            tan_a = float(np.tan(np.radians(a)))
+        acc: np.ndarray | None = None
+        try:
+            from backend.app.pipeline.lexicon import _rust_lex
+
+            if _rust_lex is not None and hasattr(_rust_lex, "sheared_radon_best_angle_rs"):
+                best_a_rs, acc_list = _rust_lex.sheared_radon_best_angle_rs(
+                    b_profs.ravel().tolist(),
+                    n_bands,
+                    sw,
+                    b_ys.tolist(),
+                    -6.5,
+                    6.5,
+                    131,
+                    0,
+                    sw,
+                )
+                best_a = float(best_a_rs)
+                acc = np.array(acc_list, dtype=np.float32)
+        except Exception:
+            acc = None
+
+        if acc is None:
+            best_sc = -1.0
+            for a in np.linspace(-6.5, 6.5, 131):
+                tan_a = float(np.tan(np.radians(a)))
+                acc_c = np.zeros(sw, dtype=np.float32)
+                for i in range(n_bands):
+                    sh_x = int(round(b_ys[i] * tan_a))
+                    if sh_x == 0:
+                        acc_c += b_profs[i]
+                    elif 0 < sh_x < sw:
+                        acc_c[:-sh_x] += b_profs[i, sh_x:]
+                    elif -sw < sh_x < 0:
+                        acc_c[-sh_x:] += b_profs[i, : sw + sh_x]
+                diff = np.diff(acc_c)
+                sc = float(np.sum(diff * diff))
+                if sc > best_sc:
+                    best_sc = sc
+                    best_a = float(a)
+
+            tan_a = float(np.tan(np.radians(best_a)))
             acc = np.zeros(sw, dtype=np.float32)
             for i in range(n_bands):
                 sh_x = int(round(b_ys[i] * tan_a))
@@ -576,23 +657,10 @@ def _detect_angled_vertical_columns(
                     acc[:-sh_x] += b_profs[i, sh_x:]
                 elif -sw < sh_x < 0:
                     acc[-sh_x:] += b_profs[i, : sw + sh_x]
-            diff = np.diff(acc)
-            sc = float(np.sum(diff * diff))
-            if sc > best_sc:
-                best_sc = sc
-                best_a = float(a)
+            acc /= n_bands
+        else:
+            tan_a = float(np.tan(np.radians(best_a)))
 
-        tan_a = float(np.tan(np.radians(best_a)))
-        acc = np.zeros(sw, dtype=np.float32)
-        for i in range(n_bands):
-            sh_x = int(round(b_ys[i] * tan_a))
-            if sh_x == 0:
-                acc += b_profs[i]
-            elif 0 < sh_x < sw:
-                acc[:-sh_x] += b_profs[i, sh_x:]
-            elif -sw < sh_x < 0:
-                acc[-sh_x:] += b_profs[i, : sw + sh_x]
-        acc /= n_bands
         smooth = np.convolve(acc, np.ones(9) / 9.0, mode="same")
         thresh = max(float(np.percentile(smooth, 84)), 8.0)
         min_col_w = int(w * 0.032)
@@ -637,6 +705,21 @@ def _warp_piecewise_angled_strip(
         out_h = max(24, int(round(0.5 * (h_l + h_r))))
 
     img_h, img_w = img.shape[:2]
+    if (
+        abs(top_model.tan_a) < 1e-4
+        and abs(bot_model.tan_a) < 1e-4
+        and not top_model.knot_xs
+        and not bot_model.knot_xs
+    ):
+        y_top = max(0, int(round(top_model.y_center)) - pad_y)
+        y_bot = min(img_h, max(y_top + 1, int(round(bot_model.y_center)) + pad_y))
+        cx0 = max(0, min(img_w - 1, x0))
+        cx1 = max(cx0 + 1, min(img_w, x1))
+        direct = img[y_top:y_bot, cx0:cx1].copy()
+        if direct.shape[0] != out_h or direct.shape[1] != max(1, x1 - x0):
+            return cv2.resize(direct, (max(1, x1 - x0), out_h), interpolation=cv2.INTER_CUBIC)
+        return direct
+
     knots = [int(round(v)) for v in np.linspace(x0, x1, 5)]
     sub_strips: list[np.ndarray] = []
     for k in range(len(knots) - 1):

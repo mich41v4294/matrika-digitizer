@@ -599,7 +599,7 @@ async def run_extraction_for_row(
     session.flush()
     from backend.app.pipeline.feedback import reset_ocr_feedback
 
-    reset_ocr_feedback(session, row_id=row.id, person_fact_id=fact.id, commit=False)
+    reset_ocr_feedback(session, row_id=row.id, person_fact_id=fact.id, commit=False, persist_report=False)
     index_person_fact(session, fact)
     session.commit()
     session.refresh(fact)
@@ -1903,7 +1903,7 @@ async def run_census_extraction_for_row(
     session.flush()
     from backend.app.pipeline.feedback import reset_ocr_feedback
 
-    reset_ocr_feedback(session, row_id=row.id, person_fact_id=fact.id, commit=False)
+    reset_ocr_feedback(session, row_id=row.id, person_fact_id=fact.id, commit=False, persist_report=False)
     index_person_fact(session, fact)
     session.commit()
     session.refresh(fact)
@@ -1979,6 +1979,10 @@ for _a, _b, _cost in [
 def _weighted_paleo_distance(a: str, b: str) -> float:
     if a == b:
         return 0.0
+    from backend.app.pipeline.lexicon import _rust_lex
+
+    if _rust_lex is not None and hasattr(_rust_lex, "weighted_paleo_distance_rs"):
+        return float(_rust_lex.weighted_paleo_distance_rs(a, b))
     la, lb = len(a), len(b)
     dp = [[0.0] * (lb + 1) for _ in range(la + 1)]
     for i in range(1, la + 1):
@@ -2008,6 +2012,12 @@ def _paleographic_stem_similarity(left: str | None, right: str | None) -> float:
     `m` <-> `ni`/`in`, `č` <-> `c`, `ľ`/`l` <-> `t`) so cursive misreads of the same stem
     achieve similarity >= 0.85.
     """
+    if not left or not right:
+        return 0.0
+    from backend.app.pipeline.lexicon import _rust_lex
+
+    if _rust_lex is not None and hasattr(_rust_lex, "paleographic_stem_similarity_rs"):
+        return float(_rust_lex.paleographic_stem_similarity_rs(left, right))
     stem_l = _surname_stem(left)
     stem_r = _surname_stem(right)
     if not stem_l or not stem_r:
@@ -3019,6 +3029,23 @@ def reconcile_census_household_relationships(
         ).all()
     )
 
+    all_fact_ids = [f.id for f in facts if f.id is not None]
+    fs_matches_by_fact_id: dict[int, FamilySearchMatch] = {}
+    local_matches_by_fact_id: dict[int, list[ Any]] = {}
+    if all_fact_ids:
+        from backend.app.db.models import LocalRecordMatch
+
+        for fsm in session.exec(
+            select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id.in_(all_fact_ids))  # type: ignore[union-attr]
+        ).all():
+            if fsm.person_fact_id is not None and fsm.person_fact_id not in fs_matches_by_fact_id:
+                fs_matches_by_fact_id[fsm.person_fact_id] = fsm
+        for lrm in session.exec(
+            select(LocalRecordMatch).where(LocalRecordMatch.census_fact_id.in_(all_fact_ids))  # type: ignore[union-attr]
+        ).all():
+            if lrm.census_fact_id is not None:
+                local_matches_by_fact_id.setdefault(lrm.census_fact_id, []).append(lrm)
+
     active_households: list[CensusHousehold] = []
     for byt_pos, (dwelling_unit, byt_facts) in enumerate(byt_groups):
         # 1. Resolve Byt surname consensus & paleographic disambiguation for this Byt
@@ -3323,16 +3350,13 @@ def reconcile_census_household_relationships(
 
             # Refresh existing FamilySearchMatch action packet & summary if present and matched
             if f.id is not None:
-                existing_fs_match = session.exec(
-                    select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == f.id)
-                ).first()
+                existing_fs_match = fs_matches_by_fact_id.get(f.id)
                 if existing_fs_match is not None and not (existing_fs_match.fs_person_id or "").strip():
                     session.delete(existing_fs_match)
                     existing_fs_match = None
                 if existing_fs_match is not None:
                     try:
                         from urllib.parse import quote_plus
-                        from backend.app.db.models import LocalRecordMatch
                         from backend.app.mcp.familysearch_client import (
                             _split_spouse_name,
                             build_census_action_packet,
@@ -3351,7 +3375,7 @@ def reconcile_census_household_relationships(
                             or f.birth_place_raw
                             or place_std
                         )
-                        spouse_given, spouse_surname = _split_spouse_name(f, session)
+                        spouse_given, spouse_surname = _split_spouse_name(f, session, peers=facts)
                         fs_search_params = [
                             f"q.givenName={quote_plus(given_fs)}" if given_fs else "",
                             f"q.surname={quote_plus(surname_fs)}" if surname_fs else "",
@@ -3369,11 +3393,7 @@ def reconcile_census_household_relationships(
                         fs_url = "https://www.familysearch.org/search/record/results?" + "&".join(
                             [p for p in fs_search_params if p]
                         )
-                        local_matches = list(
-                            session.exec(
-                                select(LocalRecordMatch).where(LocalRecordMatch.census_fact_id == f.id)
-                            ).all()
-                        )
+                        local_matches = local_matches_by_fact_id.get(f.id, [])
                         action_packet, what_is_new = build_census_action_packet(
                             fact=f,
                             sheet=sheet,
@@ -3398,7 +3418,15 @@ def reconcile_census_household_relationships(
 
             prev_f = f
             session.add(f)
-            index_person_fact(session, f)
+
+    from backend.app.search.fts import bulk_index_person_facts
+
+    ocr_by_rid = {
+        rid: r_obj.raw_ocr_combined
+        for rid, r_obj in row_by_id.items()
+        if r_obj.raw_ocr_combined
+    }
+    bulk_index_person_facts(session, facts, ocr_by_row_id=ocr_by_rid)
 
     # Delete any stale extra CensusHousehold records from prior runs
     if len(existing_households) > len(active_households):
@@ -3421,7 +3449,6 @@ def reconcile_census_household_relationships(
                 ovh.matched_sheet_id = sheet.id
                 session.add(ovh)
 
-    session.commit()
     index_census_sheet(session, sheet)
     session.commit()
     primary_household = active_households[0] if active_households else None

@@ -566,7 +566,17 @@ class FamilySearchMcpManager:
             return total_facts, total_matched, reviewed
 
         try:
-            if session is not None:
+            from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+            db_p = (
+                _session_file_db_path(session)
+                if session is not None
+                else (str(settings.db_path) if settings.db_path and Path(settings.db_path).exists() else None)
+            )
+            if db_p and _rust_db is not None and hasattr(_rust_db, "get_fs_progress_counts_rs"):
+                t_f, t_m, rev = _rust_db.get_fs_progress_counts_rs(db_p)
+                total_facts, total_matched, reviewed = int(t_f), int(t_m), int(rev)
+            elif session is not None:
                 total_facts, total_matched, reviewed = _query(session)
             else:
                 from backend.app.db.session import engine
@@ -1587,6 +1597,22 @@ def match_census_to_local_matrika(
     """
     if not census_fact.id:
         return []
+
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "match_census_to_local_matrika_rs"):
+            raw_matches = json.loads(
+                _rust_db.match_census_to_local_matrika_rs(
+                    db_p,
+                    int(census_fact.id),
+                    datetime.now(timezone.utc).isoformat(),
+                )
+            )
+            return [LocalRecordMatch(**item) for item in raw_matches]
+    except Exception:
+        pass
 
     sur_skel = census_fact.surname_skeleton or _phonetic_skeleton(
         census_fact.surname_normalized or census_fact.surname_raw or ""

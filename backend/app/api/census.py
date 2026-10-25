@@ -1004,53 +1004,9 @@ def list_census_sheets(
     effective_person_name = person_name or person_query or owner_query
     person_name = effective_person_name
     resolved_year = _resolve_single_census_year(census_year)
-    stmt = (
-        select(CensusSheet)
-        .where(CensusSheet.census_year == resolved_year)
-        .order_by(CensusSheet.id.desc())
-    )
     status_filter = pipeline_status or download_status
-    if status_filter:
-        if status_filter == "idle":
-            stmt = stmt.where(CensusSheet.download_status == "cataloged")
-        elif status_filter in ("pending", "pending_ocr", "undone", "not_done"):
-            stmt = stmt.where(
-                (CensusSheet.download_status.is_(None))  # type: ignore[union-attr]
-                | (CensusSheet.download_status.notin_(["ocr_done", "extracted", "matched"]))  # type: ignore[union-attr]
-            )
-        else:
-            stmt = stmt.where(CensusSheet.download_status == status_filter)
-
-    all_matching = list(session.exec(stmt).all())
 
     has_muni = bool(municipality and municipality.strip())
-    if has_muni and municipality:
-        all_matching = [s for s in all_matching if _sheet_matches_municipality(s, municipality)]
-        target_canon = canonical_municipality_key(municipality)
-        exact_muni = [
-            s
-            for s in all_matching
-            if canonical_municipality_key(s.municipality) == target_canon
-            or s.municipality_key == municipality.strip()
-        ]
-        if exact_muni:
-            all_matching = exact_muni
-
-    if district and district.strip():
-        dist_matching = [
-            s
-            for s in all_matching
-            if _sheet_matches_district(s, district, municipality_specified=has_muni)
-        ]
-        if dist_matching or not has_muni:
-            all_matching = dist_matching
-
-    available_streets_set: set[str] = {
-        s.street_raw.strip()
-        for s in all_matching
-        if s.street_raw and s.street_raw.strip() and s.street_raw.strip() not in ("-", "—", "?")
-    }
-
     has_st = bool(street and street.strip())
     has_pn = bool(person_name and person_name.strip())
     has_by = bool(birth_year and str(birth_year).strip())
@@ -1058,8 +1014,79 @@ def list_census_sheets(
     has_q = bool(q and q.strip())
     has_person_or_q_filter = has_st or has_pn or has_by or has_bp or has_q
 
+    all_matching: list[CensusSheet] = []
+    available_streets_set: set[str] = set()
+    candidate_ids: list[int] = []
+    used_rust_loc = False
+
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p_loc = _session_file_db_path(session)
+        if db_p_loc and _rust_db is not None and hasattr(_rust_db, "query_census_sheet_ids_by_location_rs"):
+            loc_ids, loc_streets = _rust_db.query_census_sheet_ids_by_location_rs(
+                db_p_loc,
+                int(resolved_year),
+                municipality,
+                district,
+                status_filter,
+                True,
+            )
+            candidate_ids = [int(x) for x in loc_ids]
+            available_streets_set = set(loc_streets)
+            used_rust_loc = True
+    except Exception:
+        used_rust_loc = False
+
+    if not used_rust_loc:
+        stmt = (
+            select(CensusSheet)
+            .where(CensusSheet.census_year == resolved_year)
+            .order_by(CensusSheet.id.desc())
+        )
+        if status_filter:
+            if status_filter == "idle":
+                stmt = stmt.where(CensusSheet.download_status == "cataloged")
+            elif status_filter in ("pending", "pending_ocr", "undone", "not_done"):
+                stmt = stmt.where(
+                    (CensusSheet.download_status.is_(None))  # type: ignore[union-attr]
+                    | (CensusSheet.download_status.notin_(["ocr_done", "extracted", "matched"]))  # type: ignore[union-attr]
+                )
+            else:
+                stmt = stmt.where(CensusSheet.download_status == status_filter)
+
+        all_matching = list(session.exec(stmt).all())
+
+        if has_muni and municipality:
+            all_matching = [s for s in all_matching if _sheet_matches_municipality(s, municipality)]
+            target_canon = canonical_municipality_key(municipality)
+            exact_muni = [
+                s
+                for s in all_matching
+                if canonical_municipality_key(s.municipality) == target_canon
+                or s.municipality_key == municipality.strip()
+            ]
+            if exact_muni:
+                all_matching = exact_muni
+
+        if district and district.strip():
+            dist_matching = [
+                s
+                for s in all_matching
+                if _sheet_matches_district(s, district, municipality_specified=has_muni)
+            ]
+            if dist_matching or not has_muni:
+                all_matching = dist_matching
+
+        available_streets_set = {
+            s.street_raw.strip()
+            for s in all_matching
+            if s.street_raw and s.street_raw.strip() and s.street_raw.strip() not in ("-", "—", "?")
+        }
+        candidate_ids = [s.id for s in all_matching if s.id is not None]
+
     t_search_start = time.perf_counter()
-    scanned_total = len(all_matching)
+    scanned_total = len(candidate_ids)
     query_label = " · ".join(
         str(x).strip()
         for x in (municipality, district, street, person_name, birth_year, birth_place, q)
@@ -1080,7 +1107,6 @@ def list_census_sheets(
             elapsed_ms=0,
         )
 
-    candidate_ids = [s.id for s in all_matching if s.id is not None]
     households_by_sheet: dict[int, CensusHousehold] = {}
     all_households_by_sheet: dict[int, list[CensusHousehold]] = {}
     facts_by_sheet: dict[int, list[PersonFact]] = {}
@@ -1091,8 +1117,55 @@ def list_census_sheets(
     matched_ovh_settlements_by_sheet: dict[int, list[str]] = {}
     ovh_by_overview_sheet: dict[int, list[CensusOverviewHouse]] = {}
     row_ocr_by_id: dict[int, str] = {}
+    rust_previews_by_sheet: dict[int, list[dict[str, Any]]] | None = None
+    used_rust_sheet_filter = False
+    matched_ids_final: list[int] | None = candidate_ids if used_rust_loc else None
 
     if has_person_or_q_filter and candidate_ids:
+        try:
+            from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+            db_p = _session_file_db_path(session)
+            if db_p and _rust_db is not None and hasattr(_rust_db, "filter_census_sheets_and_previews_rs"):
+                rs_out = json.loads(
+                    _rust_db.filter_census_sheets_and_previews_rs(
+                        db_p,
+                        [int(cid) for cid in candidate_ids],
+                        q=q,
+                        street=street,
+                        person_name=person_name,
+                        birth_year=str(birth_year) if birth_year is not None else None,
+                        birth_place=birth_place,
+                    )
+                )
+                for st_s in rs_out.get("available_streets") or []:
+                    if st_s:
+                        available_streets_set.add(str(st_s))
+                for k_ov, v_ov in (rs_out.get("overview_counts") or {}).items():
+                    overview_counts_by_sheet[int(k_ov)] = int(v_ov)
+                for k_md, v_md in (rs_out.get("municipal_districts_counts") or {}).items():
+                    municipal_districts_counts_by_sheet[int(k_md)] = int(v_md)
+                for k_fb, v_fb in (rs_out.get("fallback_streets") or {}).items():
+                    if v_fb:
+                        matched_ovh_settlements_by_sheet[int(k_fb)] = [str(v_fb)]
+                rust_previews_by_sheet = {
+                    int(k_pr): v_pr for k_pr, v_pr in (rs_out.get("previews_by_sheet") or {}).items()
+                }
+                matched_ids_final = [int(fid) for fid in (rs_out.get("filtered_sheet_ids") or [])]
+                used_rust_sheet_filter = True
+        except Exception:
+            used_rust_sheet_filter = False
+
+    if has_person_or_q_filter and candidate_ids and not used_rust_sheet_filter:
+        if used_rust_loc and not all_matching:
+            loaded_by_id: dict[int, CensusSheet] = {}
+            for start in range(0, len(candidate_ids), 450):
+                chunk = candidate_ids[start : start + 450]
+                for s_obj in session.exec(select(CensusSheet).where(CensusSheet.id.in_(chunk))).all():  # type: ignore[union-attr]
+                    if s_obj.id is not None:
+                        loaded_by_id[s_obj.id] = s_obj
+            all_matching = [loaded_by_id[cid] for cid in candidate_ids if cid in loaded_by_id]
+            matched_ids_final = None
         for hh in session.exec(
             select(CensusHousehold)
             .where(CensusHousehold.census_sheet_id.in_(candidate_ids))
@@ -1271,11 +1344,34 @@ def list_census_sheets(
                 )
         all_matching = filtered_sheets
 
-    total = len(all_matching)
-    page_items = all_matching[offset : offset + limit]
+    if matched_ids_final is not None:
+        total = len(matched_ids_final)
+        page_ids = matched_ids_final[offset : offset + limit]
+        if page_ids:
+            loaded_page = {
+                s_obj.id: s_obj
+                for s_obj in session.exec(select(CensusSheet).where(CensusSheet.id.in_(page_ids))).all()  # type: ignore[union-attr]
+                if s_obj.id is not None
+            }
+            page_items = [loaded_page[pid] for pid in page_ids if pid in loaded_page]
+        else:
+            page_items = []
+    else:
+        total = len(all_matching)
+        page_items = all_matching[offset : offset + limit]
 
     sheet_ids = [s.id for s in page_items if s.id is not None]
-    if sheet_ids and not has_person_or_q_filter:
+    if sheet_ids and used_rust_sheet_filter:
+        for hh in session.exec(
+            select(CensusHousehold)
+            .where(CensusHousehold.census_sheet_id.in_(sheet_ids))
+            .order_by(CensusHousehold.id.asc())
+        ).all():
+            all_households_by_sheet.setdefault(hh.census_sheet_id, []).append(hh)
+            if hh.census_sheet_id not in households_by_sheet or (hh.dwelling_unit or "I") == "I":
+                if hh.census_sheet_id not in households_by_sheet:
+                    households_by_sheet[hh.census_sheet_id] = hh
+    elif sheet_ids and not has_person_or_q_filter:
         for hh in session.exec(
             select(CensusHousehold)
             .where(CensusHousehold.census_sheet_id.in_(sheet_ids))
@@ -1329,22 +1425,30 @@ def list_census_sheets(
         linked_sheets = linked_by_sheet_id.get(sid, [])
 
         persons_preview: list[dict[str, Any]] = []
-        for pf in s_facts:
-            is_pf_match = False
-            pf_ocr = row_ocr_by_id.get(pf.row_id)
-            if has_pn or has_by or has_bp:
-                is_pf_match = (
-                    (not has_pn or _fact_matches_person_name(pf, person_name, ocr_text=pf_ocr))
-                    and (not has_by or _fact_matches_birth_year(pf, birth_year))
-                    and (not has_bp or _fact_matches_birth_place(pf, birth_place))
-                )
-            elif has_q and q:
-                is_pf_match = (
-                    _fact_matches_person_name(pf, q, ocr_text=pf_ocr)
-                    or _fact_matches_birth_year(pf, q)
-                    or _fact_matches_birth_place(pf, q)
-                )
-            persons_preview.append(_serialize_person_preview(pf, matched_filter=is_pf_match))
+        if rust_previews_by_sheet is not None:
+            persons_preview = list(rust_previews_by_sheet.get(sid, []))
+        else:
+            persons_preview = [
+                _serialize_person_preview(pf, matched_filter=False) for pf in s_facts
+            ]
+            if has_pn or has_by or has_bp or (has_q and q):
+                persons_preview = []
+                for pf in s_facts:
+                    is_pf_match = False
+                    pf_ocr = row_ocr_by_id.get(pf.row_id)
+                    if has_pn or has_by or has_bp:
+                        is_pf_match = (
+                            (not has_pn or _fact_matches_person_name(pf, person_name, ocr_text=pf_ocr))
+                            and (not has_by or _fact_matches_birth_year(pf, birth_year))
+                            and (not has_bp or _fact_matches_birth_place(pf, birth_place))
+                        )
+                    elif has_q and q:
+                        is_pf_match = (
+                            _fact_matches_person_name(pf, q, ocr_text=pf_ocr)
+                            or _fact_matches_birth_year(pf, q)
+                            or _fact_matches_birth_place(pf, q)
+                        )
+                    persons_preview.append(_serialize_person_preview(pf, matched_filter=is_pf_match))
 
         s_payload = _serialize_sheet(
             s,
@@ -1371,7 +1475,7 @@ def list_census_sheets(
                 "sheet": s_payload,
                 "household": _serialize_household(hh),
                 "households": [sh for sh in (_serialize_household(h) for h in sheet_hhs) if sh is not None],
-                "extracted_members_count": len(s_facts),
+                "extracted_members_count": len(persons_preview),
                 "extracted_persons_preview": persons_preview,
                 "members_preview": persons_preview,
                 "extracted_members": persons_preview,
@@ -1694,6 +1798,17 @@ def _batch_find_linked_house_sheets(
 
     if not valid_targets:
         return {}
+
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "batch_find_linked_house_sheets_rs"):
+            t_ids = [int(s.id) for s, _, _ in valid_targets if s.id is not None]
+            raw_linked = json.loads(_rust_db.batch_find_linked_house_sheets_rs(db_p, t_ids))
+            return {int(k): v for k, v in raw_linked.items()}
+    except Exception:
+        pass
 
     stmt = select(CensusSheet).where(CensusSheet.house_number.is_not(None))
     if hn_ints or hn_strs:
@@ -4160,30 +4275,57 @@ def get_municipality_overview(
     """
     person_name = person_name or person_query or owner_query
     resolved_census_year = _resolve_single_census_year(census_year)
-    stmt = select(CensusSheet).where(CensusSheet.census_year == resolved_census_year)
-
-    sheets = list(session.exec(stmt.order_by(CensusSheet.id.asc())).all())
     has_muni = bool(municipality and municipality.strip())
-    if has_muni and municipality:
-        sheets = [s for s in sheets if _sheet_matches_municipality(s, municipality)]
-        target_canon = canonical_municipality_key(municipality)
-        exact_muni = [
-            s
-            for s in sheets
-            if canonical_municipality_key(s.municipality) == target_canon
-            or s.municipality_key == municipality.strip()
-        ]
-        if exact_muni:
-            sheets = exact_muni
+    sheets: list[CensusSheet] = []
+    used_rust_ov_loc = False
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
 
-    if district and district.strip():
-        dist_sheets = [
-            s
-            for s in sheets
-            if _sheet_matches_district(s, district, municipality_specified=has_muni)
-        ]
-        if dist_sheets or not has_muni:
-            sheets = dist_sheets
+        db_p_ov = _session_file_db_path(session)
+        if db_p_ov and _rust_db is not None and hasattr(_rust_db, "query_census_sheet_ids_by_location_rs"):
+            ov_loc_ids, _ = _rust_db.query_census_sheet_ids_by_location_rs(
+                db_p_ov,
+                int(resolved_census_year),
+                municipality,
+                district,
+                None,
+                False,
+            )
+            if ov_loc_ids:
+                loaded_ov: dict[int, CensusSheet] = {}
+                for start in range(0, len(ov_loc_ids), 450):
+                    chunk = [int(x) for x in ov_loc_ids[start : start + 450]]
+                    for s_obj in session.exec(select(CensusSheet).where(CensusSheet.id.in_(chunk))).all():  # type: ignore[union-attr]
+                        if s_obj.id is not None:
+                            loaded_ov[s_obj.id] = s_obj
+                sheets = [loaded_ov[int(sid)] for sid in ov_loc_ids if int(sid) in loaded_ov]
+            used_rust_ov_loc = True
+    except Exception:
+        used_rust_ov_loc = False
+
+    if not used_rust_ov_loc:
+        stmt = select(CensusSheet).where(CensusSheet.census_year == resolved_census_year)
+        sheets = list(session.exec(stmt.order_by(CensusSheet.id.asc())).all())
+        if has_muni and municipality:
+            sheets = [s for s in sheets if _sheet_matches_municipality(s, municipality)]
+            target_canon = canonical_municipality_key(municipality)
+            exact_muni = [
+                s
+                for s in sheets
+                if canonical_municipality_key(s.municipality) == target_canon
+                or s.municipality_key == municipality.strip()
+            ]
+            if exact_muni:
+                sheets = exact_muni
+
+        if district and district.strip():
+            dist_sheets = [
+                s
+                for s in sheets
+                if _sheet_matches_district(s, district, municipality_specified=has_muni)
+            ]
+            if dist_sheets or not has_muni:
+                sheets = dist_sheets
 
     sheet_ids = [s.id for s in sheets if s.id is not None]
     sheets_by_id: dict[int, CensusSheet] = {s.id: s for s in sheets if s.id is not None}
@@ -4855,52 +4997,85 @@ def list_overview_houses(
     offset: int = 0,
 ) -> dict[str, Any]:
     resolved_year = _resolve_single_census_year(census_year)
-    stmt = (
-        select(CensusOverviewHouse)
-        .where(CensusOverviewHouse.census_year == resolved_year)
-        .order_by(
-            CensusOverviewHouse.census_sheet_id.asc(),
-            CensusOverviewHouse.row_index.asc(),
-            CensusOverviewHouse.id.asc(),
-        )
-    )
-    raw_houses = list(session.exec(stmt).all())
-    seen_ovh_keys: set[tuple[int, str]] = set()
-    houses: list[CensusOverviewHouse] = []
-    for h in raw_houses:
-        hk = (int(h.census_sheet_id or 0), normalize_house_number(h.house_number) or str(h.row_index))
-        if hk in seen_ovh_keys:
-            continue
-        seen_ovh_keys.add(hk)
-        houses.append(h)
-    if municipality and municipality.strip():
-        target_canon = canonical_municipality_key(municipality)
-        m_fold = fold_text_diacritics(municipality.strip())
-        houses = [
-            h
-            for h in houses
-            if canonical_municipality_key(h.municipality) == target_canon
-            or m_fold in fold_text_diacritics(h.municipality or "")
-        ]
-    if district and district.strip():
-        d_fold = fold_text_diacritics(district.strip())
-        houses = [h for h in houses if d_fold in fold_text_diacritics(h.district or "")]
-    if street and street.strip():
-        houses = [h for h in houses if text_matches_street([h.settlement_name], street)]
-
     eff_query = person_name or person_query or owner_query or q
-    if eff_query and eff_query.strip():
-        q_val = eff_query.strip()
-        q_fold = fold_text_diacritics(q_val)
-        houses = [
-            h
-            for h in houses
-            if _overview_house_matches_person_query(h, q_val)
-            or q_fold in fold_text_diacritics(f"{h.house_number or ''} {h.settlement_name or ''} {h.remarks or ''}")
-        ]
+    paged: list[CensusOverviewHouse] | None = None
+    total = 0
 
-    total = len(houses)
-    paged = houses[offset : offset + limit]
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p_ovh = _session_file_db_path(session)
+        if db_p_ovh and _rust_db is not None and hasattr(_rust_db, "filter_overview_houses_ids_rs"):
+            matched_hids = _rust_db.filter_overview_houses_ids_rs(
+                db_p_ovh,
+                int(resolved_year),
+                municipality,
+                district,
+                street,
+                eff_query,
+            )
+            total = len(matched_hids)
+            page_hids = [int(x) for x in matched_hids[offset : offset + limit]]
+            if page_hids:
+                loaded_h = {
+                    h_obj.id: h_obj
+                    for h_obj in session.exec(
+                        select(CensusOverviewHouse).where(CensusOverviewHouse.id.in_(page_hids))  # type: ignore[union-attr]
+                    ).all()
+                    if h_obj.id is not None
+                }
+                paged = [loaded_h[hid] for hid in page_hids if hid in loaded_h]
+            else:
+                paged = []
+    except Exception:
+        paged = None
+
+    if paged is None:
+        stmt = (
+            select(CensusOverviewHouse)
+            .where(CensusOverviewHouse.census_year == resolved_year)
+            .order_by(
+                CensusOverviewHouse.census_sheet_id.asc(),
+                CensusOverviewHouse.row_index.asc(),
+                CensusOverviewHouse.id.asc(),
+            )
+        )
+        raw_houses = list(session.exec(stmt).all())
+        seen_ovh_keys: set[tuple[int, str]] = set()
+        houses: list[CensusOverviewHouse] = []
+        for h in raw_houses:
+            hk = (int(h.census_sheet_id or 0), normalize_house_number(h.house_number) or str(h.row_index))
+            if hk in seen_ovh_keys:
+                continue
+            seen_ovh_keys.add(hk)
+            houses.append(h)
+        if municipality and municipality.strip():
+            target_canon = canonical_municipality_key(municipality)
+            m_fold = fold_text_diacritics(municipality.strip())
+            houses = [
+                h
+                for h in houses
+                if canonical_municipality_key(h.municipality) == target_canon
+                or m_fold in fold_text_diacritics(h.municipality or "")
+            ]
+        if district and district.strip():
+            d_fold = fold_text_diacritics(district.strip())
+            houses = [h for h in houses if d_fold in fold_text_diacritics(h.district or "")]
+        if street and street.strip():
+            houses = [h for h in houses if text_matches_street([h.settlement_name], street)]
+
+        if eff_query and eff_query.strip():
+            q_val = eff_query.strip()
+            q_fold = fold_text_diacritics(q_val)
+            houses = [
+                h
+                for h in houses
+                if _overview_house_matches_person_query(h, q_val)
+                or q_fold in fold_text_diacritics(f"{h.house_number or ''} {h.settlement_name or ''} {h.remarks or ''}")
+            ]
+
+        total = len(houses)
+        paged = houses[offset : offset + limit]
     candidate_sheets: list[CensusSheet] | None = None
     p_cand_hh_map: dict[int, CensusHousehold] = {}
     p_cand_facts_map: dict[int, list[PersonFact]] = {}
@@ -4959,6 +5134,16 @@ def get_municipalities_summary(
     transfers the selected municipality.
     """
     resolved_year = _resolve_single_census_year(census_year)
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "get_municipalities_summary_rs"):
+            return json.loads(
+                _rust_db.get_municipalities_summary_rs(db_p, int(resolved_year), district)
+            )
+    except Exception:
+        pass
     all_sheets = list(session.exec(select(CensusSheet)).all())
     if district and district.strip():
         all_sheets = [s for s in all_sheets if _sheet_matches_district(s, district, municipality_specified=False)]

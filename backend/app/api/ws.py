@@ -42,6 +42,14 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections.add(websocket)
         await websocket.send_text(json.dumps({"type": "state", "data": self.latest_state}, default=str))
+        try:
+            from backend.app.config import settings
+
+            await websocket.send_text(
+                json.dumps({"type": "feature_flags", "data": settings.get_feature_flags()}, default=str)
+            )
+        except Exception:
+            pass
 
     def disconnect(self, websocket: WebSocket) -> None:
         self.active_connections.discard(websocket)

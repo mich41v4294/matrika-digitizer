@@ -109,6 +109,30 @@ def _find_matching_census_sheets(
     sheets deterministically (overview sheets first, already-downloaded sheets next,
     then by census_year, house_number_int, and id).
     """
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "find_matching_census_sheets_rs"):
+            matched_ids = _rust_db.find_matching_census_sheets_rs(
+                db_p,
+                json.dumps(filters, ensure_ascii=False),
+                only_undone=only_undone,
+                run_ocr=run_ocr,
+                overview_only=overview_only,
+            )
+            if not matched_ids:
+                return []
+            sheets_by_id: dict[int, CensusSheet] = {}
+            for start in range(0, len(matched_ids), 450):
+                chunk = matched_ids[start : start + 450]
+                for s in session.exec(select(CensusSheet).where(CensusSheet.id.in_(chunk))).all():  # type: ignore[union-attr]
+                    if s.id is not None:
+                        sheets_by_id[s.id] = s
+            return [sheets_by_id[sid] for sid in matched_ids if sid in sheets_by_id]
+    except Exception:
+        pass
+
     raw_years = filters.get("years") or [1930]
     years = [int(raw_years[0]) if raw_years and int(raw_years[0]) == 1940 else 1930]
     include_blackened = bool(filters.get("include_blackened", True))

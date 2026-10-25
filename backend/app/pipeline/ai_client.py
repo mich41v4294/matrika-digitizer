@@ -24,6 +24,28 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 
 @lru_cache(maxsize=256)
 def _encode_image_base64_cached(path_str: str, mtime_ns: int, max_width: int) -> str:
+    try:
+        import cv2
+        from backend.app.pipeline.lexicon import _rust_lex
+
+        img_bgr = cv2.imread(path_str, cv2.IMREAD_COLOR)
+        if img_bgr is not None:
+            h, w = img_bgr.shape[:2]
+            if w > max_width:
+                ratio = max_width / float(w)
+                img_bgr = cv2.resize(
+                    img_bgr,
+                    (max_width, max(1, int(h * ratio))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            ok, enc = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 86])
+            if ok:
+                raw_bytes = enc.tobytes()
+                if _rust_lex is not None and hasattr(_rust_lex, "base64_encode_bytes_rs"):
+                    return str(_rust_lex.base64_encode_bytes_rs(raw_bytes))
+                return base64.b64encode(raw_bytes).decode("utf-8")
+    except Exception:
+        pass
     with Image.open(path_str) as img:
         rgb = img.convert("RGB")
         if rgb.width > max_width:
@@ -177,7 +199,9 @@ def extract_json_object(raw_text: str, response_model: type[BaseModel] | None = 
         except Exception:
             pass
         end_idx = cleaned.rfind("}")
-        while end_idx > start_idx:
+        tries = 0
+        while end_idx > start_idx and tries < 4:
+            tries += 1
             candidate = cleaned[start_idx : end_idx + 1]
             try:
                 obj = json.loads(candidate)
@@ -266,7 +290,9 @@ def split_thinking_and_content(
                 except Exception:
                     pass
                 e_idx = stripped_fence.rfind("}")
-                while e_idx > s_idx:
+                tries_e = 0
+                while e_idx > s_idx and tries_e < 4:
+                    tries_e += 1
                     cand = stripped_fence[s_idx : e_idx + 1]
                     try:
                         parsed_cand = json.loads(cand)
@@ -713,27 +739,37 @@ class LocalAIClient:
             else prompt
         )
 
-        with Session(engine) as session:
-            trace = WorkflowTrace(
-                scan_id=scan_id,
-                row_id=row_id,
-                stage=stage,
-                model_or_tool=f"{provider}:{active_model}",
-                prompt_text=user_prompt_for_trace if not effective_system_prompt else f"[SYSTEM]\n{effective_system_prompt}\n\n[USER]\n{user_prompt_for_trace}",
-                image_path=image_rel_url,
-                reasoning_content=reasoning,
-                response_text=content,
-                parsed_json=json.dumps(parsed, ensure_ascii=False),
-                status=status,
-                duration_ms=duration_ms,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                reasoning_tokens=reasoning_tokens,
-            )
-            session.add(trace)
-            session.commit()
-            session.refresh(trace)
-            trace_id = trace.id
+        prompt_text_final = (
+            user_prompt_for_trace
+            if not effective_system_prompt
+            else f"[SYSTEM]\n{effective_system_prompt}\n\n[USER]\n{user_prompt_for_trace}"
+        )
+        parsed_json_str = json.dumps(parsed, ensure_ascii=False)
+
+        def _persist_trace() -> int | None:
+            with Session(engine) as session:
+                trace = WorkflowTrace(
+                    scan_id=scan_id,
+                    row_id=row_id,
+                    stage=stage,
+                    model_or_tool=f"{provider}:{active_model}",
+                    prompt_text=prompt_text_final,
+                    image_path=image_rel_url,
+                    reasoning_content=reasoning,
+                    response_text=content,
+                    parsed_json=parsed_json_str,
+                    status=status,
+                    duration_ms=duration_ms,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                )
+                session.add(trace)
+                session.commit()
+                session.refresh(trace)
+                return trace.id
+
+        trace_id = await asyncio.to_thread(_persist_trace)
 
         return {
             "trace_id": trace_id,

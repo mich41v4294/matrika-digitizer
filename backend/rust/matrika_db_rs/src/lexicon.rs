@@ -8,8 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use crate::{
-    clean_ascii_alnum, fold_text_diacritics_internal, open_sqlite, orthographic_fold_internal,
-    round4, weighted_edit_similarity_internal,
+    apply_digraphs_internal, clean_ascii_alnum, fold_text_diacritics_internal, open_sqlite,
+    orthographic_fold_internal, phonetic_skeleton_internal, round4,
+    weighted_edit_similarity_internal,
 };
 
 static GIVEN_GROUPS: Lazy<HashMap<&'static str, Vec<&'static str>>> = Lazy::new(|| {
@@ -405,6 +406,10 @@ static KNOWN_SURNAME_FOLDED: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 
 static TOKEN_SIM_CACHE: Lazy<Mutex<HashMap<(String, String), f64>>> =
     Lazy::new(|| Mutex::new(HashMap::with_capacity(16384)));
+
+pub fn resolve_given_cid_pub(token: &str) -> Option<String> {
+    resolve_given_cid_internal(token)
+}
 
 fn resolve_given_cid_internal(token: &str) -> Option<String> {
     let first_word = token.split_whitespace().next().unwrap_or("");
@@ -873,6 +878,21 @@ pub fn fuzzy_name_match_score_internal(
 }
 
 #[pyfunction]
+#[pyo3(signature = (given_name=None))]
+pub fn resolve_given_name_canonical_id_rs(given_name: Option<&str>) -> Option<String> {
+    given_name.and_then(resolve_given_cid_internal)
+}
+
+#[pyfunction]
+#[pyo3(signature = (token=None))]
+pub fn surname_core_stem_rs(token: Option<&str>) -> String {
+    match token {
+        Some(s) => surname_core_stem_internal(s),
+        None => String::new(),
+    }
+}
+
+#[pyfunction]
 #[pyo3(signature = (q_tok=None, cand_tok=None))]
 pub fn fuzzy_token_similarity_rs(q_tok: Option<&str>, cand_tok: Option<&str>) -> f64 {
     match (q_tok, cand_tok) {
@@ -1258,5 +1278,277 @@ pub fn score_person_facts_search_rs(
         }
 
         Ok((total_candidates_count, sorted))
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (query, fuzzy=true))]
+pub fn build_fts_match_expression_rs(query: &str, fuzzy: bool) -> String {
+    let mut raw_tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in query.chars() {
+        if is_name_token_char(ch) || ch == '-' || ch == '/' {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            raw_tokens.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        raw_tokens.push(cur);
+    }
+
+    let mut clauses: Vec<String> = Vec::new();
+    for tok in raw_tokens {
+        let clean: String = tok.chars().filter(|&c| is_name_token_char(c)).collect();
+        if clean.is_empty() {
+            continue;
+        }
+        let folded = clean_ascii_alnum(&clean);
+        if folded.is_empty() {
+            continue;
+        }
+        let mut variants: HashSet<String> = HashSet::new();
+        variants.insert(folded.clone());
+        variants.insert(format!("{}*", folded));
+
+        let char_cnt = clean.chars().count();
+        if clean.chars().all(|c| c.is_alphabetic()) && char_cnt >= 3 {
+            let stem = surname_core_stem_internal(&clean);
+            if !stem.is_empty() {
+                variants.insert(stem.clone());
+                variants.insert(format!("{}*", stem));
+            }
+            let base_tok = if !stem.is_empty() {
+                stem.as_str()
+            } else {
+                clean.as_str()
+            };
+            if fuzzy {
+                let dg = clean_ascii_alnum(&apply_digraphs_internal(base_tok));
+                let orth = orthographic_fold_internal(base_tok);
+                let skel = clean_ascii_alnum(&phonetic_skeleton_internal(base_tok));
+                if dg.len() >= 3 {
+                    variants.insert(dg.clone());
+                    variants.insert(format!("{}*", dg));
+                }
+                if orth.len() >= 3 {
+                    variants.insert(orth.clone());
+                    variants.insert(format!("{}*", orth));
+                }
+                if skel.len() >= 3 {
+                    variants.insert(skel);
+                }
+            }
+            if let Some(cid) = resolve_given_cid_internal(&clean) {
+                if let Some(eqs) = GIVEN_GROUPS.get(cid.as_str()) {
+                    for &eq in eqs {
+                        let eq_f = clean_ascii_alnum(eq);
+                        if eq_f.len() >= 2 {
+                            variants.insert(eq_f);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut safe_vec: Vec<String> = variants
+            .into_iter()
+            .filter(|v| v.bytes().any(|b| b.is_ascii_alphanumeric()))
+            .collect();
+        safe_vec.sort();
+        if !safe_vec.is_empty() {
+            clauses.push(format!("({})", safe_vec.join(" OR ")));
+        }
+    }
+    clauses.join(" AND ")
+}
+
+#[pyfunction]
+#[pyo3(signature = (db_path, q_query, year_from=None, year_to=None, municipality=None, district=None))]
+pub fn match_catalog_sheets_and_overview_owners_rs(
+    py: Python<'_>,
+    db_path: String,
+    q_query: String,
+    year_from: Option<i64>,
+    year_to: Option<i64>,
+    municipality: Option<String>,
+    district: Option<String>,
+) -> PyResult<Vec<i64>> {
+    py.allow_threads(move || {
+        let q_clean = q_query.trim().to_string();
+        if q_clean.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = open_sqlite(&db_path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let q_fold = fold_text_diacritics_internal(&q_clean);
+        let m_fold_opt = municipality
+            .as_deref()
+            .map(|s| fold_text_diacritics_internal(s.trim()))
+            .filter(|s| !s.is_empty());
+        let d_fold_opt = district
+            .as_deref()
+            .map(|s| fold_text_diacritics_internal(s.trim()))
+            .filter(|s| !s.is_empty());
+
+        let mut ovh_sql = String::from(
+            "SELECT census_sheet_id, matched_sheet_id, municipality,
+                    owner_name, remarks, raw_ocr_text
+             FROM censusoverviewhouse WHERE 1=1",
+        );
+        if let Some(yf) = year_from {
+            ovh_sql.push_str(&format!(" AND census_year >= {}", yf));
+        }
+        if let Some(yt) = year_to {
+            ovh_sql.push_str(&format!(" AND census_year <= {}", yt));
+        }
+
+        let mut ovh_rows: Vec<(
+            Option<i64>,
+            Option<i64>,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(&ovh_sql)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            for r in rows.flatten() {
+                if let Some(ref mf) = m_fold_opt {
+                    if !fold_text_diacritics_internal(&r.2).contains(mf) {
+                        continue;
+                    }
+                }
+                ovh_rows.push(r);
+            }
+        }
+
+        let ovh_matched_pairs: Vec<(Option<i64>, Option<i64>)> = ovh_rows
+            .par_iter()
+            .filter_map(|(csid, msid, _, ov_owner, ov_rem, ov_ocr)| {
+                let mut ok = fuzzy_name_match_score_internal(
+                    &q_clean,
+                    &[ov_owner.clone(), ov_rem.clone()],
+                    0.76,
+                ) >= 0.76;
+                if !ok {
+                    if let Some(ref ocr_s) = ov_ocr {
+                        if !q_fold.is_empty()
+                            && fold_text_diacritics_internal(ocr_s).contains(&q_fold)
+                        {
+                            ok = true;
+                        } else if ov_owner.as_deref().unwrap_or("").is_empty()
+                            && fuzzy_name_match_score_internal(
+                                &q_clean,
+                                &[Some(ocr_s.clone())],
+                                0.76,
+                            ) >= 0.76
+                        {
+                            ok = true;
+                        }
+                    }
+                }
+                if ok {
+                    Some((*csid, *msid))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut seen: HashSet<i64> = HashSet::new();
+        let mut out_ids: Vec<i64> = Vec::new();
+        for (csid_opt, msid_opt) in ovh_matched_pairs {
+            if let Some(csid) = csid_opt.filter(|&x| x > 0) {
+                if seen.insert(csid) {
+                    out_ids.push(csid);
+                }
+            }
+            if let Some(msid) = msid_opt.filter(|&x| x > 0) {
+                if seen.insert(msid) {
+                    out_ids.push(msid);
+                }
+            }
+        }
+
+        let mut cs_sql = String::from(
+            "SELECT id, household_owner, municipality, municipality_folded,
+                    district, district_folded
+             FROM censussheet
+             WHERE household_owner IS NOT NULL AND household_owner != ''",
+        );
+        if let Some(yf) = year_from {
+            cs_sql.push_str(&format!(" AND census_year >= {}", yf));
+        }
+        if let Some(yt) = year_to {
+            cs_sql.push_str(&format!(" AND census_year <= {}", yt));
+        }
+
+        let mut cs_rows: Vec<(i64, String)> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(&cs_sql)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    ))
+                })
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            for (sid, owner, muni, muni_f, dist, dist_f) in rows.flatten() {
+                if seen.contains(&sid) {
+                    continue;
+                }
+                if let Some(ref mf) = m_fold_opt {
+                    if !muni_f.contains(mf) && !fold_text_diacritics_internal(&muni).contains(mf) {
+                        continue;
+                    }
+                }
+                if let Some(ref df) = d_fold_opt {
+                    if !dist_f.contains(df) && !fold_text_diacritics_internal(&dist).contains(df) {
+                        continue;
+                    }
+                }
+                cs_rows.push((sid, owner));
+            }
+        }
+
+        let cs_matched: Vec<i64> = cs_rows
+            .par_iter()
+            .filter_map(|(sid, owner)| {
+                if fuzzy_name_match_score_internal(&q_clean, &[Some(owner.clone())], 0.76) >= 0.76 {
+                    Some(*sid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for sid in cs_matched {
+            if seen.insert(sid) {
+                out_ids.push(sid);
+            }
+        }
+
+        Ok(out_ids)
     })
 }

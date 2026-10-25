@@ -770,6 +770,8 @@ def _clean_name_token(token: str | None) -> str | None:
 
 @lru_cache(maxsize=65536)
 def _apply_digraphs(token: str) -> str:
+    if _rust_lex is not None:
+        return str(_rust_lex.apply_digraphs_rs(token))
     s = token.translate(_DIACRITIC_FOLD).lower()
     for src, dst in (
         ("cz", "cs"),
@@ -789,6 +791,8 @@ def _apply_digraphs(token: str) -> str:
 @lru_cache(maxsize=65536)
 def _phonetic_skeleton(token: str) -> str:
     """Consonant skeleton used to block obviously unrelated candidates."""
+    if _rust_lex is not None:
+        return str(_rust_lex.phonetic_skeleton_rs(token))
     s = _apply_digraphs(token)
     s = re.sub(r"[aeiouy]+", "", s)
     s = re.sub(r"(.)\1+", r"\1", s)
@@ -1305,6 +1309,11 @@ def _extract_clause_year(text: str, keyword_pattern: str, year_pattern: str) -> 
 def parse_observationes_events(obs_text: str | None) -> list[dict[str, Any]]:
     if not obs_text or len(obs_text.strip()) < 2:
         return []
+    if _rust_lex is not None and hasattr(_rust_lex, "parse_observationes_events_rs"):
+        try:
+            return json.loads(_rust_lex.parse_observationes_events_rs(obs_text))
+        except Exception:
+            pass
     text = obs_text.strip()
     events: list[dict[str, Any]] = []
 
@@ -1404,6 +1413,8 @@ def fold_text_diacritics(text: str | None) -> str:
     """Folds Slovak, Hungarian, and German diacritics to lowercase ASCII."""
     if not text:
         return ""
+    if _rust_lex is not None:
+        return str(_rust_lex.fold_text_diacritics_rs(text))
     return text.translate(_DIACRITIC_FOLD).lower().strip()
 
 
@@ -1415,6 +1426,8 @@ def resolve_given_name_canonical_id(given_name: str | None) -> str | None:
     """Resolves a Latin, Hungarian, Slovak, or German given name to its canonical cross-language concept ID."""
     if not given_name:
         return None
+    if _rust_lex is not None and hasattr(_rust_lex, "resolve_given_name_canonical_id_rs"):
+        return _rust_lex.resolve_given_name_canonical_id_rs(given_name)
     parts = [
         re.sub(r"[^a-zA-ZáéíóöőúüűÁÉÍÓÖŐÚÜŰäëÄËčďľĺňŕřšťžČĎĽĹŇŔŘŠŤŽýÝôÔ]", "", p).lower()
         for p in given_name.split()
@@ -1969,6 +1982,8 @@ def orthographic_fold(token: str | None) -> str:
     """
     if not token:
         return ""
+    if _rust_lex is not None:
+        return str(_rust_lex.orthographic_fold_rs(token))
     s = fold_text_diacritics(token)
     s = re.sub(r"[^a-z0-9]", "", s)
     if not s:
@@ -2638,6 +2653,8 @@ def parse_house_number_int(house_no: str | None) -> int | None:
     """Extracts the primary integer house number (conscription or orientation number) for indexing."""
     if not house_no:
         return None
+    if _rust_lex is not None and hasattr(_rust_lex, "parse_house_number_int_rs"):
+        return _rust_lex.parse_house_number_int_rs(str(house_no))
     # On Slovakiana, street strings often look like "-/121" or "17/278" (orientačné / súpisné)
     if "/" in house_no:
         parts = [p.strip() for p in house_no.split("/") if p.strip()]
@@ -2715,6 +2732,8 @@ def canonical_municipality_key(municipality: str | None) -> str:
     """
     if not municipality:
         return ""
+    if _rust_lex is not None and hasattr(_rust_lex, "canonical_municipality_key_rs"):
+        return str(_rust_lex.canonical_municipality_key_rs(str(municipality)))
     folded = fold_text_diacritics(str(municipality))
     cleaned = re.sub(r"[^a-z0-9]+", " ", folded).strip()
     if not cleaned:
@@ -2729,6 +2748,8 @@ def canonical_municipality_display(municipality: str | None) -> str | None:
     """Returns the canonical display name for a municipality (fixing missing diacritics like 'Horný Čepen' -> 'Horný Čepeň')."""
     if not municipality:
         return None
+    if _rust_lex is not None and hasattr(_rust_lex, "canonical_municipality_display_rs"):
+        return _rust_lex.canonical_municipality_display_rs(str(municipality))
     s = str(municipality).strip()
     if not s:
         return None
@@ -2753,6 +2774,8 @@ def normalize_house_number(house_no: str | int | None) -> str:
     """
     if house_no is None:
         return ""
+    if _rust_lex is not None and hasattr(_rust_lex, "normalize_house_number_rs"):
+        return str(_rust_lex.normalize_house_number_rs(str(house_no)))
     raw = str(house_no).strip()
     if not raw:
         return ""
@@ -2831,6 +2854,13 @@ def text_matches_street(
 ) -> bool:
     if not street_query or not str(street_query).strip():
         return True
+    if _rust_lex is not None and hasattr(_rust_lex, "text_matches_street_rs"):
+        return bool(
+            _rust_lex.text_matches_street_rs(
+                [str(c) if c is not None else None for c in candidates],
+                str(street_query),
+            )
+        )
     q_clean, q_tokens = normalize_street_query(street_query)
     if not q_clean:
         return True
@@ -2873,6 +2903,14 @@ def is_compatible_settlement(
     Checks whether a CensusOverviewHouse settlement_name ('osada') and a CensusSheet street_raw
     are compatible when both specify a sub-settlement/street.
     """
+    if _rust_lex is not None and hasattr(_rust_lex, "is_compatible_settlement_rs"):
+        return bool(
+            _rust_lex.is_compatible_settlement_rs(
+                overview_settlement,
+                candidate_street,
+                municipality,
+            )
+        )
     ov_key = canonical_municipality_key(overview_settlement)
     st_key = canonical_municipality_key(candidate_street)
     muni_key = canonical_municipality_key(municipality)
@@ -2896,6 +2934,38 @@ def can_match_overview_house_to_sheet(
     """
     if ovh is None or candidate_sheet is None:
         return False
+    if _rust_lex is not None and hasattr(_rust_lex, "can_match_overview_house_to_sheet_rs"):
+        ov_year_val = getattr(ovh, "census_year", None) or (
+            getattr(overview_sheet, "census_year", None) if overview_sheet is not None else None
+        )
+        ov_muni_val = (
+            (getattr(overview_sheet, "municipality", None) if overview_sheet is not None else None)
+            or getattr(ovh, "municipality", None)
+        )
+        ov_mkey_val = (
+            str(getattr(overview_sheet, "municipality_key", None) or "").strip()
+            if overview_sheet is not None
+            else None
+        )
+        ov_hn_val = getattr(ovh, "house_number", None)
+        cand_hn_val = getattr(candidate_sheet, "house_number", None)
+        return bool(
+            _rust_lex.can_match_overview_house_to_sheet_rs(
+                getattr(ovh, "census_sheet_id", None),
+                int(ov_year_val) if ov_year_val is not None else None,
+                str(ov_muni_val) if ov_muni_val is not None else None,
+                ov_mkey_val or None,
+                str(ov_hn_val) if ov_hn_val is not None else None,
+                getattr(candidate_sheet, "id", None),
+                getattr(candidate_sheet, "sheet_type", None) or "household",
+                int(getattr(candidate_sheet, "census_year", 0))
+                if getattr(candidate_sheet, "census_year", None) is not None
+                else None,
+                str(getattr(candidate_sheet, "municipality", "") or "") or None,
+                str(getattr(candidate_sheet, "municipality_key", "") or "").strip() or None,
+                str(cand_hn_val) if cand_hn_val is not None else None,
+            )
+        )
     cand_type = getattr(candidate_sheet, "sheet_type", None) or "household"
     if cand_type in ("overview", "municipal_overview"):
         return False
@@ -2953,6 +3023,34 @@ def compute_person_fact_search_fields(fact_or_dict: Any = None, **kwargs: Any) -
 
     surname = _get("surname_normalized") or _get("surname_raw")
     surname_stem = strip_slovak_feminine_suffix(surname) or surname
+    if _rust_lex is not None and hasattr(_rust_lex, "compute_person_fact_search_fields_rs"):
+        by_raw = _get("birth_year_est")
+        ey_raw = _get("event_year")
+        s_fold, s_skel, g_cid, v_fold, hn_int, by_est = _rust_lex.compute_person_fact_search_fields_rs(
+            str(_get("surname_raw")) if _get("surname_raw") is not None else None,
+            str(_get("surname_normalized")) if _get("surname_normalized") is not None else None,
+            str(surname_stem) if surname_stem is not None else None,
+            str(_get("given_name_raw")) if _get("given_name_raw") is not None else None,
+            str(_get("given_name_sk")) if _get("given_name_sk") is not None else None,
+            str(_get("given_name_hu")) if _get("given_name_hu") is not None else None,
+            str(_get("village_raw")) if _get("village_raw") is not None else None,
+            str(_get("village_sk")) if _get("village_sk") is not None else None,
+            str(_get("village_hu")) if _get("village_hu") is not None else None,
+            str(_get("house_number")) if _get("house_number") is not None else None,
+            int(by_raw) if by_raw is not None else None,
+            str(_get("birth_or_event_date")) if _get("birth_or_event_date") is not None else None,
+            str(_get("record_type")) if _get("record_type") is not None else None,
+            int(ey_raw) if ey_raw is not None else None,
+            str(_get("age_at_event")) if _get("age_at_event") is not None else None,
+        )
+        return {
+            "surname_folded": s_fold,
+            "surname_skeleton": s_skel,
+            "given_canonical_id": g_cid,
+            "village_folded": v_fold,
+            "house_number_int": hn_int,
+            "birth_year_est": by_est,
+        }
     given = _get("given_name_sk") or _get("given_name_raw") or _get("given_name_hu")
     village = _get("village_sk") or _get("village_raw") or _get("village_hu")
     house_no = _get("house_number")
@@ -3416,10 +3514,16 @@ def normalize_census_country(
         return "Slovensko"
 
     # Paleographic similarity check against "slovenska" / "slovensko"
-    sim_sk = max(
-        difflib.SequenceMatcher(None, f, "slovenska").ratio(),
-        difflib.SequenceMatcher(None, f, "slovensko").ratio(),
-    )
+    if _rust_lex is not None and hasattr(_rust_lex, "sequence_ratio_rs"):
+        sim_sk = max(
+            float(_rust_lex.sequence_ratio_rs(f, "slovenska")),
+            float(_rust_lex.sequence_ratio_rs(f, "slovensko")),
+        )
+    else:
+        sim_sk = max(
+            difflib.SequenceMatcher(None, f, "slovenska").ratio(),
+            difflib.SequenceMatcher(None, f, "slovensko").ratio(),
+        )
     if sim_sk >= 0.52:
         return "Slovensko"
 
@@ -3488,7 +3592,11 @@ def normalize_census_district(
         dist_cost = _paleographic_distance(f, cf)
         max_l = max(len(f), len(cf), 1)
         sim = max(0.0, 1.0 - (dist_cost / max_l))
-        seq = difflib.SequenceMatcher(None, f, cf).ratio()
+        seq = (
+            float(_rust_lex.sequence_ratio_rs(f, cf))
+            if (_rust_lex is not None and hasattr(_rust_lex, "sequence_ratio_rs"))
+            else difflib.SequenceMatcher(None, f, cf).ratio()
+        )
         score = max(sim, seq)
         if sheet_df and cf == sheet_df:
             score += 0.12
@@ -3638,38 +3746,49 @@ def normalize_census_municipality(
     best_muni: str | None = None
     best_score = 0.0
 
-    for cand in gazetteer:
-        cf = fold_text_diacritics(cand)
-        if cf == exp_f:
-            info = REGIONAL_GAZETTEER_100KM.get(cand)
+    if _rust_lex is not None and hasattr(_rust_lex, "batch_match_gazetteer_rs"):
+        best_muni, best_score = _rust_lex.batch_match_gazetteer_rs(exp_f, gazetteer, sheet_mf or None)
+        if best_muni and best_score >= 0.72:
+            info = REGIONAL_GAZETTEER_100KM.get(best_muni)
             if info:
-                return cand, (info[0] or None), (info[1] or None)
-            c_info = cache_places.get(cf)
+                return best_muni, (info[0] or None), (info[1] or None)
+            c_info = cache_places.get(fold_text_diacritics(best_muni))
             if isinstance(c_info, dict):
-                return cand, (c_info.get("district") or None), (c_info.get("country") or "Slovensko")
-            return cand, None, "Slovensko"
+                return best_muni, (c_info.get("district") or None), (c_info.get("country") or "Slovensko")
+            return best_muni, None, "Slovensko"
+    else:
+        for cand in gazetteer:
+            cf = fold_text_diacritics(cand)
+            if cf == exp_f:
+                info = REGIONAL_GAZETTEER_100KM.get(cand)
+                if info:
+                    return cand, (info[0] or None), (info[1] or None)
+                c_info = cache_places.get(cf)
+                if isinstance(c_info, dict):
+                    return cand, (c_info.get("district") or None), (c_info.get("country") or "Slovensko")
+                return cand, None, "Slovensko"
 
-        if abs(len(exp_f) - len(cf)) > 5:
-            continue
-        dist_cost = _paleographic_distance(exp_f, cf)
-        max_l = max(len(exp_f), len(cf), 1)
-        sim = max(0.0, 1.0 - (dist_cost / max_l))
-        seq = difflib.SequenceMatcher(None, exp_f, cf).ratio() if sim >= 0.55 else 0.0
-        score = max(sim, seq)
-        if sheet_mf and cf == sheet_mf:
-            score += 0.10
-        if score > best_score:
-            best_score = score
-            best_muni = cand
+            if abs(len(exp_f) - len(cf)) > 5:
+                continue
+            dist_cost = _paleographic_distance(exp_f, cf)
+            max_l = max(len(exp_f), len(cf), 1)
+            sim = max(0.0, 1.0 - (dist_cost / max_l))
+            seq = difflib.SequenceMatcher(None, exp_f, cf).ratio() if sim >= 0.55 else 0.0
+            score = max(sim, seq)
+            if sheet_mf and cf == sheet_mf:
+                score += 0.10
+            if score > best_score:
+                best_score = score
+                best_muni = cand
 
-    if best_muni and best_score >= 0.72:
-        info = REGIONAL_GAZETTEER_100KM.get(best_muni)
-        if info:
-            return best_muni, (info[0] or None), (info[1] or None)
-        c_info = cache_places.get(fold_text_diacritics(best_muni))
-        if isinstance(c_info, dict):
-            return best_muni, (c_info.get("district") or None), (c_info.get("country") or "Slovensko")
-        return best_muni, None, "Slovensko"
+        if best_muni and best_score >= 0.72:
+            info = REGIONAL_GAZETTEER_100KM.get(best_muni)
+            if info:
+                return best_muni, (info[0] or None), (info[1] or None)
+            c_info = cache_places.get(fold_text_diacritics(best_muni))
+            if isinstance(c_info, dict):
+                return best_muni, (c_info.get("district") or None), (c_info.get("country") or "Slovensko")
+            return best_muni, None, "Slovensko"
 
     # Fast O(1) lookup against the full Slovakiana 3,712-municipality dictionary
     _ensure_slovakiana_facets_loaded()

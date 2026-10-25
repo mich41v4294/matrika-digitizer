@@ -277,6 +277,19 @@ def _query_export_facts(session: SessionDep, only_new_to_fs: bool) -> list[Perso
 
 @router.get("/export/csv", response_class=PlainTextResponse)
 def download_csv(session: SessionDep, only_new_to_fs: bool = False) -> PlainTextResponse:
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "export_facts_to_csv_rs"):
+            csv_text = _rust_db.export_facts_to_csv_rs(db_p, only_new_to_fs)
+            return PlainTextResponse(
+                content=csv_text,
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="matrika_records.csv"'},
+            )
+    except Exception:
+        pass
     facts = _query_export_facts(session, only_new_to_fs)
 
     sheet_ids = list({f.census_sheet_id for f in facts if f.census_sheet_id is not None})
@@ -295,6 +308,21 @@ def download_csv(session: SessionDep, only_new_to_fs: bool = False) -> PlainText
 
 @router.get("/export/gedcom", response_class=PlainTextResponse)
 def download_gedcom(session: SessionDep, only_new_to_fs: bool = False) -> PlainTextResponse:
+    try:
+        from datetime import datetime, timezone
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "export_facts_to_gedcom_rs"):
+            today_str = datetime.now(timezone.utc).strftime("%d %b %Y").upper()
+            ged_text = _rust_db.export_facts_to_gedcom_rs(db_p, today_str, only_new_to_fs)
+            return PlainTextResponse(
+                content=ged_text,
+                media_type="text/plain; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="matrika_export.ged"'},
+            )
+    except Exception:
+        pass
     facts = _query_export_facts(session, only_new_to_fs)
 
     sheet_ids = list({f.census_sheet_id for f in facts if f.census_sheet_id is not None})

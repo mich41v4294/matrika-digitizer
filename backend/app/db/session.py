@@ -31,6 +31,7 @@ def _set_sqlite_pragma(dbapi_connection: Any, _connection_record: Any) -> None:
         cursor.execute("PRAGMA synchronous=NORMAL;")
         cursor.execute("PRAGMA temp_store=MEMORY;")
         cursor.execute("PRAGMA cache_size=-64000;")
+        cursor.execute("PRAGMA mmap_size=268435456;")
     except Exception:
         pass
     cursor.close()
@@ -113,6 +114,12 @@ def _ensure_sqlite_columns() -> None:
             "CREATE INDEX IF NOT EXISTS ix_ocrfeedback_row_id ON ocrfeedback (row_id, id)",
             "CREATE INDEX IF NOT EXISTS ix_ocrfeedback_fact_id ON ocrfeedback (person_fact_id, id)",
             "CREATE INDEX IF NOT EXISTS ix_ocrfeedback_sheet_id ON ocrfeedback (census_sheet_id, id)",
+            "CREATE INDEX IF NOT EXISTS ix_censussheet_year_muni_hn ON censussheet (census_year, municipality_folded, house_number_int)",
+            "CREATE INDEX IF NOT EXISTS ix_censussheet_muni_key_year ON censussheet (municipality_key, census_year)",
+            "CREATE INDEX IF NOT EXISTS ix_personfact_skel_cid_year ON personfact (record_type, surname_skeleton, given_canonical_id, event_year)",
+            "CREATE INDEX IF NOT EXISTS ix_censusoverviewhouse_year_muni ON censusoverviewhouse (census_year, municipality, house_number_int)",
+            "CREATE INDEX IF NOT EXISTS ix_censushousehold_sheet_id ON censushousehold (census_sheet_id, id)",
+            "CREATE INDEX IF NOT EXISTS ix_localrecordmatch_census_fact ON localrecordmatch (census_fact_id, matrika_fact_id)",
         ):
             conn.execute(text(idx_sql))
         # Remove any stale unmatched FamilySearchMatch rows (fs_person_id IS NULL or empty)

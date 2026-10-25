@@ -135,6 +135,23 @@ async def update_ai_config(req: AIConfigUpdateRequest) -> dict[str, Any]:
 async def get_debug_overview(session: SessionDep) -> dict[str, Any]:
     models_info = await ai_client.get_models_status()
     fs_status = await fs_mcp_manager.get_auth_status()
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "get_debug_overview_stats_and_traces_rs"):
+            ov_rs = json.loads(_rust_db.get_debug_overview_stats_and_traces_rs(db_p, 80))
+            return {
+                "pangolin_public_url": settings.pangolin_public_url,
+                "ai_server": models_info,
+                "familysearch_mcp": fs_status,
+                "pipeline_state": ws_manager.latest_state,
+                "stats": ov_rs["stats"],
+                "feedback_stats": get_feedback_statistics(session),
+                "recent_traces": ov_rs["recent_traces"],
+            }
+    except Exception:
+        pass
     traces = session.exec(select(WorkflowTrace).order_by(WorkflowTrace.id.desc()).limit(80)).all()
 
     total_scans = session.exec(select(func.count()).select_from(ScanImage)).one()
@@ -291,6 +308,22 @@ def list_workflow_traces(
     stage: str | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "list_workflow_traces_rs"):
+            return json.loads(
+                _rust_db.list_workflow_traces_rs(
+                    db_p,
+                    scan_id=scan_id,
+                    row_id=row_id,
+                    stage=stage,
+                    limit=limit,
+                )
+            )
+    except Exception:
+        pass
     stmt = select(WorkflowTrace).order_by(WorkflowTrace.id.desc())
     if scan_id is not None:
         stmt = stmt.where(WorkflowTrace.scan_id == scan_id)
@@ -505,7 +538,8 @@ def get_feature_flags() -> dict[str, Any]:
 
 
 @router.post("/feature-flags")
-def update_feature_flags(payload: dict[str, Any]) -> dict[str, Any]:
+async def update_feature_flags(payload: dict[str, Any]) -> dict[str, Any]:
     updates = payload.get("flags") if isinstance(payload.get("flags"), dict) else payload
     flags = settings.set_feature_flags(updates if isinstance(updates, dict) else {})
+    await ws_manager.broadcast("feature_flags", flags)
     return {"flags": flags}

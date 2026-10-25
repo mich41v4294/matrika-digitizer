@@ -6,40 +6,23 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
 
 static STATS_CACHE: Lazy<Mutex<HashMap<(String, i64, i64, i64, String, String, String, String, String), Value>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static TRACE_BASE_CACHE: Lazy<Mutex<HashMap<(String, i64, i64, String, String, String, String), CachedTraceBase>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-fn open_sqlite(db_path: &str) -> Result<Connection, rusqlite::Error> {
-    let conn = Connection::open(db_path)?;
-    conn.busy_timeout(Duration::from_secs(30))?;
-    let requested_mode = std::env::var("SQLITE_JOURNAL_MODE")
-        .unwrap_or_else(|_| "WAL".to_string())
-        .trim()
-        .to_ascii_uppercase();
-    let mode = match requested_mode.as_str() {
-        "WAL" | "DELETE" | "TRUNCATE" | "PERSIST" | "MEMORY" | "OFF" => requested_mode.as_str(),
-        _ => "WAL",
-    };
-    let pragma_sql = format!(
-        "PRAGMA journal_mode={};
-         PRAGMA synchronous=NORMAL;
-         PRAGMA temp_store=MEMORY;
-         PRAGMA cache_size=-64000;",
-        mode
-    );
-    if conn.execute_batch(&pragma_sql).is_err() {
-        let _ = conn.execute_batch(
-            "PRAGMA journal_mode=DELETE;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA temp_store=MEMORY;
-             PRAGMA cache_size=-64000;",
-        );
-    }
-    Ok(conn)
+pub mod db_pool;
+pub use db_pool::PooledConnection;
+
+fn open_sqlite(db_path: &str) -> Result<PooledConnection, rusqlite::Error> {
+    db_pool::open_sqlite_pooled(db_path)
+}
+
+#[pyfunction]
+#[pyo3(signature = (db_path=None))]
+fn clear_db_pool_rs(db_path: Option<String>) {
+    db_pool::clear_connection_pool(db_path.as_deref());
 }
 
 pub fn fold_char(c: char) -> char {
@@ -1697,11 +1680,18 @@ fn get_census_stats_rs(py: Python<'_>, db_path: String) -> PyResult<String> {
     })
 }
 
+mod api_queries;
+mod census_queries;
+mod export;
 mod feedback;
+mod gazetteer;
+mod image_layout;
 mod lexicon;
+mod reconcile;
 
 #[pymodule]
 fn matrika_db_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(clear_db_pool_rs, m)?)?;
     m.add_function(wrap_pyfunction!(fold_text_diacritics_rs, m)?)?;
     m.add_function(wrap_pyfunction!(apply_digraphs_rs, m)?)?;
     m.add_function(wrap_pyfunction!(orthographic_fold_rs, m)?)?;
@@ -1711,9 +1701,35 @@ fn matrika_db_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ocr_dp_distance_rs, m)?)?;
     m.add_function(wrap_pyfunction!(weighted_edit_similarity_rs, m)?)?;
     m.add_function(wrap_pyfunction!(batch_score_candidates_against_lexicon_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(lexicon::resolve_given_name_canonical_id_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(lexicon::surname_core_stem_rs, m)?)?;
     m.add_function(wrap_pyfunction!(lexicon::fuzzy_token_similarity_rs, m)?)?;
     m.add_function(wrap_pyfunction!(lexicon::fuzzy_name_match_score_rs, m)?)?;
     m.add_function(wrap_pyfunction!(lexicon::score_person_facts_search_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        lexicon::build_fts_match_expression_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        lexicon::match_catalog_sheets_and_overview_owners_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(gazetteer::canonical_municipality_key_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(gazetteer::canonical_municipality_display_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(gazetteer::parse_house_number_int_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(gazetteer::normalize_house_number_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(gazetteer::text_matches_street_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(gazetteer::is_compatible_settlement_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        gazetteer::can_match_overview_house_to_sheet_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(gazetteer::parse_observationes_events_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        gazetteer::compute_person_fact_search_fields_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(gazetteer::batch_match_gazetteer_rs, m)?)?;
     m.add_function(wrap_pyfunction!(get_feedback_statistics_rs, m)?)?;
     m.add_function(wrap_pyfunction!(system_status_counts_rs, m)?)?;
     m.add_function(wrap_pyfunction!(get_census_stats_rs, m)?)?;
@@ -1725,5 +1741,71 @@ fn matrika_db_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(feedback::upsert_ocr_feedback_rs, m)?)?;
     m.add_function(wrap_pyfunction!(feedback::delete_ocr_feedback_rs, m)?)?;
     m.add_function(wrap_pyfunction!(feedback::reset_ocr_feedback_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        census_queries::get_municipalities_summary_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        census_queries::filter_census_sheets_and_previews_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        census_queries::batch_find_linked_house_sheets_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        census_queries::find_matching_census_sheets_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        census_queries::query_census_sheet_ids_by_location_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        census_queries::filter_overview_houses_ids_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(api_queries::list_scans_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(api_queries::list_workflow_traces_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        api_queries::get_fs_progress_counts_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        api_queries::get_debug_overview_stats_and_traces_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(export::export_facts_to_csv_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(export::export_facts_to_gedcom_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(image_layout::base64_encode_bytes_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        image_layout::suppress_auditor_crayon_bytes_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(image_layout::sheared_radon_best_angle_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(image_layout::html_table_to_pipe_text_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        image_layout::skew_compensated_row_projection_u8_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        image_layout::row_ink_metrics_gray_u8_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(image_layout::sequence_ratio_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(reconcile::weighted_paleo_distance_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        reconcile::paleographic_stem_similarity_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        reconcile::match_census_to_local_matrika_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        reconcile::bulk_index_census_sheets_rs,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(reconcile::bulk_index_person_facts_rs, m)?)?;
     Ok(())
 }

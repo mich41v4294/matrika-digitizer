@@ -236,6 +236,17 @@ def bulk_index_census_sheets(session: Session, sheets: list[CensusSheet]) -> Non
     valid_sheets = [s for s in sheets if s.id is not None]
     if not valid_sheets:
         return
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if db_p and _rust_db is not None and hasattr(_rust_db, "bulk_index_census_sheets_rs"):
+            _rust_db.bulk_index_census_sheets_rs(
+                db_p, [int(s.id) for s in valid_sheets if s.id is not None]
+            )
+            return
+    except Exception:
+        pass
     ids = [str(s.id) for s in valid_sheets]
     for start in range(0, len(ids), 450):
         chunk_ids = ids[start : start + 450]
@@ -270,6 +281,24 @@ def bulk_index_person_facts(
     valid_facts = [f for f in facts if f.id is not None]
     if not valid_facts:
         return
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if (
+            db_p
+            and ocr_by_row_id is None
+            and _rust_db is not None
+            and hasattr(_rust_db, "bulk_index_person_facts_rs")
+        ):
+            for fact in valid_facts:
+                apply_person_fact_search_fields(fact)
+            _rust_db.bulk_index_person_facts_rs(
+                db_p, [int(f.id) for f in valid_facts if f.id is not None]
+            )
+            return
+    except Exception:
+        pass
     ids = [str(f.id) for f in valid_facts]
     for start in range(0, len(ids), 450):
         chunk_ids = ids[start : start + 450]
@@ -302,6 +331,21 @@ def bulk_index_person_facts(
 
 def rebuild_all_fts(session: Session) -> dict[str, int]:
     """Rebuilds the entire FTS5 search index from PersonFact and CensusSheet tables."""
+    try:
+        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
+
+        db_p = _session_file_db_path(session)
+        if (
+            db_p
+            and _rust_db is not None
+            and hasattr(_rust_db, "bulk_index_person_facts_rs")
+            and hasattr(_rust_db, "bulk_index_census_sheets_rs")
+        ):
+            n_facts = int(_rust_db.bulk_index_person_facts_rs(db_p, None))
+            n_sheets = int(_rust_db.bulk_index_census_sheets_rs(db_p, None))
+            return {"indexed_person_facts": n_facts, "indexed_census_sheets": n_sheets}
+    except Exception:
+        pass
     session.exec(text("DELETE FROM search_index_fts"))
     facts = list(session.exec(select(PersonFact)).all())
     ocr_by_row_id = {
@@ -320,6 +364,13 @@ def rebuild_all_fts(session: Session) -> dict[str, int]:
 
 def build_fts_match_expression(query: str, fuzzy: bool = True) -> str:
     """Builds an FTS5 MATCH query with diacritic stripping, prefix matching, and phonetic/synonym expansion."""
+    try:
+        from backend.app.pipeline.lexicon import _rust_lex
+
+        if _rust_lex is not None and hasattr(_rust_lex, "build_fts_match_expression_rs"):
+            return str(_rust_lex.build_fts_match_expression_rs(query, fuzzy))
+    except Exception:
+        pass
     raw_tokens = re.findall(r"[A-Za-z0-9áéíóöőúüűÁÉÍÓÖŐÚÜŰäëÄËčďľĺňŕřšťžČĎĽĹŇŔŘŠŤŽýÝôÔ\-/]+", query)
     clauses: list[str] = []
     for tok in raw_tokens:
@@ -1005,40 +1056,68 @@ def search_unified(
             q_clean = q.strip()
             q_fold = fold_text_diacritics(q_clean)
             if fuzzy:
-                # Check CensusOverviewHouse owners & CensusSheet household_owner for fuzzy matches (scoped by active filters)
-                ovh_stmt = select(
-                    CensusOverviewHouse.census_sheet_id,
-                    CensusOverviewHouse.matched_sheet_id,
-                    CensusOverviewHouse.owner_name,
-                    CensusOverviewHouse.remarks,
-                    CensusOverviewHouse.raw_ocr_text,
-                )
-                if year_from is not None:
-                    ovh_stmt = ovh_stmt.where(CensusOverviewHouse.census_year >= year_from)
-                if year_to is not None:
-                    ovh_stmt = ovh_stmt.where(CensusOverviewHouse.census_year <= year_to)
-                if municipality and municipality.strip():
-                    ovh_stmt = ovh_stmt.where(CensusOverviewHouse.municipality.ilike(f"%{municipality.strip()}%"))  # type: ignore[union-attr]
-                for ov_csid, ov_msid, ov_owner, ov_rem, ov_ocr in session.exec(ovh_stmt).all():
-                    matched_ovh = fuzzy_name_matches(q_clean, [ov_owner, ov_rem], threshold=0.76) or (
-                        bool(ov_ocr and q_fold and q_fold in fold_text_diacritics(ov_ocr))
-                    ) or (not ov_owner and bool(ov_ocr) and fuzzy_name_matches(q_clean, [ov_ocr], threshold=0.76))
-                    if matched_ovh:
-                        if ov_csid and ov_csid not in matched_Id_set:
-                            matched_Id_set.add(ov_csid)
-                            matched_sheet_ids.append(ov_csid)
-                        if ov_msid and ov_msid not in matched_Id_set:
-                            matched_Id_set.add(ov_msid)
-                            matched_sheet_ids.append(ov_msid)
+                used_rust_cat_match = False
+                try:
+                    from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
 
-                cs_owner_stmt = sheet_stmt.where(CensusSheet.household_owner.is_not(None)).with_only_columns(  # type: ignore[union-attr]
-                    CensusSheet.id, CensusSheet.household_owner
-                )
-                for cs_id_val, cs_owner_val in session.connection().execute(cs_owner_stmt).all():
-                    if cs_id_val and cs_id_val not in matched_Id_set:
-                        if fuzzy_name_matches(q_clean, [cs_owner_val], threshold=0.76):
-                            matched_Id_set.add(cs_id_val)
-                            matched_sheet_ids.append(cs_id_val)
+                    db_p_cat = _session_file_db_path(session)
+                    if (
+                        db_p_cat
+                        and _rust_db is not None
+                        and hasattr(_rust_db, "match_catalog_sheets_and_overview_owners_rs")
+                    ):
+                        extra_sids = _rust_db.match_catalog_sheets_and_overview_owners_rs(
+                            db_p_cat,
+                            q_clean,
+                            year_from=year_from,
+                            year_to=year_to,
+                            municipality=municipality,
+                            district=district,
+                        )
+                        for esid in extra_sids:
+                            esid_int = int(esid)
+                            if esid_int not in matched_Id_set:
+                                matched_Id_set.add(esid_int)
+                                matched_sheet_ids.append(esid_int)
+                        used_rust_cat_match = True
+                except Exception:
+                    used_rust_cat_match = False
+
+                if not used_rust_cat_match:
+                    # Check CensusOverviewHouse owners & CensusSheet household_owner for fuzzy matches (scoped by active filters)
+                    ovh_stmt = select(
+                        CensusOverviewHouse.census_sheet_id,
+                        CensusOverviewHouse.matched_sheet_id,
+                        CensusOverviewHouse.owner_name,
+                        CensusOverviewHouse.remarks,
+                        CensusOverviewHouse.raw_ocr_text,
+                    )
+                    if year_from is not None:
+                        ovh_stmt = ovh_stmt.where(CensusOverviewHouse.census_year >= year_from)
+                    if year_to is not None:
+                        ovh_stmt = ovh_stmt.where(CensusOverviewHouse.census_year <= year_to)
+                    if municipality and municipality.strip():
+                        ovh_stmt = ovh_stmt.where(CensusOverviewHouse.municipality.ilike(f"%{municipality.strip()}%"))  # type: ignore[union-attr]
+                    for ov_csid, ov_msid, ov_owner, ov_rem, ov_ocr in session.exec(ovh_stmt).all():
+                        matched_ovh = fuzzy_name_matches(q_clean, [ov_owner, ov_rem], threshold=0.76) or (
+                            bool(ov_ocr and q_fold and q_fold in fold_text_diacritics(ov_ocr))
+                        ) or (not ov_owner and bool(ov_ocr) and fuzzy_name_matches(q_clean, [ov_ocr], threshold=0.76))
+                        if matched_ovh:
+                            if ov_csid and ov_csid not in matched_Id_set:
+                                matched_Id_set.add(ov_csid)
+                                matched_sheet_ids.append(ov_csid)
+                            if ov_msid and ov_msid not in matched_Id_set:
+                                matched_Id_set.add(ov_msid)
+                                matched_sheet_ids.append(ov_msid)
+
+                    cs_owner_stmt = sheet_stmt.where(CensusSheet.household_owner.is_not(None)).with_only_columns(  # type: ignore[union-attr]
+                        CensusSheet.id, CensusSheet.household_owner
+                    )
+                    for cs_id_val, cs_owner_val in session.connection().execute(cs_owner_stmt).all():
+                        if cs_id_val and cs_id_val not in matched_Id_set:
+                            if fuzzy_name_matches(q_clean, [cs_owner_val], threshold=0.76):
+                                matched_Id_set.add(cs_id_val)
+                                matched_sheet_ids.append(cs_id_val)
 
             if matched_sheet_ids:
                 sheet_stmt = sheet_stmt.where(

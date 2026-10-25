@@ -2315,7 +2315,7 @@ pub fn delete_ocr_feedback_rs(
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (db_path, data_dir, now_iso, ai_runtime_config_json, default_ocr, default_decision, default_extract, default_layout, known_local_models, census_sheet_id=None, scan_ids=None, row_ids=None, person_fact_id=None, overview_house_id=None, municipal_district_id=None))]
+#[pyo3(signature = (db_path, data_dir, now_iso, ai_runtime_config_json, default_ocr, default_decision, default_extract, default_layout, known_local_models, census_sheet_id=None, scan_ids=None, row_ids=None, person_fact_id=None, overview_house_id=None, municipal_district_id=None, persist_files=true))]
 pub fn reset_ocr_feedback_rs(
     py: Python<'_>,
     db_path: String,
@@ -2333,6 +2333,7 @@ pub fn reset_ocr_feedback_rs(
     person_fact_id: Option<i64>,
     overview_house_id: Option<i64>,
     municipal_district_id: Option<i64>,
+    persist_files: bool,
 ) -> PyResult<i64> {
     py.allow_threads(move || {
         let mut conn =
@@ -2611,12 +2612,18 @@ pub fn reset_ocr_feedback_rs(
             let tx = conn
                 .transaction()
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            for fid in &ids_to_delete {
-                tx.execute("DELETE FROM ocrfeedback WHERE id = ?1", params![fid])
+            for chunk in ids_to_delete.chunks(450) {
+                let ph: Vec<String> = (0..chunk.len()).map(|i| format!("?{}", i + 1)).collect();
+                let sql = format!("DELETE FROM ocrfeedback WHERE id IN ({})", ph.join(", "));
+                tx.execute(&sql, params_from_iter(chunk.iter()))
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             }
             tx.commit()
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
+
+        if !persist_files {
+            return Ok(deleted_count);
         }
 
         let known_local_lower: HashSet<String> = known_local_models

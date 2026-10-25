@@ -701,6 +701,17 @@ def suppress_auditor_crayon(img_bgr: np.ndarray) -> np.ndarray:
     if img_bgr is None or img_bgr.size == 0 or img_bgr.ndim != 3:
         return img_bgr
 
+    try:
+        from backend.app.pipeline.lexicon import _rust_lex
+
+        if _rust_lex is not None and hasattr(_rust_lex, "suppress_auditor_crayon_bytes_rs"):
+            h_img, w_img = img_bgr.shape[:2]
+            contig = np.ascontiguousarray(img_bgr, dtype=np.uint8)
+            raw_out = _rust_lex.suppress_auditor_crayon_bytes_rs(contig.tobytes(), h_img, w_img)
+            return np.frombuffer(raw_out, dtype=np.uint8).reshape((h_img, w_img, 3)).copy()
+    except Exception:
+        pass
+
     out = img_bgr.copy()
     hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV)
     h_ch = hsv[:, :, 0]
@@ -823,8 +834,24 @@ def _skew_compensated_row_projection(
     n_slices: int = 12,
 ) -> np.ndarray:
     """Computes a skew-compensated horizontal row projection across `n_slices` vertical strips."""
-    h = horiz_lines.shape[0]
-    xs = np.linspace(0, horiz_lines.shape[1], n_slices + 1, dtype=int)
+    h, w_strip = horiz_lines.shape[:2]
+    try:
+        from backend.app.pipeline.lexicon import _rust_lex
+
+        if _rust_lex is not None and hasattr(_rust_lex, "skew_compensated_row_projection_u8_rs"):
+            u8_arr = (
+                np.ascontiguousarray(horiz_lines)
+                if horiz_lines.dtype == np.uint8
+                else np.ascontiguousarray(np.clip(horiz_lines, 0, 255), dtype=np.uint8)
+            )
+            proj_list = _rust_lex.skew_compensated_row_projection_u8_rs(
+                u8_arr.tobytes(), h, w_strip, int(x0), float(xc), float(tan_a), int(n_slices)
+            )
+            return np.array(proj_list, dtype=np.float64)
+    except Exception:
+        pass
+
+    xs = np.linspace(0, w_strip, n_slices + 1, dtype=int)
     proj = np.zeros(h, dtype=np.float64)
     y_coords = np.arange(h, dtype=np.float64)
     for i in range(n_slices):
@@ -867,7 +894,7 @@ def _detect_census_row_boundaries(
     inv_dil = cv2.dilate(inv_u8, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)))
     morph_w = max(50, (x1 - x0) // 45)
     horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_w, 1))
-    horiz_lines = cv2.morphologyEx(inv_dil, cv2.MORPH_OPEN, horiz_kernel).astype(np.float64)
+    horiz_lines = cv2.morphologyEx(inv_dil, cv2.MORPH_OPEN, horiz_kernel)
 
     proj = _skew_compensated_row_projection(horiz_lines, x0, xc, tan_a, n_slices=12)
 
@@ -959,6 +986,23 @@ def _row_has_handwriting(row_strip: np.ndarray) -> bool:
         return False
     clean_roi = suppress_auditor_crayon(roi_slice) if roi_slice.ndim == 3 else roi_slice
     gray_roi = cv2.cvtColor(clean_roi, cv2.COLOR_BGR2GRAY) if clean_roi.ndim == 3 else clean_roi
+
+    min_transitions = max(10, int((y1 - y0) * 0.35))
+    try:
+        from backend.app.pipeline.lexicon import _rust_lex
+
+        if _rust_lex is not None and hasattr(_rust_lex, "row_ink_metrics_gray_u8_rs"):
+            contig_g = np.ascontiguousarray(gray_roi, dtype=np.uint8)
+            r_ratio, r_trans = _rust_lex.row_ink_metrics_gray_u8_rs(
+                contig_g.tobytes(), int(contig_g.shape[0]), int(contig_g.shape[1])
+            )
+            if float(r_ratio) < 0.007:
+                return False
+            if float(r_ratio) >= 0.008 and int(r_trans) >= min_transitions:
+                return True
+    except Exception:
+        pass
+
     name_roi = gray_roi.astype(np.float32)
 
     # Subtract column-wise median so pre-printed vertical grid rules do not trigger false positives
@@ -973,7 +1017,6 @@ def _row_has_handwriting(row_strip: np.ndarray) -> bool:
 
     # Require horizontal stroke transitions typical of cursive handwriting (not a uniform grey blot)
     horiz_transitions = int(np.sum(np.abs(np.diff(ink_mask, axis=1)) > 0))
-    min_transitions = max(10, int((y1 - y0) * 0.35))
     if name_ink_ratio >= 0.008 and horiz_transitions >= min_transitions:
         return True
 
@@ -998,14 +1041,39 @@ def _overview_row_has_handwriting(row_strip: np.ndarray) -> bool:
     rh, rw = row_strip.shape[:2]
     if rh < 10 or rw < 60:
         return False
-    clean_strip = suppress_auditor_crayon(row_strip) if row_strip.ndim == 3 else row_strip
-    gray = cv2.cvtColor(clean_strip, cv2.COLOR_BGR2GRAY) if clean_strip.ndim == 3 else clean_strip
     y0 = max(2, int(rh * 0.16))
     y1 = max(y0 + 4, int(rh * 0.84))
+    sub_strip = row_strip[y0:y1, :]
+    clean_strip = suppress_auditor_crayon(sub_strip) if sub_strip.ndim == 3 else sub_strip
+    gray = cv2.cvtColor(clean_strip, cv2.COLOR_BGR2GRAY) if clean_strip.ndim == 3 else clean_strip
     # Check across Cols 1-8 (0.04w .. 0.86w: Radové č., Osada, Číslo domu, Majiteľ domu, Počty)
-    roi = gray[y0:y1, int(rw * 0.04) : int(rw * 0.86)].astype(np.float32)
-    if roi.size == 0:
+    roi_u8 = gray[:, int(rw * 0.04) : int(rw * 0.86)]
+    if roi_u8.size == 0:
         return False
+    c6_u8 = gray[:, int(rw * 0.35) : int(rw * 0.67)]
+
+    try:
+        from backend.app.pipeline.lexicon import _rust_lex
+
+        if _rust_lex is not None and hasattr(_rust_lex, "row_ink_metrics_gray_u8_rs"):
+            c_roi = np.ascontiguousarray(roi_u8, dtype=np.uint8)
+            ink_ratio, horiz_transitions = _rust_lex.row_ink_metrics_gray_u8_rs(
+                c_roi.tobytes(), int(c_roi.shape[0]), int(c_roi.shape[1])
+            )
+            if float(ink_ratio) < 0.008 or int(horiz_transitions) < max(10, int((y1 - y0) * 0.35)):
+                return False
+            if c6_u8.size > 0:
+                c6_contig = np.ascontiguousarray(c6_u8, dtype=np.uint8)
+                c6_ratio, c6_trans = _rust_lex.row_ink_metrics_gray_u8_rs(
+                    c6_contig.tobytes(), int(c6_contig.shape[0]), int(c6_contig.shape[1])
+                )
+                if float(c6_ratio) < 0.016 or int(c6_trans) < max(6, int((y1 - y0) * 0.16)):
+                    return False
+            return True
+    except Exception:
+        pass
+
+    roi = roi_u8.astype(np.float32)
     col_bg = np.median(roi, axis=0, keepdims=True)
     residual = col_bg - roi
     ink_mask = (residual > 24.0).astype(np.uint8)
@@ -1016,7 +1084,7 @@ def _overview_row_has_handwriting(row_strip: np.ndarray) -> bool:
 
     # Also require handwriting strokes in the Owner Name / middle columns (0.35w .. 0.67w)
     # so blank 'Súhrn' / 'Spolu' summary rows with empty owner columns are suppressed
-    c6_roi = gray[y0:y1, int(rw * 0.35) : int(rw * 0.67)].astype(np.float32)
+    c6_roi = c6_u8.astype(np.float32)
     if c6_roi.size > 0:
         c6_ink = ((np.median(c6_roi, axis=0, keepdims=True) - c6_roi) > 24.0).astype(np.uint8)
         c6_ratio = float(np.mean(c6_ink > 0))
@@ -1051,7 +1119,7 @@ def _detect_overview_subpage_lines(
     inv_dil = cv2.dilate(inv_u8, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)))
     morph_w = max(45, (x1 - x0) // 30)
     horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_w, 1))
-    horiz_lines = cv2.morphologyEx(inv_dil, cv2.MORPH_OPEN, horiz_kernel).astype(np.float64)
+    horiz_lines = cv2.morphologyEx(inv_dil, cv2.MORPH_OPEN, horiz_kernel)
 
     proj = _skew_compensated_row_projection(horiz_lines, x0, xc, tan_a, n_slices=12)
     smooth = np.convolve(proj, np.ones(7) / 7.0, mode="same")

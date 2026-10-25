@@ -2,7 +2,7 @@
 
 Open-source web application for digitizing historical Central European genealogical records—specifically **Church Registers (*Matriky*: baptisms/births, marriages, deaths)** in Slovak, Hungarian, Latin, and German, alongside **1930 / 1939 / 1940 Slovak Census Sheets (*Sčítacie hárky*)** from **Slovakiana / Slovenský národný archív (SNA)**.
 
-It combines OpenCV page layout analysis, a stage-batched Vision-Language Model (VLM) & LLM extraction pipeline, a human-in-the-loop Question Center for uncertain handwriting, full-text search (SQLite FTS5) with historical Slovak/Hungarian/Latin/German name and village normalization, GEDCOM 5.5.1 / CSV export, and read-only **FamilySearch MCP** tree comparison.
+It combines OpenCV + Rust (`matrika_db_rs`) page layout analysis, a stage-batched Vision-Language Model (VLM) & LLM extraction pipeline, a human-in-the-loop Question Center for uncertain handwriting, full-text search (SQLite FTS5 + Rayon parallel paleographic/phonetic scoring) with historical Slovak/Hungarian/Latin/German name and village normalization, native Rust GEDCOM 5.5.1 / CSV export, and read-only **FamilySearch MCP** tree comparison.
 
 ---
 
@@ -10,12 +10,17 @@ It combines OpenCV page layout analysis, a stage-batched Vision-Language Model (
 
 - **Church Register (*Matrika*) Digitization (`/knihy`, `/nahrat`)**
   - Upload single or two-page church register scans (baptism, marriage, death).
-  - OpenCV table and row segmentation with interactive bounding-box overlays and row-level crops.
+  - OpenCV + Rust table and row segmentation (parallel sheared Radon skew detection) with interactive bounding-box overlays and row-level crops.
   - Stage-batched AI pipeline (OCR → Decision → Structured Extraction) producing normalized `PersonFact` records with parents, spouses, godparents/witnesses, vital dates, and historical places.
   - Inline record editing, manual row creation, and cascade deletion directly inside the Scan Inspector.
 - **1930 / 1940 Slovakiana Census Sheet (*Sčítacie hárky*) Digitization (`/scitacie-harky`)**
-  - Browse and search digitized census sheets by year, district (*okres*), municipality (*obec*), and house number via the Slovakiana cultural portal facets.
-  - Supports both **Household Census Sheets** (front & back `_r` scans, multi-dwelling/`byt` households, surname consensus, literacy, occupation, religion, nationality, birth/residency rights) and **Municipality Overview Sheets (*Prehľadové hárky*)** (house number, owner name, total inhabitants).
+  - Browse and search digitized census sheets by single census year (`1930` default or `1940`), district (*okres*), municipality (*obec*), street/settlement (*ulica / osada*), and house number via the Slovakiana cultural portal facets, with seamless cross-year switching (`1930` ↔ `1940`) for the same house or village.
+  - Supports **Household Census Sheets** (front & back `_r` scans, multi-dwelling/`byt` households, surname consensus, literacy, occupation, religion, nationality, birth/residency rights), **District Overview Sheets (*Prehľad sčítacieho obvodu / Prehľad domov*)**, and **Municipal Overview Sheets (*Obecný prehľad*)** joining district summaries with village-wide house directories.
+- **Native Rust Backend Engine (`backend/rust/matrika_db_rs`)**
+  - Compiled PyO3 + `rusqlite` + `rayon` extension (`matrika_db_rs`) with a persistent SQLite connection pool (`db_pool.rs`, 64 MB page cache, 256 MB `mmap`, prepared statement cache) and composite indexes.
+  - Multi-threaded Rust query, filtering, and serialization engines (`census_queries.rs`, `api_queries.rs`, `feedback.rs`) for Census Hub, Municipality Summary, Scan Inspector, Workflow Traces, and OCR Feedback statistics.
+  - Parallel Rust paleographic/phonetic search, 100 km regional gazetteer & surname stemmer (`lexicon.rs`, `gazetteer.rs`, `reconcile.rs`), bulk FTS5 indexer, local Matrika ↔ Census cross-matcher, and native GEDCOM 5.5.1 / CSV exporter (`export.rs`).
+  - Parallel Rust image & OCR helpers (`image_layout.rs`) for HSV/RGB auditor crayon suppression, 141-angle sheared Radon projection, base64 encoding, and zero-DOM HTML table parsing.
 - **Human-in-the-Loop Question Center (`/otazky`)**
   - Low-confidence transcriptions and ambiguous handwriting are queued as targeted verification cards with high-contrast row crops and clickable links back to the source scan or census sheet.
   - Answering a question automatically updates the extracted record and re-indexes full-text search.
@@ -24,8 +29,8 @@ It combines OpenCV page layout analysis, a stage-batched Vision-Language Model (
   - Export filtered or complete datasets to **GEDCOM 5.5.1** (with deduplicated household family units and formal `SOUR` citations) and **CSV**.
 - **FamilySearch MCP Integration (`/familysearch`)**
   - Connects to the bundled `familysearch-mcp` server over stdio to resolve historical jurisdictions, search indexed records, and compare local Matrika/Census facts against FamilySearch Shared Tree profiles (`what_agrees`, `what_differs`, `what_is_missing`, and step-by-step manual citation action packets).
-- **Bilingual Interface (`SK` / `EN`) & Pipeline Inspector (`/debug`)**
-  - Accessible high-contrast interface with instant Slovak (`SK`) and English (`EN`) switching, plus a developer workflow inspector (`/debug`) for configuring per-stage AI providers (local LM Studio vs. remote OpenAI-compatible endpoints), feature flags, and prompt traces.
+- **Bilingual Interface (`SK` / `EN`), OCR Feedback & Pipeline Inspector (`/debug`)**
+  - Accessible high-contrast interface with instant Slovak (`SK`) and English (`EN`) switching, row-level OCR correctness feedback (`Správne` / `Nesprávne` with automatic `data/ocr_feedback_debug_report.md` and `.json` generation), and a developer workflow inspector (`/debug`) for configuring per-stage AI providers (local LM Studio vs. remote OpenAI-compatible endpoints), model combination accuracy/timing benchmarks, feature flags, and prompt traces.
 
 ---
 
@@ -66,15 +71,23 @@ The application listens on [http://localhost:8080](http://localhost:8080).
 ### Prerequisites
 
 - **Python 3.12+** and [`uv`](https://docs.astral.sh/uv/)
+- **Rust toolchain (`cargo` / `rustc`)** (for compiling the native `matrika_db_rs` PyO3 extension)
 - **Node.js 22+** and `npm`
 
-### 1. Backend Setup
+### 1. Backend & Rust Extension Setup
 
 ```bash
 cp .env.example .env
 uv venv .venv
-uv pip install --python .venv -e ./vendor/familysearch-mcp -e "./backend[dev]"
+uv pip install --python .venv -e ./vendor/familysearch-mcp ./backend/rust/matrika_db_rs -e "./backend[dev]"
 PYTHONPATH=. .venv/bin/uvicorn backend.app.main:app --reload --port 8080
+```
+
+When iterating on the Rust crate under `backend/rust/matrika_db_rs`, rebuild it in release mode with `maturin`:
+
+```bash
+cd backend/rust/matrika_db_rs
+PYO3_PYTHON="../../.venv/bin/python" ../../.venv/bin/maturin develop --release
 ```
 
 ### 2. Frontend Setup
@@ -127,10 +140,17 @@ See [`.env.example`](.env.example) for a complete template.
 
 ## Testing & Continuous Integration
 
-Run the backend test suite (uses isolated in-memory SQLite databases and synthetic fixtures):
+Run the backend test suite (exercises both the compiled `matrika_db_rs` Rust extension and Python pipeline with isolated SQLite databases and synthetic fixtures):
 
 ```bash
 PYTHONPATH=. .venv/bin/pytest backend/tests
+```
+
+Verify the Rust extension directly with Cargo:
+
+```bash
+cd backend/rust/matrika_db_rs
+PYO3_PYTHON="../../.venv/bin/python" cargo check
 ```
 
 Run the frontend TypeScript check and production build:

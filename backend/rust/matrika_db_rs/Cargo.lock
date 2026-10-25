@@ -151,12 +151,15 @@ dependencies = [
 name = "matrika_db_rs"
 version = "0.1.0"
 dependencies = [
+ "ahash",
+ "memchr",
  "once_cell",
  "pyo3",
  "rayon",
  "rusqlite",
  "serde",
  "serde_json",
+ "smallvec",
 ]
 
 [[package]]

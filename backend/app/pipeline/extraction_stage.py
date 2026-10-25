@@ -541,9 +541,6 @@ async def run_extraction_for_row(
         user_prompt = (
             f"IMPORTANT: NEVER translate or modernize personal names or surnames. Keep exact historical variants (e.g. keep Andreas as Andreas, Stephanus as Stephanus).\n"
             f"TYPE SAFETY: Dates must ONLY contain day (1..31) and month (e.g. '18. Augustus', 'Julius 28'). NEVER put personal names (e.g. 'Paulus') in dates, and NEVER put month names (e.g. 'Augustus') or punctuation ('.', '/') in person/parent names!\n"
-            f"Pre-parsed column hints: entry={fallback.get('entry_number')}, birth_date={fallback.get('birth_or_event_date')}, "
-            f"baptism_date={fallback.get('baptism_or_burial_date')}, child={fallback.get('given_name_raw')}, "
-            f"father={fallback.get('father_name')}, mother={fallback.get('mother_name')}, village={fallback.get('village_raw')}\n"
             f"Return ONLY raw JSON (no markdown, no explanation) with keys: entry_number, event_year, birth_or_event_date, baptism_or_burial_date, "
             f"given_name_raw, surname_raw, sex, father_name, mother_name, "
             f"mother_maiden_surname, village_raw, house_number, godparents_or_witnesses, "
@@ -574,6 +571,22 @@ async def run_extraction_for_row(
     )
 
     data = res.get("parsed") or {}
+    if (
+        use_direct_image_only
+        and not has_ocr_text
+        and not str(data.get("given_name_raw") or "").strip(" ?.-_\"'/,;:")
+        and not str(data.get("surname_raw") or "").strip(" ?.-_\"'/,;:")
+        and not str(data.get("father_name") or "").strip(" ?.-_\"'/,;:")
+        and extract_image_path
+        and extract_image_path.exists()
+    ):
+        from backend.app.pipeline.ocr_stage import run_ocr_for_row
+
+        await run_ocr_for_row(session, scan, row)
+        if (row.raw_ocr_left or "").strip() or (row.raw_ocr_combined or "").strip():
+            return await run_extraction_for_row(
+                session, scan, row, prev_fact, skip_row_ocr=False
+            )
     merged = reconcile_extraction_with_type_safety(
         data,
         fallback,
@@ -1588,12 +1601,6 @@ async def run_census_extraction_for_row(
                 f"District: {sheet.district if sheet else 'Unknown'}, "
                 f"House: {sheet.house_number if sheet else 'Unknown'}).\n"
                 f"Regional ~100km villages in vicinity: {', '.join(nearby_villages)}\n"
-                f"Pre-parsed hints: surname={fallback.get('surname_raw')}, given_name={fallback.get('given_name_raw')}, "
-                f"relation={fallback.get('relation_to_head')}, birth_date={fallback.get('birth_date_raw')}, "
-                f"birth_place_municipality={fallback.get('birth_place_municipality')}, "
-                f"birth_place_district={fallback.get('birth_place_district')}, "
-                f"birth_place_country={fallback.get('birth_place_country')}, "
-                f"occupation={fallback.get('occupation_raw')}\n"
                 f"OCR text:\n{row.raw_ocr_combined or ''}"
             )
         if prev_fact and (prev_fact.surname_raw or prev_fact.surname_normalized):
@@ -1626,6 +1633,24 @@ async def run_census_extraction_for_row(
             response_model=LLMCensusExtractionSchema,
         )
         data = res.get("parsed") or {}
+
+        # If direct image-only extraction was attempted with a text-only LLM or returned no name on a row with real crops,
+        # automatically run GLM-OCR table recognition on this row and re-extract without pre-parsed hints.
+        if (
+            use_direct_image_only
+            and not has_ocr_text
+            and not str(data.get("surname_raw") or "").strip(" ?.-_\"'/,;:")
+            and not str(data.get("given_name_raw") or "").strip(" ?.-_\"'/,;:")
+            and extract_image_path
+            and extract_image_path.exists()
+        ):
+            from backend.app.pipeline.ocr_stage import run_ocr_for_row
+
+            await run_ocr_for_row(session, scan, row)
+            if not _is_effectively_blank_census_left_ocr(row.raw_ocr_left):
+                return await run_census_extraction_for_row(
+                    session, scan, row, prev_fact, skip_row_ocr=False
+                )
 
     if any(isinstance(v, str) and _is_census_ditto(v) for v in data.values()):
         row.has_ditto_marks = True

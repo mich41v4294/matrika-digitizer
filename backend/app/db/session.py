@@ -14,8 +14,19 @@ engine = create_engine(
 )
 
 
+def _decode_sqlite_text(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace")
+
+
 @event.listens_for(engine, "connect")
 def _set_sqlite_pragma(dbapi_connection: Any, _connection_record: Any) -> None:
+    try:
+        dbapi_connection.text_factory = _decode_sqlite_text
+    except Exception:
+        pass
     cursor = dbapi_connection.cursor()
     requested_mode = os.environ.get("SQLITE_JOURNAL_MODE", "WAL").strip().upper()
     if requested_mode not in {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}:
@@ -31,7 +42,7 @@ def _set_sqlite_pragma(dbapi_connection: Any, _connection_record: Any) -> None:
         cursor.execute("PRAGMA synchronous=NORMAL;")
         cursor.execute("PRAGMA temp_store=MEMORY;")
         cursor.execute("PRAGMA cache_size=-64000;")
-        cursor.execute("PRAGMA mmap_size=268435456;")
+        cursor.execute("PRAGMA mmap_size=0;")
     except Exception:
         pass
     cursor.close()
@@ -132,6 +143,84 @@ def _ensure_sqlite_columns() -> None:
             )
         except Exception:
             pass
+        # Sanitize any legacy non-UTF-8 bytes in ocrfeedback / workflowtrace / censussheet text columns
+        try:
+            _sanitize_non_utf8_sqlite_rows(conn)
+        except Exception:
+            pass
+        # Reset any downloaded household census sheets that were falsely marked extracted/matched with 0 extracted records
+        try:
+            conn.execute(
+                text(
+                    "UPDATE censussheet "
+                    "SET download_status = 'downloaded' "
+                    "WHERE sheet_type = 'household' "
+                    "AND front_scan_id IS NOT NULL "
+                    "AND download_status IN ('extracted', 'matched', 'ocr_done') "
+                    "AND id NOT IN (SELECT DISTINCT census_sheet_id FROM personfact WHERE census_sheet_id IS NOT NULL) "
+                    "AND id NOT IN (SELECT DISTINCT census_sheet_id FROM censusoverviewhouse WHERE census_sheet_id IS NOT NULL) "
+                    "AND id NOT IN (SELECT DISTINCT census_sheet_id FROM censusmunicipaloverviewdistrict WHERE census_sheet_id IS NOT NULL)"
+                )
+            )
+        except Exception:
+            pass
+
+
+def _sanitize_non_utf8_sqlite_rows(conn: Any) -> None:
+    import json
+
+    table_cols: tuple[tuple[str, tuple[str, ...]], ...] = (
+        (
+            "ocrfeedback",
+            (
+                "comment",
+                "expected_correction",
+                "raw_ocr_snapshot",
+                "extracted_snapshot_json",
+                "stage_breakdown_json",
+                "traces_snapshot_json",
+            ),
+        ),
+        (
+            "censussheet",
+            ("commissioner_name", "household_owner", "title_raw", "header_json"),
+        ),
+        (
+            "scanimage",
+            ("header_raw_ocr", "error_message"),
+        ),
+        (
+            "recordrow",
+            ("raw_ocr_left", "raw_ocr_right", "raw_ocr_combined", "normalized_json", "decision_json"),
+        ),
+    )
+    for tbl, cols in table_cols:
+        select_exprs = ", ".join(["id"] + [f"CAST({c} AS BLOB)" for c in cols])
+        rows = conn.execute(text(f"SELECT {select_exprs} FROM {tbl}")).fetchall()
+        for r in rows:
+            row_id = r[0]
+            updates: dict[str, str] = {}
+            for idx, col_name in enumerate(cols, start=1):
+                raw_val = r[idx]
+                if not isinstance(raw_val, (bytes, bytearray, memoryview)):
+                    continue
+                raw_bytes = bytes(raw_val)
+                try:
+                    raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    cleaned = raw_bytes.decode("utf-8", errors="replace")
+                    if col_name.endswith("_json"):
+                        try:
+                            json.loads(cleaned)
+                        except Exception:
+                            cleaned = "[]" if col_name.startswith("traces_") else "{}"
+                    updates[col_name] = cleaned
+            if updates:
+                set_clause = ", ".join(f"{k} = :{k}" for k in updates)
+                conn.execute(
+                    text(f"UPDATE {tbl} SET {set_clause} WHERE id = :_row_id"),
+                    {**updates, "_row_id": row_id},
+                )
 
 
 def delete_person_fact_cascade(session: Session, fact_id: int) -> bool:

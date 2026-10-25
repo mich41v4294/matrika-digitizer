@@ -537,14 +537,16 @@ class LocalAIClient:
         if effective_system_prompt:
             messages.append({"role": "system", "content": effective_system_prompt})
 
-        if image_path and image_path.exists():
-            b64 = await asyncio.to_thread(encode_image_base64, image_path)
+        has_image = bool(image_path and image_path.exists())
+        b64_img: str | None = None
+        if has_image and image_path:
+            b64_img = await asyncio.to_thread(encode_image_base64, image_path)
             messages.append(
                 {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}},
                     ],
                 }
             )
@@ -553,10 +555,9 @@ class LocalAIClient:
 
         is_saluki = "saluki" in active_model.lower()
         is_glm_ocr = "glm-ocr" in active_model.lower()
-        if provider == "freellm":
-            if is_saluki:
-                messages.append({"role": "assistant", "content": "<think>\n</think>\n"})
-        elif skip_thinking or is_saluki:
+        if is_saluki:
+            messages.append({"role": "assistant", "content": "<think>\n</think>\n"})
+        elif provider == "local" and skip_thinking and not is_glm_ocr and not has_image:
             messages.append({"role": "assistant", "content": "<think>\n</think>\n"})
 
         effective_max_tokens = max_tokens
@@ -586,6 +587,7 @@ class LocalAIClient:
         parsed: dict[str, Any] = {}
         validated: ModelT | None = None
         validation_errors: list[str] = []
+        image_rejected_by_endpoint = False
 
         try:
             client = self._get_http_client()
@@ -595,23 +597,31 @@ class LocalAIClient:
                 headers=headers,
                 timeout=timeout_sec,
             )
-            if resp.status_code >= 400 and ("reasoning_effort" in payload or "response_format" in payload):
+            if resp.status_code >= 400 and (
+                "reasoning_effort" in payload
+                or "response_format" in payload
+                or (messages and messages[-1].get("role") == "assistant")
+            ):
+                fallback_messages = [m for m in messages if m.get("role") != "assistant"]
                 fallback_payload = {
                     k: v for k, v in payload.items() if k not in ("reasoning_effort", "response_format")
                 }
+                fallback_payload["messages"] = fallback_messages
                 resp = await client.post(
                     f"{base_url}/chat/completions",
                     json=fallback_payload,
                     headers=headers,
                     timeout=timeout_sec,
                 )
-            if resp.status_code >= 400 and image_path and image_path.exists():
+            if resp.status_code >= 400 and has_image:
                 # Graceful fallback to text-only prompt if a text-only LLM endpoint rejects image_url
+                image_rejected_by_endpoint = True
                 text_only_messages = [
                     {"role": "user", "content": prompt}
                     if m.get("role") == "user" and isinstance(m.get("content"), list)
                     else m
                     for m in messages
+                    if m.get("role") != "assistant"
                 ]
                 text_only_payload = {
                     k: v
@@ -648,24 +658,36 @@ class LocalAIClient:
             # Retry once with higher max_tokens & explicit JSON-only instruction if response_model is required
             # and the model returned only thinking prose without a JSON object
             if response_model is not None and not parsed:
+                retry_prompt_text = (
+                    f"{prompt}\n\n"
+                    "CRITICAL: Do NOT write any reasoning or explanation. "
+                    "Output ONLY the raw JSON object immediately."
+                )
+                retry_user_content: Any = (
+                    [
+                        {"type": "text", "text": retry_prompt_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}},
+                    ]
+                    if (has_image and b64_img and not image_rejected_by_endpoint)
+                    else retry_prompt_text
+                )
                 retry_messages = [
                     {
                         "role": "user",
-                        "content": (
-                            f"{prompt}\n\n"
-                            "CRITICAL: Do NOT write any reasoning or explanation. "
-                            "Output ONLY the raw JSON object immediately."
-                        ),
+                        "content": retry_user_content,
                     }
                     if m.get("role") == "user"
                     else m
                     for m in messages
+                    if m.get("role") != "assistant"
                 ]
                 retry_payload = {
-                    **payload,
-                    "messages": retry_messages,
-                    "max_tokens": max(effective_max_tokens, 3500),
+                    k: v
+                    for k, v in payload.items()
+                    if k not in ("reasoning_effort", "response_format")
                 }
+                retry_payload["messages"] = retry_messages
+                retry_payload["max_tokens"] = max(effective_max_tokens, 3500)
                 r_resp = await client.post(
                     f"{base_url}/chat/completions",
                     json=retry_payload,
@@ -781,6 +803,7 @@ class LocalAIClient:
             "parsed": parsed,
             "validated": validated,
             "validation_errors": validation_errors,
+            "image_rejected_by_endpoint": image_rejected_by_endpoint,
             "duration_ms": duration_ms,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,

@@ -533,6 +533,85 @@ async def download_and_process_single_census_sheet(
     2. Downloads front (_v) and back (_r) high-res JPEG scans to data/uploads/slovakiana/...
     3. Creates/links ScanImage rows (detected_type='census') and runs the fine-tuned census pipeline.
     """
+    try:
+        return await _download_and_process_single_census_sheet_inner(
+            sheet_id,
+            run_pipeline=run_pipeline,
+            run_mcp=run_mcp,
+            max_rows=max_rows,
+            force_sheet_type=force_sheet_type,
+            finalize_idle=finalize_idle,
+            overview_only=overview_only,
+        )
+    except Exception as exc:
+        slovakiana_key = None
+        sheet_label = str(sheet_id)
+        with Session(engine) as err_session:
+            err_sheet = err_session.get(CensusSheet, sheet_id)
+            if err_sheet:
+                slovakiana_key = err_sheet.slovakiana_key
+                sheet_label = f"{err_sheet.municipality or ''} č. {err_sheet.house_number or err_sheet.sheet_number or slovakiana_key}".strip()
+                err_sheet.download_status = "error"
+                err_sheet.error_message = str(exc)[:500]
+                err_session.add(err_sheet)
+                err_session.commit()
+        await ws_manager.broadcast(
+            "sheet_updated",
+            {
+                "sheet_id": sheet_id,
+                "slovakiana_key": slovakiana_key,
+                "download_status": "error",
+            },
+        )
+        if finalize_idle:
+            err_sk = f"Chyba pri spracovaní hárku {sheet_label}: {exc}"
+            err_en = f"Error processing sheet {sheet_label}: {exc}"
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "current_sheet_id": sheet_id,
+                    "current_slovakiana_key": slovakiana_key,
+                    "current_sheet_label": sheet_label,
+                    "active_stage": "idle",
+                    "active_model": None,
+                    "current_row_id": None,
+                    "progress_pct": 0,
+                    "message_sk": err_sk,
+                    "message_en": err_en,
+                },
+            )
+            await ws_manager.emit_completion(
+                {
+                    "status": "error",
+                    "kind": "census_sheet",
+                    "sheet_id": sheet_id,
+                    "slovakiana_key": slovakiana_key,
+                    "sheet_label": sheet_label,
+                    "title_sk": "Chyba pri spracovaní hárku",
+                    "title_en": "Census sheet processing failed",
+                    "message_sk": err_sk,
+                    "message_en": err_en,
+                }
+            )
+            return {
+                "sheet_id": sheet_id,
+                "slovakiana_key": slovakiana_key,
+                "status": "error",
+                "error": str(exc),
+            }
+        raise
+
+
+async def _download_and_process_single_census_sheet_inner(
+    sheet_id: int,
+    *,
+    run_pipeline: bool = True,
+    run_mcp: bool = True,
+    max_rows: int | None = None,
+    force_sheet_type: str | None = None,
+    finalize_idle: bool = True,
+    overview_only: bool = False,
+) -> dict[str, Any]:
     with Session(engine) as session:
         sheet = session.get(CensusSheet, sheet_id)
         if not sheet:
@@ -756,6 +835,14 @@ async def download_and_process_single_census_sheet(
             "pipeline": pipeline_res,
         }
 
+    await ws_manager.broadcast(
+        "sheet_updated",
+        {
+            "sheet_id": sheet_id,
+            "slovakiana_key": slovakiana_key,
+            "download_status": "downloaded",
+        },
+    )
     if finalize_idle:
         done_sk = f"Hotovo: stiahnuté skeny pre hárok {sheet_label}."
         done_en = f"Done: downloaded scans for sheet {sheet_label}."

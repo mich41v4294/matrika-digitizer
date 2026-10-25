@@ -19,6 +19,18 @@ fn open_sqlite(db_path: &str) -> Result<PooledConnection, rusqlite::Error> {
     db_pool::open_sqlite_pooled(db_path)
 }
 
+#[inline]
+pub fn get_opt_str_lossy(r: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
+    match r.get_ref(idx)? {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) => {
+            Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+        }
+        rusqlite::types::ValueRef::Integer(i) => Ok(Some(i.to_string())),
+        rusqlite::types::ValueRef::Real(f) => Ok(Some(f.to_string())),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (db_path=None))]
 fn clear_db_pool_rs(db_path: Option<String>) {
@@ -779,20 +791,19 @@ pub fn compute_feedback_statistics_from_conn(
             Ok(ProjectedFeedback {
                 id: row.get(0)?,
                 row_id: row.get(1)?,
-                verdict: row.get::<_, Option<String>>(2)?.unwrap_or_else(|| "correct".to_string()),
-                model_combo: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                layout_model: row.get(4)?,
-                ocr_model: row.get(5)?,
-                decision_model: row.get(6)?,
-                extract_model: row.get(7)?,
+                verdict: get_opt_str_lossy(row, 2)?.unwrap_or_else(|| "correct".to_string()),
+                model_combo: get_opt_str_lossy(row, 3)?.unwrap_or_default(),
+                layout_model: get_opt_str_lossy(row, 4)?,
+                ocr_model: get_opt_str_lossy(row, 5)?,
+                decision_model: get_opt_str_lossy(row, 6)?,
+                extract_model: get_opt_str_lossy(row, 7)?,
                 total_duration_ms: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
                 layout_duration_ms: row.get::<_, Option<i64>>(9)?.unwrap_or(0),
                 ocr_duration_ms: row.get::<_, Option<i64>>(10)?.unwrap_or(0),
                 decision_duration_ms: row.get::<_, Option<i64>>(11)?.unwrap_or(0),
                 extract_duration_ms: row.get::<_, Option<i64>>(12)?.unwrap_or(0),
                 mcp_duration_ms: row.get::<_, Option<i64>>(13)?.unwrap_or(0),
-                stage_breakdown_json: row
-                    .get::<_, Option<String>>(14)?
+                stage_breakdown_json: get_opt_str_lossy(row, 14)?
                     .unwrap_or_else(|| "{}".to_string()),
             })
         })?

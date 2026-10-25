@@ -986,8 +986,20 @@ def reset_ocr_feedback(
             except Exception:
                 pass
 
-    all_fb = list(session.exec(select(OCRFeedback)).all())
-    if not all_fb:
+    fb_candidates = list(
+        session.exec(
+            select(
+                OCRFeedback.id,
+                OCRFeedback.census_sheet_id,
+                OCRFeedback.scan_id,
+                OCRFeedback.row_id,
+                OCRFeedback.person_fact_id,
+                OCRFeedback.overview_house_id,
+                OCRFeedback.municipal_district_id,
+            )
+        ).all()
+    )
+    if not fb_candidates:
         return 0
 
     target_sheet_ids: set[int] = {census_sheet_id} if census_sheet_id else set()
@@ -1069,55 +1081,69 @@ def reset_ocr_feedback(
                 target_fact_ids.add(f_id)
         row_objs = list(
             session.exec(
-                select(RecordRow).where(RecordRow.id.in_(list(target_row_ids)))  # type: ignore[union-attr]
+                select(RecordRow.id, RecordRow.scan_id, RecordRow.row_index, RecordRow.stitched_crop_path).where(
+                    RecordRow.id.in_(list(target_row_ids))  # type: ignore[union-attr]
+                )
             ).all()
         )
-        for r_obj in row_objs:
-            if r_obj.scan_id:
+        for _r_id, r_scan_id, r_row_index, r_stitched_crop in row_objs:
+            if r_scan_id:
                 for ovh in session.exec(
-                    select(CensusOverviewHouse).where(CensusOverviewHouse.scan_id == r_obj.scan_id)
+                    select(CensusOverviewHouse).where(CensusOverviewHouse.scan_id == r_scan_id)
                 ).all():
                     if ovh.id is not None and (
-                        (r_obj.stitched_crop_path and ovh.stitched_crop_path == r_obj.stitched_crop_path)
-                        or ovh.row_index == r_obj.row_index
+                        (r_stitched_crop and ovh.stitched_crop_path == r_stitched_crop)
+                        or ovh.row_index == r_row_index
                     ):
                         target_house_ids.add(ovh.id)
                 for md in session.exec(
                     select(CensusMunicipalOverviewDistrict).where(
-                        CensusMunicipalOverviewDistrict.scan_id == r_obj.scan_id
+                        CensusMunicipalOverviewDistrict.scan_id == r_scan_id
                     )
                 ).all():
                     if md.id is not None and (
-                        (r_obj.stitched_crop_path and md.stitched_crop_path == r_obj.stitched_crop_path)
-                        or md.row_index == r_obj.row_index
+                        (r_stitched_crop and md.stitched_crop_path == r_stitched_crop)
+                        or md.row_index == r_row_index
                     ):
                         target_dist_ids.add(md.id)
 
-    deleted_count = 0
-    for fb in all_fb:
+    ids_to_delete: list[int] = []
+    for fb_id, fb_cs_id, fb_sc_id, fb_r_id, fb_pf_id, fb_oh_id, fb_md_id in fb_candidates:
+        if fb_id is None:
+            continue
         should_delete = False
-        if target_sheet_ids and fb.census_sheet_id in target_sheet_ids:
+        if target_sheet_ids and fb_cs_id in target_sheet_ids:
             should_delete = True
         elif (
             target_scan_ids
             and not (row_id or row_ids)
-            and fb.scan_id in target_scan_ids
+            and fb_sc_id in target_scan_ids
         ):
             should_delete = True
-        elif target_row_ids and fb.row_id in target_row_ids:
+        elif target_row_ids and fb_r_id in target_row_ids:
             should_delete = True
-        elif target_fact_ids and fb.person_fact_id in target_fact_ids:
+        elif target_fact_ids and fb_pf_id in target_fact_ids:
             should_delete = True
-        elif target_house_ids and fb.overview_house_id in target_house_ids:
+        elif target_house_ids and fb_oh_id in target_house_ids:
             should_delete = True
-        elif target_dist_ids and fb.municipal_district_id in target_dist_ids:
+        elif target_dist_ids and fb_md_id in target_dist_ids:
             should_delete = True
 
         if should_delete:
-            session.delete(fb)
-            deleted_count += 1
+            ids_to_delete.append(int(fb_id))
 
+    deleted_count = len(ids_to_delete)
     if deleted_count > 0:
+        from sqlalchemy import delete as sa_delete
+
+        for obj in list(session.identity_map.values()):
+            if isinstance(obj, OCRFeedback) and obj.id in ids_to_delete:
+                session.expunge(obj)
+        session.exec(
+            sa_delete(OCRFeedback)
+            .where(OCRFeedback.id.in_(ids_to_delete))  # type: ignore[union-attr]
+            .execution_options(synchronize_session=False)
+        )
         if commit:
             session.commit()
             if persist_report:

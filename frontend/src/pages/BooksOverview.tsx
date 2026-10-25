@@ -188,6 +188,9 @@ export default function BooksOverview({
   const searchAbortRef = useRef<AbortController | null>(null);
   const isSearchingRef = useRef<boolean>(false);
   const hasLoadedScansOnceRef = useRef<boolean>(false);
+  const loadDataRef = useRef<(isBackgroundPoll?: boolean) => Promise<void>>(
+    async () => {}
+  );
   const [recordsPage, setRecordsPage] = useState<number>(1);
   const RECORDS_PER_PAGE = 25;
   const [searchQuery, setSearchQuery] = useState(() => searchParams.get("q") || "");
@@ -282,12 +285,17 @@ export default function BooksOverview({
         const d = custom.detail;
         setLivePipelineState(d);
         if (d.active_stage === "idle" && d.progress_pct >= 100) {
-          void loadData(true);
+          void loadDataRef.current(true);
           setScanRefreshVersion((v) => v + 1);
         }
       }
     };
+    const handleSheetUpdated = () => {
+      void loadDataRef.current(true);
+      setScanRefreshVersion((v) => v + 1);
+    };
     window.addEventListener("matrika:pipeline-state", handlePipelineState);
+    window.addEventListener("matrika:sheet-updated", handleSheetUpdated);
 
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${proto}//${window.location.host}/ws/pipeline`;
@@ -317,11 +325,11 @@ export default function BooksOverview({
             const d = msg.data as PipelineState;
             setLivePipelineState(d);
             if (d.active_stage === "idle" && d.progress_pct >= 100) {
-              void loadData(true);
+              void loadDataRef.current(true);
               setScanRefreshVersion((v) => v + 1);
             }
-          } else if (msg.type === "ocr_completed") {
-            void loadData(true);
+          } else if (msg.type === "ocr_completed" || msg.type === "sheet_updated") {
+            void loadDataRef.current(true);
             setScanRefreshVersion((v) => v + 1);
           }
         } catch {
@@ -333,6 +341,7 @@ export default function BooksOverview({
     }
     return () => {
       window.removeEventListener("matrika:pipeline-state", handlePipelineState);
+      window.removeEventListener("matrika:sheet-updated", handleSheetUpdated);
       if (ws) ws.close();
     };
   }, []);
@@ -476,6 +485,7 @@ export default function BooksOverview({
       }
     }
   };
+  loadDataRef.current = loadData;
 
   useEffect(() => {
     setRecordsPage(1);
@@ -736,7 +746,7 @@ export default function BooksOverview({
     [scans]
   );
   const censusScansCount = scans.length - matrikaScans.length;
-  const visibleScans = showCensusScans ? scans : matrikaScans;
+  const visibleScans = showCensusScans || matrikaScans.length === 0 ? scans : matrikaScans;
 
   const selectedRow =
     selectedScanDetail?.rows.find((r) => r.id === selectedRowId) ||

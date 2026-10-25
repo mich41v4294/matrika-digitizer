@@ -614,6 +614,9 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   const censusSearchAbortRef = useRef<AbortController | null>(null);
   const isSearchingCensusRef = useRef<boolean>(false);
   const hasLoadedCensusOnceRef = useRef<boolean>(false);
+  const loadWorkspaceDataRef = useRef<(isBackgroundPoll?: boolean) => Promise<void>>(
+    async () => {}
+  );
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [loadingFacets, setLoadingFacets] = useState<boolean>(false);
   const [jobActionId, setJobActionId] = useState<number | null>(null);
@@ -695,7 +698,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       }
     };
     const handleSheetUpdated = () => {
-      void loadWorkspaceData(true);
+      void loadWorkspaceDataRef.current(true);
     };
     window.addEventListener("matrika:pipeline-state", handleCustomState);
     window.addEventListener("matrika:sheet-updated", handleSheetUpdated);
@@ -746,7 +749,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
             }
           } else if (msg.type === "sheet_updated" && msg.data) {
             const skKey = String(msg.data.slovakiana_key || "");
-            if (skKey) {
+            if (skKey && msg.data.download_status !== "error") {
               const cnt =
                 msg.data.persons_count ??
                 msg.data.overview_houses_count ??
@@ -767,9 +770,9 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 },
               }));
             }
-            void loadWorkspaceData(true);
-          } else if (msg.type === "completion") {
-            void loadWorkspaceData(true);
+            void loadWorkspaceDataRef.current(true);
+          } else if (msg.type === "completion" || msg.type === "ocr_completed") {
+            void loadWorkspaceDataRef.current(true);
           }
         } catch {
           // ignore
@@ -975,6 +978,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       }
     }
   };
+  loadWorkspaceDataRef.current = loadWorkspaceData;
 
   useEffect(() => {
     loadFacets(selectedDistrictTag || undefined, selectedYearTag || undefined);
@@ -1605,9 +1609,21 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
           message_en: `${summaryEn} (${sheetKey})`,
           target_url: `/scitacie-harky/${sheetKey}`,
         });
+      } else {
+        setLivePipelineState((prev) =>
+          prev && prev.current_slovakiana_key === sheetKey
+            ? { ...prev, active_stage: "idle", progress_pct: 0 }
+            : prev
+        );
       }
       await loadWorkspaceData();
       refreshStatus();
+    } catch {
+      setLivePipelineState((prev) =>
+        prev && prev.current_slovakiana_key === sheetKey
+          ? { ...prev, active_stage: "idle", progress_pct: 0 }
+          : prev
+      );
     } finally {
       setProcessingSheetId(null);
       setLocalSheetProgress(null);

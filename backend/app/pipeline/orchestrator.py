@@ -1020,6 +1020,72 @@ async def process_census_sheet_pipeline(
     full-extracting only `overview` and `municipal_overview` sheets and stopping before row OCR
     if the sheet is a regular `household` sheet.
     """
+    try:
+        return await _process_census_sheet_pipeline_inner(
+            sheet_id,
+            max_rows=max_rows,
+            run_mcp=run_mcp,
+            force_sheet_type=force_sheet_type,
+            finalize_idle=finalize_idle,
+            overview_only=overview_only,
+        )
+    except Exception as exc:
+        with Session(engine) as err_session:
+            err_sheet = err_session.get(CensusSheet, sheet_id)
+            sheet_ctx = _sheet_context_dict(err_sheet)
+            if err_sheet:
+                err_sheet.download_status = "error"
+                err_sheet.error_message = str(exc)[:500]
+                err_session.add(err_sheet)
+                err_session.commit()
+        err_sk = f"Chyba pri spracovaní hárku ({sheet_ctx.get('current_sheet_label') or sheet_id}): {exc}"
+        err_en = f"Error processing census sheet ({sheet_ctx.get('current_sheet_label') or sheet_id}): {exc}"
+        await ws_manager.broadcast(
+            "sheet_updated",
+            {
+                "sheet_id": sheet_id,
+                "slovakiana_key": sheet_ctx.get("current_slovakiana_key"),
+                "download_status": "error",
+            },
+        )
+        if finalize_idle:
+            await ws_manager.broadcast(
+                "state",
+                {
+                    **sheet_ctx,
+                    "active_stage": "idle",
+                    "active_model": None,
+                    "current_row_id": None,
+                    "progress_pct": 0,
+                    "message_sk": err_sk,
+                    "message_en": err_en,
+                },
+            )
+            await ws_manager.emit_completion(
+                {
+                    "status": "error",
+                    "kind": "census_sheet",
+                    "sheet_id": sheet_id,
+                    "slovakiana_key": sheet_ctx.get("current_slovakiana_key"),
+                    "sheet_label": sheet_ctx.get("current_sheet_label"),
+                    "title_sk": "Chyba pri spracovaní hárku",
+                    "title_en": "Census sheet processing failed",
+                    "message_sk": err_sk,
+                    "message_en": err_en,
+                }
+            )
+        raise
+
+
+async def _process_census_sheet_pipeline_inner(
+    sheet_id: int,
+    *,
+    max_rows: int | None = None,
+    run_mcp: bool = True,
+    force_sheet_type: str | None = None,
+    finalize_idle: bool = True,
+    overview_only: bool = False,
+) -> dict[str, Any]:
     t0 = time.perf_counter()
     with Session(engine) as session:
         sheet = session.get(CensusSheet, sheet_id)
@@ -1315,6 +1381,8 @@ async def process_census_sheet_pipeline(
         run_mcp=False,
         finalize_idle=False,
     )
+    if res_front.get("status") == "error":
+        raise RuntimeError(str(res_front.get("error") or "Front scan pipeline failed"))
     total_rows_processed = int(res_front.get("rows_processed", 0))
     total_persons_extracted = int(res_front.get("persons_count", 0))
 

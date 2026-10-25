@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::{
     canonical_stage_group_internal, compute_feedback_statistics_from_conn,
-    format_model_combo_internal, open_sqlite, ModelDefaults,
+    format_model_combo_internal, get_opt_str_lossy, open_sqlite, ModelDefaults,
 };
 
 #[derive(Clone)]
@@ -76,21 +76,20 @@ fn query_traces_where(
                 id: r.get(0)?,
                 scan_id: r.get(1)?,
                 row_id: r.get(2)?,
-                stage: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                model_or_tool: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                status: r.get::<_, Option<String>>(5)?.unwrap_or_else(|| "ok".to_string()),
+                stage: get_opt_str_lossy(r, 3)?.unwrap_or_default(),
+                model_or_tool: get_opt_str_lossy(r, 4)?.unwrap_or_default(),
+                status: get_opt_str_lossy(r, 5)?.unwrap_or_else(|| "ok".to_string()),
                 duration_ms: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
                 prompt_tokens: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
                 completion_tokens: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
                 reasoning_tokens: r.get::<_, Option<i64>>(9)?.unwrap_or(0),
-                image_path: r.get(10)?,
-                prompt_text: r.get(11)?,
-                reasoning_content: r.get(12)?,
-                response_text: r.get(13)?,
-                parsed_json: r
-                    .get::<_, Option<String>>(14)?
+                image_path: get_opt_str_lossy(r, 10)?,
+                prompt_text: get_opt_str_lossy(r, 11)?,
+                reasoning_content: get_opt_str_lossy(r, 12)?,
+                response_text: get_opt_str_lossy(r, 13)?,
+                parsed_json: get_opt_str_lossy(r, 14)?
                     .unwrap_or_else(|| "{}".to_string()),
-                created_at: r.get(15)?,
+                created_at: get_opt_str_lossy(r, 15)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -134,43 +133,39 @@ struct FeedbackRow {
 fn read_feedback_row(r: &rusqlite::Row<'_>) -> Result<FeedbackRow, rusqlite::Error> {
     Ok(FeedbackRow {
         id: r.get(0)?,
-        target_type: r.get::<_, Option<String>>(1)?.unwrap_or_else(|| "row".to_string()),
+        target_type: get_opt_str_lossy(r, 1)?.unwrap_or_else(|| "row".to_string()),
         row_id: r.get(2)?,
         scan_id: r.get(3)?,
         census_sheet_id: r.get(4)?,
         person_fact_id: r.get(5)?,
         overview_house_id: r.get(6)?,
         municipal_district_id: r.get(7)?,
-        verdict: r
-            .get::<_, Option<String>>(8)?
+        verdict: get_opt_str_lossy(r, 8)?
             .unwrap_or_else(|| "correct".to_string()),
-        comment: r.get(9)?,
-        expected_correction: r.get(10)?,
-        model_combo: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
-        layout_model: r.get(12)?,
-        ocr_model: r.get(13)?,
-        decision_model: r.get(14)?,
-        extract_model: r.get(15)?,
-        mcp_model: r.get(16)?,
+        comment: get_opt_str_lossy(r, 9)?,
+        expected_correction: get_opt_str_lossy(r, 10)?,
+        model_combo: get_opt_str_lossy(r, 11)?.unwrap_or_default(),
+        layout_model: get_opt_str_lossy(r, 12)?,
+        ocr_model: get_opt_str_lossy(r, 13)?,
+        decision_model: get_opt_str_lossy(r, 14)?,
+        extract_model: get_opt_str_lossy(r, 15)?,
+        mcp_model: get_opt_str_lossy(r, 16)?,
         total_duration_ms: r.get::<_, Option<i64>>(17)?.unwrap_or(0),
         layout_duration_ms: r.get::<_, Option<i64>>(18)?.unwrap_or(0),
         ocr_duration_ms: r.get::<_, Option<i64>>(19)?.unwrap_or(0),
         decision_duration_ms: r.get::<_, Option<i64>>(20)?.unwrap_or(0),
         extract_duration_ms: r.get::<_, Option<i64>>(21)?.unwrap_or(0),
         mcp_duration_ms: r.get::<_, Option<i64>>(22)?.unwrap_or(0),
-        raw_ocr_snapshot: r.get(23)?,
-        extracted_snapshot_json: r
-            .get::<_, Option<String>>(24)?
+        raw_ocr_snapshot: get_opt_str_lossy(r, 23)?,
+        extracted_snapshot_json: get_opt_str_lossy(r, 24)?
             .unwrap_or_else(|| "{}".to_string()),
-        stage_breakdown_json: r
-            .get::<_, Option<String>>(25)?
+        stage_breakdown_json: get_opt_str_lossy(r, 25)?
             .unwrap_or_else(|| "{}".to_string()),
-        traces_snapshot_json: r
-            .get::<_, Option<String>>(26)?
+        traces_snapshot_json: get_opt_str_lossy(r, 26)?
             .unwrap_or_else(|| "[]".to_string()),
-        crop_url: r.get(27)?,
-        created_at: r.get(28)?,
-        updated_at: r.get(29)?,
+        crop_url: get_opt_str_lossy(r, 27)?,
+        created_at: get_opt_str_lossy(r, 28)?,
+        updated_at: get_opt_str_lossy(r, 29)?,
     })
 }
 

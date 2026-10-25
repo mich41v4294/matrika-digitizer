@@ -73,7 +73,7 @@ fn configure_new_connection(conn: &Connection) -> Result<(), rusqlite::Error> {
          PRAGMA synchronous=NORMAL;
          PRAGMA temp_store=MEMORY;
          PRAGMA cache_size=-64000;
-         PRAGMA mmap_size=268435456;",
+         PRAGMA mmap_size=0;",
         mode
     );
     if conn.execute_batch(&pragma_sql).is_err() {

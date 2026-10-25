@@ -18,6 +18,7 @@ from backend.app.pipeline.orchestrator import (
     process_single_scan_pipeline,
     run_layout_for_scan_sync,
 )
+from backend.app.pipeline.task_queue import task_queue
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
 
@@ -305,14 +306,24 @@ async def trigger_scan_pipeline(
     )
 
     if req.background:
-        background_tasks.add_task(
-            process_single_scan_pipeline,
-            scan_id,
-            max_rows=req.max_rows,
-            run_mcp=req.run_mcp,
-            watchlist_filter=req.watchlist_filter,
+        scan_label = scan.filename or f"Sken #{scan_id}"
+        queued_task = task_queue.enqueue_background(
+            lambda: process_single_scan_pipeline(
+                scan_id,
+                max_rows=req.max_rows,
+                run_mcp=req.run_mcp,
+                watchlist_filter=req.watchlist_filter,
+            ),
+            task_type="matrika_scan_ocr" if not scan.census_sheet_id else "census_sheet_ocr",
+            category="ocr",
+            title_sk=f"AI OCR skenu: {scan_label}",
+            title_en=f"Scan AI OCR: {scan_label}",
+            initial_stage="layout",
+            active_model=settings.model_ocr,
+            target_url=f"/knihy?scan={scan_id}",
+            metadata={"scan_id": scan_id, "sheet_id": scan.census_sheet_id},
         )
-        return {"status": "started_in_background", "scan_id": scan_id}
+        return {"status": "started_in_background", "scan_id": scan_id, "task": queued_task}
 
     res = await process_single_scan_pipeline(
         scan_id,
@@ -330,6 +341,8 @@ async def trigger_batch_pipeline(
     session: SessionDep,
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
+    batch = session.get(Batch, batch_id)
+    batch_label = (batch.name if batch and batch.name else f"Dávka #{batch_id}")
     batch_scan_ids = [
         sid
         for sid in session.exec(select(ScanImage.id).where(ScanImage.batch_id == batch_id)).all()
@@ -337,11 +350,20 @@ async def trigger_batch_pipeline(
     ]
     if batch_scan_ids:
         reset_ocr_feedback(session, scan_ids=batch_scan_ids)
-    background_tasks.add_task(
-        process_batch_stage_queued,
-        batch_id,
-        max_rows_per_scan=req.max_rows,
-        run_mcp=req.run_mcp,
-        only_undone=req.only_undone,
+    queued_task = task_queue.enqueue_background(
+        lambda: process_batch_stage_queued(
+            batch_id,
+            max_rows_per_scan=req.max_rows,
+            run_mcp=req.run_mcp,
+            only_undone=req.only_undone,
+        ),
+        task_type="matrika_batch_ocr",
+        category="ocr",
+        title_sk=f"Hromadné OCR dávky: {batch_label}",
+        title_en=f"Batch OCR: {batch_label}",
+        initial_stage="layout",
+        active_model=settings.model_ocr,
+        target_url="/knihy",
+        metadata={"batch_id": batch_id},
     )
-    return {"status": "batch_started", "batch_id": batch_id}
+    return {"status": "batch_started", "batch_id": batch_id, "task": queued_task}

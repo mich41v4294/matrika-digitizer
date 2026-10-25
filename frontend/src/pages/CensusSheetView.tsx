@@ -1196,12 +1196,40 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
       return false;
     };
 
+    const findQueuedTaskForCurrentSheet = (d: PipelineState) => {
+      const curKey = detail?.sheet?.slovakiana_id || sheetId;
+      const curId = detail?.sheet?.id;
+      return (d.queued_tasks || []).find(
+        (qt) =>
+          (curKey && qt.metadata?.slovakiana_key === curKey) ||
+          (curId != null && qt.metadata?.sheet_id === curId)
+      );
+    };
+
     const handlePipelineStateEvent = (e: Event) => {
       const custom = e as CustomEvent<PipelineState>;
       const d = custom.detail;
       if (!d) return;
       const st = String(d.active_stage || "idle");
       const isThisSheet = matchesCurrentSheet(d);
+      const queuedForThis = findQueuedTaskForCurrentSheet(d);
+      if (queuedForThis && !isThisSheet) {
+        const qPos = queuedForThis.queue_position ?? 1;
+        setSheetProgress((prev) => ({
+          ...prev,
+          active: true,
+          active_stage: "queued",
+          active_model: null,
+          progress_pct: 5,
+          message_sk:
+            queuedForThis.message_sk ||
+            `Vo fronte (#${qPos}) – čaká na dokončenie prebiehajúcej úlohy…`,
+          message_en:
+            queuedForThis.message_en ||
+            `Queued (#${qPos}) – waiting for ongoing task to complete…`,
+        }));
+        return;
+      }
       if (st !== "idle" && (processing || switchingType || isThisSheet)) {
         setSheetProgress((prev) => {
           const incomingPct = Number(d.progress_pct ?? 12);
@@ -1263,7 +1291,23 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             const d = msg.data as PipelineState;
             const st = String(d.active_stage || "idle");
             const isThisSheet = matchesCurrentSheet(d);
-            if (st !== "idle") {
+            const queuedForThis = findQueuedTaskForCurrentSheet(d);
+            if (queuedForThis && !isThisSheet) {
+              const qPos = queuedForThis.queue_position ?? 1;
+              setSheetProgress((prev) => ({
+                ...prev,
+                active: true,
+                active_stage: "queued",
+                active_model: null,
+                progress_pct: 5,
+                message_sk:
+                  queuedForThis.message_sk ||
+                  `Vo fronte (#${qPos}) – čaká na dokončenie prebiehajúcej úlohy…`,
+                message_en:
+                  queuedForThis.message_en ||
+                  `Queued (#${qPos}) – waiting for ongoing task to complete…`,
+              }));
+            } else if (st !== "idle") {
               setSheetProgress((prev) => {
                 if (!prev.active && !processing && !switchingType && !isThisSheet) return prev;
                 const incomingPct = Number(d.progress_pct ?? 12);
@@ -1348,20 +1392,44 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
         const r = await fetch("/api/status");
         if (!r.ok) return;
         const stData = await r.json();
-        const ps = stData?.pipeline_state;
+        const ps = stData?.pipeline_state as PipelineState | undefined;
         if (ps && ps.active_stage && ps.active_stage !== "idle") {
-          setSheetProgress((prev) => ({
-            ...prev,
-            active: true,
-            active_stage: String(ps.active_stage),
-            active_model: ps.active_model ?? prev.active_model,
-            progress_pct: Math.max(
-              prev.progress_pct,
-              Math.min(99, Number(ps.progress_pct || 12))
-            ),
-            message_sk: String(ps.message_sk || prev.message_sk),
-            message_en: String(ps.message_en || prev.message_en),
-          }));
+          const curKey = detail?.sheet?.slovakiana_id || sheetId;
+          const curId = detail?.sheet?.id;
+          const queuedForThis = (ps.queued_tasks || []).find(
+            (qt) =>
+              (curKey && qt.metadata?.slovakiana_key === curKey) ||
+              (curId != null && qt.metadata?.sheet_id === curId)
+          );
+          if (queuedForThis && ps.current_slovakiana_key !== curKey && ps.current_sheet_id !== curId) {
+            const qPos = queuedForThis.queue_position ?? 1;
+            setSheetProgress((prev) => ({
+              ...prev,
+              active: true,
+              active_stage: "queued",
+              active_model: null,
+              progress_pct: 5,
+              message_sk:
+                queuedForThis.message_sk ||
+                `Vo fronte (#${qPos}) – čaká na dokončenie prebiehajúcej úlohy…`,
+              message_en:
+                queuedForThis.message_en ||
+                `Queued (#${qPos}) – waiting for ongoing task to complete…`,
+            }));
+          } else {
+            setSheetProgress((prev) => ({
+              ...prev,
+              active: true,
+              active_stage: String(ps.active_stage),
+              active_model: ps.active_model ?? prev.active_model,
+              progress_pct: Math.max(
+                prev.progress_pct,
+                Math.min(99, Number(ps.progress_pct || 12))
+              ),
+              message_sk: String(ps.message_sk || prev.message_sk),
+              message_en: String(ps.message_en || prev.message_en),
+            }));
+          }
         }
       } catch {
         // ignore transient poll error

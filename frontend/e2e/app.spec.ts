@@ -499,8 +499,12 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
       "Prehľad sčítacieho obvodu – Zoznam domov a majiteľov"
     );
 
-    // C. Feature Flags & OCR Feedback / Model Combo Statistics in /debug
+    // C. Feature Flags & OCR Feedback / Model Combo Statistics & Task Queue in /debug
     await page.goto("/debug", { waitUntil: "networkidle" });
+    await expect(page.getByTestId("debug-task-queue-card")).toBeVisible();
+    await expect(page.getByTestId("debug-task-queue-card")).toContainText(
+      "Fronta úloh a spracovania (Task Queue)"
+    );
     await expect(page.getByTestId("debug-model-combo-stats-card")).toBeVisible();
     await expect(page.getByTestId("stats-overall-correctness-rate")).toContainText("50%");
     await expect(page.getByTestId("stats-correct-count")).toContainText("1");
@@ -645,6 +649,88 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await unifiedStreetInput.fill("Hlavná");
     await expect(page.locator("body")).toContainText("Kováč");
     await expect(page.locator("body")).toContainText("Hlavná");
+
+    // H. Verify Task Queue in /debug shows active OCR + queued FamilySearch pairing without cancelling each other
+    await page.route("**/api/debug/tasks*", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            active_task: {
+              id: 11,
+              task_id: "task-11",
+              task_type: "census_sheet_ocr",
+              category: "ocr",
+              title_sk: "AI OCR sčítacieho hárku: Obec Testová č. 15 (cair-test001)",
+              title_en: "Census sheet AI OCR: Obec Testová #15 (cair-test001)",
+              status: "running",
+              priority: 10,
+              queue_position: 0,
+              progress_pct: 48,
+              active_stage: "ocr",
+              active_model: "glm-ocr-g32-mixed_4_8-mlx",
+              message_sk: "Čítam rukopis riadku 2/3 (cair-test001)...",
+              message_en: "Reading handwriting row 2/3 (cair-test001)...",
+              target_url: "/scitacie-harky/cair-test001",
+              created_at: Date.now() / 1000 - 8,
+              started_at: Date.now() / 1000 - 8,
+              finished_at: null,
+              duration_ms: 8000,
+              error: null,
+            },
+            queued_tasks: [
+              {
+                id: 12,
+                task_id: "task-12",
+                task_type: "fs_rematch_all",
+                category: "familysearch",
+                title_sk: "Párovanie s FamilySearch MCP (všetky osoby)",
+                title_en: "FamilySearch MCP Pairing (all persons)",
+                status: "queued",
+                priority: 10,
+                queue_position: 1,
+                progress_pct: 0,
+                active_stage: "queued",
+                active_model: "familysearch-mcp",
+                message_sk: "Vo fronte (#1) – čaká na dokončenie prebiehajúcej úlohy…",
+                message_en: "Queued (#1) – waiting for ongoing task to complete…",
+                target_url: "/familysearch",
+                created_at: Date.now() / 1000 - 3,
+                started_at: null,
+                finished_at: null,
+                duration_ms: null,
+                error: null,
+              },
+            ],
+            history: [],
+            counts: {
+              running: 1,
+              queued: 1,
+              completed: 2,
+              cancelled: 0,
+              error: 0,
+              total_active_and_queued: 2,
+            },
+          }),
+        });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto("/debug", { waitUntil: "networkidle" });
+    await expect(page.getByTestId("debug-task-queue-card")).toBeVisible();
+    await expect(page.getByTestId("debug-queue-running-count")).toHaveText("1");
+    await expect(page.getByTestId("debug-queue-waiting-count")).toHaveText("1");
+    await expect(page.getByTestId("debug-active-task-item")).toContainText("cair-test001");
+    await expect(page.getByTestId("debug-queued-task-12")).toContainText(
+      "Párovanie s FamilySearch MCP"
+    );
+    await expect(page.getByTestId("debug-queued-task-12")).toContainText("Poradie #1");
+    await page.getByTestId("debug-task-queue-card").screenshot({
+      path: `${SCREENSHOT_DIR}/debug_task_queue_active.png`,
+    });
+    await page.unroute("**/api/debug/tasks*");
 
     await assertCleanPageAndImages(page, diag, "interactive-census-and-flags");
   });

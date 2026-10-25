@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from sqlmodel import Session, select
+
+_FEEDBACK_WRITE_LOCK = threading.RLock()
 
 from backend.app.config import settings
 from backend.app.db.models import (
@@ -729,11 +732,15 @@ def upsert_ocr_feedback(
     existing.crop_url = ctx["crop_url"]
     existing.updated_at = utcnow()
 
-    session.add(existing)
-    session.commit()
-    session.refresh(existing)
-    persist_llm_debug_report_files(session)
-    return existing
+    with _FEEDBACK_WRITE_LOCK:
+        session.add(existing)
+        session.commit()
+        try:
+            session.refresh(existing)
+        except Exception:
+            pass
+        persist_llm_debug_report_files(session)
+        return existing
 
 
 def submit_ocr_feedback_fast(
@@ -751,30 +758,32 @@ def submit_ocr_feedback_fast(
     municipal_district_id: int | None = None,
     light: bool = False,
 ) -> dict[str, Any]:
-    fb = upsert_ocr_feedback(
-        session,
-        verdict=verdict,
-        comment=comment,
-        expected_correction=expected_correction,
-        target_type=target_type,
-        row_id=row_id,
-        scan_id=scan_id,
-        census_sheet_id=census_sheet_id,
-        person_fact_id=person_fact_id,
-        overview_house_id=overview_house_id,
-        municipal_district_id=municipal_district_id,
-    )
-    report_payload = build_llm_debug_report_payload(session)
-    report_md = format_llm_debug_report_markdown(report_payload)
-    out: dict[str, Any] = {
-        "status": "ok",
-        "feedback": serialize_ocr_feedback(fb, include_traces=True),
-        "stats": report_payload["statistics"],
-        "report_files": report_payload["statistics"]["summary"]["report_files"],
-    }
-    if not light:
-        out["report_markdown"] = report_md
-    return out
+    with _FEEDBACK_WRITE_LOCK:
+        fb = upsert_ocr_feedback(
+            session,
+            verdict=verdict,
+            comment=comment,
+            expected_correction=expected_correction,
+            target_type=target_type,
+            row_id=row_id,
+            scan_id=scan_id,
+            census_sheet_id=census_sheet_id,
+            person_fact_id=person_fact_id,
+            overview_house_id=overview_house_id,
+            municipal_district_id=municipal_district_id,
+        )
+        fb_serialized = serialize_ocr_feedback(fb, include_traces=True)
+        report_payload = build_llm_debug_report_payload(session)
+        report_md = format_llm_debug_report_markdown(report_payload)
+        out: dict[str, Any] = {
+            "status": "ok",
+            "feedback": fb_serialized,
+            "stats": report_payload["statistics"],
+            "report_files": report_payload["statistics"]["summary"]["report_files"],
+        }
+        if not light:
+            out["report_markdown"] = report_md
+        return out
 
 
 def delete_ocr_feedback_fast(
@@ -783,22 +792,23 @@ def delete_ocr_feedback_fast(
     *,
     light: bool = False,
 ) -> dict[str, Any] | None:
-    fb = session.get(OCRFeedback, feedback_id)
-    if not fb:
-        return None
-    session.delete(fb)
-    session.commit()
-    report_files = persist_llm_debug_report_files(session)
-    report_payload = build_llm_debug_report_payload(session)
-    out: dict[str, Any] = {
-        "status": "deleted",
-        "deleted_id": feedback_id,
-        "stats": report_payload["statistics"],
-        "report_files": report_files,
-    }
-    if not light:
-        out["report_markdown"] = format_llm_debug_report_markdown(report_payload)
-    return out
+    with _FEEDBACK_WRITE_LOCK:
+        fb = session.get(OCRFeedback, feedback_id)
+        if not fb:
+            return None
+        session.delete(fb)
+        session.commit()
+        report_files = persist_llm_debug_report_files(session)
+        report_payload = build_llm_debug_report_payload(session)
+        out: dict[str, Any] = {
+            "status": "deleted",
+            "deleted_id": feedback_id,
+            "stats": report_payload["statistics"],
+            "report_files": report_files,
+        }
+        if not light:
+            out["report_markdown"] = format_llm_debug_report_markdown(report_payload)
+        return out
 
 
 def serialize_ocr_feedback(fb: OCRFeedback, *, include_traces: bool = True) -> dict[str, Any]:
@@ -889,6 +899,36 @@ def serialize_ocr_feedback(fb: OCRFeedback, *, include_traces: bool = True) -> d
 
 
 def reset_ocr_feedback(
+    session: Session,
+    *,
+    census_sheet_id: int | None = None,
+    scan_id: int | None = None,
+    scan_ids: list[int] | None = None,
+    row_id: int | None = None,
+    row_ids: list[int] | None = None,
+    person_fact_id: int | None = None,
+    overview_house_id: int | None = None,
+    municipal_district_id: int | None = None,
+    commit: bool = True,
+    persist_report: bool = True,
+) -> int:
+    with _FEEDBACK_WRITE_LOCK:
+        return _reset_ocr_feedback_inner(
+            session,
+            census_sheet_id=census_sheet_id,
+            scan_id=scan_id,
+            scan_ids=scan_ids,
+            row_id=row_id,
+            row_ids=row_ids,
+            person_fact_id=person_fact_id,
+            overview_house_id=overview_house_id,
+            municipal_district_id=municipal_district_id,
+            commit=commit,
+            persist_report=persist_report,
+        )
+
+
+def _reset_ocr_feedback_inner(
     session: Session,
     *,
     census_sheet_id: int | None = None,

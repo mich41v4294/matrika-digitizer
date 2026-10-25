@@ -31,6 +31,7 @@ from backend.app.pipeline.lexicon import (
     canonical_municipality_key,
     fold_text_diacritics,
 )
+from backend.app.pipeline.task_queue import task_queue
 from backend.app.search.fts import bulk_index_census_sheets, index_census_sheet
 
 _ACTIVE_JOB_FLAGS: dict[int, bool] = {}
@@ -232,7 +233,14 @@ def _find_matching_census_sheets(
 
 
 def is_job_running_in_memory(job_id: int) -> bool:
-    return bool(_ACTIVE_JOB_FLAGS.get(job_id, False))
+    return bool(
+        _ACTIVE_JOB_FLAGS.get(job_id, False)
+        or task_queue.is_census_job_active_or_queued(job_id)
+    )
+
+
+def mark_job_active_in_memory(job_id: int) -> None:
+    _ACTIVE_JOB_FLAGS[job_id] = True
 
 
 def request_job_pause(job_id: int) -> None:
@@ -306,6 +314,48 @@ async def run_catalog_harvest_job(
     Tier 1 Catalog Harvester: Paginates Slovakiana /censussheet/search, upserts CensusSheet rows,
     and indexes them into FTS5. Checkpoints cursor_page after every page for crash/pause resumability.
     """
+    if finalize_job and not task_queue.is_inside_active_task():
+        job_title = f"Katalóg Slovakiana (#{job_id})"
+        try:
+            with Session(engine) as s_meta:
+                j = s_meta.get(CensusDownloadJob, job_id)
+                if j:
+                    flt = json.loads(j.filter_json or "{}")
+                    if flt.get("name"):
+                        job_title = str(flt["name"])
+        except Exception:
+            pass
+        return await task_queue.run_or_enqueue(
+            lambda: _run_catalog_harvest_job_inner(
+                job_id,
+                max_pages=max_pages,
+                page_size=page_size,
+                finalize_job=finalize_job,
+            ),
+            task_type="census_harvest",
+            category="harvest",
+            title_sk=job_title,
+            title_en=job_title,
+            initial_stage="census_harvest",
+            active_model="slovakiana-wcm-api",
+            target_url="/scitacie-harky",
+            metadata={"job_id": job_id},
+        )
+    return await _run_catalog_harvest_job_inner(
+        job_id,
+        max_pages=max_pages,
+        page_size=page_size,
+        finalize_job=finalize_job,
+    )
+
+
+async def _run_catalog_harvest_job_inner(
+    job_id: int,
+    *,
+    max_pages: int | None = None,
+    page_size: int = 200,
+    finalize_job: bool = True,
+) -> dict[str, Any]:
     _ACTIVE_JOB_FLAGS[job_id] = True
     with Session(engine) as session:
         job = session.get(CensusDownloadJob, job_id)
@@ -533,6 +583,71 @@ async def download_and_process_single_census_sheet(
     2. Downloads front (_v) and back (_r) high-res JPEG scans to data/uploads/slovakiana/...
     3. Creates/links ScanImage rows (detected_type='census') and runs the fine-tuned census pipeline.
     """
+    if not task_queue.is_inside_active_task():
+        sh_label = f"Hárok #{sheet_id}"
+        sh_key: str | None = None
+        try:
+            with Session(engine) as s_meta:
+                sh = s_meta.get(CensusSheet, sheet_id)
+                if sh:
+                    sh_key = sh.slovakiana_key
+                    sh_label = (
+                        f"{sh.municipality or ''} č. {sh.house_number or sh.sheet_number or sh_key}".strip()
+                    )
+        except Exception:
+            pass
+        return await task_queue.run_or_enqueue(
+            lambda: _download_and_process_single_census_sheet_wrapped(
+                sheet_id,
+                run_pipeline=run_pipeline,
+                run_mcp=run_mcp,
+                max_rows=max_rows,
+                force_sheet_type=force_sheet_type,
+                finalize_idle=finalize_idle,
+                overview_only=overview_only,
+            ),
+            task_type="census_sheet_ocr" if run_pipeline else "census_sheet_download",
+            category="ocr" if run_pipeline else "harvest",
+            title_sk=(
+                f"AI OCR sčítacieho hárku: {sh_label}"
+                if run_pipeline
+                else f"Sťahovanie skenu hárku: {sh_label}"
+            ),
+            title_en=(
+                f"Census sheet AI OCR: {sh_label}"
+                if run_pipeline
+                else f"Download sheet scan: {sh_label}"
+            ),
+            initial_stage="census_download",
+            active_model="slovakiana-iiif",
+            target_url=f"/scitacie-harky/{sh_key or sheet_id}",
+            metadata={
+                "sheet_id": sheet_id,
+                "slovakiana_key": sh_key,
+                "sheet_label": sh_label,
+            },
+        )
+    return await _download_and_process_single_census_sheet_wrapped(
+        sheet_id,
+        run_pipeline=run_pipeline,
+        run_mcp=run_mcp,
+        max_rows=max_rows,
+        force_sheet_type=force_sheet_type,
+        finalize_idle=finalize_idle,
+        overview_only=overview_only,
+    )
+
+
+async def _download_and_process_single_census_sheet_wrapped(
+    sheet_id: int,
+    *,
+    run_pipeline: bool = True,
+    run_mcp: bool = True,
+    max_rows: int | None = None,
+    force_sheet_type: str | None = None,
+    finalize_idle: bool = True,
+    overview_only: bool = False,
+) -> dict[str, Any]:
     try:
         return await _download_and_process_single_census_sheet_inner(
             sheet_id,
@@ -890,6 +1005,34 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
     has no more pages), downloads their front/back high-res scans, and optionally runs the
     fine-tuned census pipeline.
     """
+    if not task_queue.is_inside_active_task():
+        job_title = f"Hromadné OCR hárkov (#{job_id})"
+        is_ov_only = False
+        try:
+            with Session(engine) as s_meta:
+                j = s_meta.get(CensusDownloadJob, job_id)
+                if j:
+                    flt = json.loads(j.filter_json or "{}")
+                    if flt.get("name"):
+                        job_title = str(flt["name"])
+                    is_ov_only = bool(flt.get("overview_only", False))
+        except Exception:
+            pass
+        return await task_queue.run_or_enqueue(
+            lambda: _run_download_and_pipeline_job_inner(job_id),
+            task_type="census_overview_ocr" if is_ov_only else "census_batch_ocr",
+            category="ocr",
+            title_sk=job_title,
+            title_en=job_title,
+            initial_stage="census_download",
+            active_model="slovakiana-iiif",
+            target_url="/scitacie-harky",
+            metadata={"job_id": job_id},
+        )
+    return await _run_download_and_pipeline_job_inner(job_id)
+
+
+async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
     _ACTIVE_JOB_FLAGS[job_id] = True
     with Session(engine) as session:
         job = session.get(CensusDownloadJob, job_id)
@@ -992,7 +1135,7 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
     processed = 0
     failed = 0
     for idx, sheet in enumerate(candidates):
-        if not _ACTIVE_JOB_FLAGS.get(job_id, True):
+        if not _ACTIVE_JOB_FLAGS.get(job_id, True) or task_queue.is_current_task_cancelled():
             break
         if sheet.id is None:
             continue
@@ -1111,6 +1254,7 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
         )
     return {
         "job_id": job_id,
+        "status": "completed" if was_not_paused else "paused",
         "processed": processed,
         "failed": failed,
         "skipped_done": already_done_count,

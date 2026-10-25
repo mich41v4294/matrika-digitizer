@@ -914,6 +914,183 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                 self.assertEqual(facts[0].surname_raw, "Kováč")
             repaired_engine.dispose()
 
+    def test_task_queue_fifo_ocr_and_familysearch_and_debug_endpoints(self) -> None:
+        """
+        Verify that creating a new task (like FamilySearch pairing or a second OCR task)
+        while an OCR task is ongoing queues the new task in FIFO order instead of
+        cancelling or overwriting the ongoing task, and exposes full queue controls
+        under /api/debug/tasks.
+        """
+        import asyncio
+        from fastapi.testclient import TestClient
+        from backend.app.api.ws import ws_manager
+        from backend.app.main import app
+        from backend.app.pipeline.task_queue import task_queue
+
+        client = TestClient(app)
+        execution_order: list[str] = []
+
+        async def _scenario() -> None:
+            task_queue.clear_queued_tasks()
+            task_queue.clear_history()
+
+            ocr_started = asyncio.Event()
+            release_ocr = asyncio.Event()
+            fs_started = asyncio.Event()
+
+            async def _fake_ocr_task() -> dict[str, object]:
+                execution_order.append("ocr_start")
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "ocr",
+                        "active_model": "glm-ocr-g32-mixed_4_8-mlx",
+                        "current_sheet_id": 101,
+                        "current_slovakiana_key": "cair-qtest01",
+                        "progress_pct": 42,
+                        "message_sk": "Čítam rukopis hárku cair-qtest01...",
+                        "message_en": "Reading handwriting on cair-qtest01...",
+                    },
+                )
+                ocr_started.set()
+                await release_ocr.wait()
+                execution_order.append("ocr_end")
+                return {"status": "ok", "rows_processed": 5}
+
+            async def _fake_fs_task() -> dict[str, object]:
+                execution_order.append("fs_start")
+                fs_started.set()
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "mcp_match",
+                        "active_model": "familysearch-mcp",
+                        "progress_pct": 90,
+                        "message_sk": "Párujem osoby s FamilySearch...",
+                        "message_en": "Matching persons with FamilySearch...",
+                    },
+                )
+                await asyncio.sleep(0.02)
+                execution_order.append("fs_end")
+                return {"status": "ok", "matched_count": 3}
+
+            async def _fake_second_ocr_task() -> dict[str, object]:
+                execution_order.append("ocr2_start")
+                await asyncio.sleep(0.01)
+                execution_order.append("ocr2_end")
+                return {"status": "ok", "rows_processed": 2}
+
+            async def _fake_cancelled_task() -> dict[str, object]:
+                execution_order.append("cancelled_should_not_run")
+                return {"status": "ok"}
+
+            # 1. Start Task 1 (OCR)
+            t1_future = asyncio.create_task(
+                task_queue.run_or_enqueue(
+                    _fake_ocr_task,
+                    task_type="census_sheet_ocr",
+                    category="ocr",
+                    title_sk="AI OCR sčítacieho hárku: cair-qtest01",
+                    title_en="Census sheet AI OCR: cair-qtest01",
+                    initial_stage="ocr",
+                    active_model="glm-ocr-g32-mixed_4_8-mlx",
+                    target_url="/scitacie-harky/cair-qtest01",
+                    metadata={"sheet_id": 101, "slovakiana_key": "cair-qtest01"},
+                )
+            )
+            await ocr_started.wait()
+
+            # 2. While Task 1 (OCR) is ongoing, submit Task 2 (FamilySearch pairing),
+            #    Task 3 (Second OCR), and Task 4 (to be cancelled).
+            t2_future = asyncio.create_task(
+                task_queue.run_or_enqueue(
+                    _fake_fs_task,
+                    task_type="fs_rematch_all",
+                    category="familysearch",
+                    title_sk="Párovanie s FamilySearch MCP (všetky osoby)",
+                    title_en="FamilySearch MCP Pairing (all persons)",
+                    initial_stage="mcp_match",
+                    active_model="familysearch-mcp",
+                    target_url="/familysearch",
+                )
+            )
+            t3_future = asyncio.create_task(
+                task_queue.run_or_enqueue(
+                    _fake_second_ocr_task,
+                    task_type="census_sheet_ocr",
+                    category="ocr",
+                    title_sk="AI OCR sčítacieho hárku: cair-qtest02",
+                    title_en="Census sheet AI OCR: cair-qtest02",
+                    initial_stage="ocr",
+                    target_url="/scitacie-harky/cair-qtest02",
+                    metadata={"sheet_id": 102, "slovakiana_key": "cair-qtest02"},
+                )
+            )
+            await asyncio.sleep(0)
+            t4_info = task_queue.enqueue_background(
+                _fake_cancelled_task,
+                task_type="matrika_scan_ocr",
+                category="ocr",
+                title_sk="AI OCR skenu: zrušený_sken.jpg",
+                title_en="Scan AI OCR: cancelled_scan.jpg",
+            )
+            await asyncio.sleep(0.01)
+
+            # Verify Task 1 is still running and NOT cancelled or overwritten by Task 2!
+            self.assertFalse(fs_started.is_set())
+            self.assertEqual(ws_manager.latest_state["active_stage"], "ocr")
+            self.assertEqual(ws_manager.latest_state["current_slovakiana_key"], "cair-qtest01")
+            self.assertEqual(ws_manager.latest_state["progress_pct"], 42)
+            self.assertEqual(ws_manager.latest_state["queued_count"], 3)
+
+            # 3. Inspect queue via /api/debug/tasks
+            r_tasks = client.get("/api/debug/tasks")
+            self.assertEqual(r_tasks.status_code, 200)
+            q_data = r_tasks.json()
+            self.assertEqual(q_data["counts"]["running"], 1)
+            self.assertEqual(q_data["counts"]["queued"], 3)
+            self.assertEqual(q_data["active_task"]["task_type"], "census_sheet_ocr")
+            self.assertEqual(
+                [t["task_type"] for t in q_data["queued_tasks"]],
+                ["fs_rematch_all", "census_sheet_ocr", "matrika_scan_ocr"],
+            )
+
+            # 4. Cancel Task 4 via /api/debug/tasks/{id}/cancel
+            r_cancel = client.post(f"/api/debug/tasks/{t4_info['task_id']}/cancel")
+            self.assertEqual(r_cancel.status_code, 200)
+            self.assertEqual(r_cancel.json()["task_queue"]["counts"]["queued"], 2)
+
+            # 5. Prioritize Task 3 (cair-qtest02) so it moves ahead of Task 2 (FamilySearch)
+            t3_id = q_data["queued_tasks"][1]["task_id"]
+            r_prio = client.post(f"/api/debug/tasks/{t3_id}/prioritize")
+            self.assertEqual(r_prio.status_code, 200)
+            queued_after_prio = r_prio.json()["task_queue"]["queued_tasks"]
+            self.assertEqual(queued_after_prio[0]["task_id"], t3_id)
+            self.assertEqual(queued_after_prio[0]["queue_position"], 1)
+
+            # 6. Release Task 1 and let all remaining queued tasks finish in prioritized FIFO order
+            release_ocr.set()
+            res1, res2, res3 = await asyncio.gather(t1_future, t2_future, t3_future)
+            self.assertEqual(res1["rows_processed"], 5)
+            self.assertEqual(res2["matched_count"], 3)
+            self.assertEqual(res3["rows_processed"], 2)
+
+            self.assertEqual(
+                execution_order,
+                ["ocr_start", "ocr_end", "ocr2_start", "ocr2_end", "fs_start", "fs_end"],
+            )
+
+            # Verify final queue state and history
+            r_final = client.get("/api/debug/tasks")
+            self.assertEqual(r_final.status_code, 200)
+            final_q = r_final.json()
+            self.assertEqual(final_q["counts"]["running"], 0)
+            self.assertEqual(final_q["counts"]["queued"], 0)
+            self.assertGreaterEqual(final_q["counts"]["completed"], 3)
+            self.assertGreaterEqual(final_q["counts"]["cancelled"], 1)
+
+        asyncio.run(_scenario())
+
 
 
 if __name__ == "__main__":

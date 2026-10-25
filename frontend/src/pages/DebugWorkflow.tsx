@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   Activity,
   AlertCircle,
+  ArrowUp,
   BarChart3,
   Check,
   Clock,
@@ -11,6 +12,7 @@ import {
   Download,
   Eye,
   FileText,
+  ListOrdered,
   Play,
   RefreshCw,
   Send,
@@ -21,7 +23,9 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash2,
+  X,
 } from "lucide-react";
+import type { QueuedTaskItem, TaskQueueSnapshot } from "../App";
 import OcrFeedbackControls, {
   type OcrFeedbackItem,
 } from "../components/OcrFeedbackControls";
@@ -220,6 +224,7 @@ interface DebugOverviewState {
     local_models?: Array<{ id?: string } | string>;
     freellm_models?: Array<{ id?: string } | string>;
   };
+  task_queue?: TaskQueueSnapshot;
 }
 
 interface Props {
@@ -485,6 +490,113 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
   const [refreshingDebug, setRefreshingDebug] = useState<boolean>(false);
   const [loadingScanDetail, setLoadingScanDetail] = useState<boolean>(false);
 
+  // Task Queue State
+  const [taskQueue, setTaskQueue] = useState<TaskQueueSnapshot>({
+    active_task: null,
+    queued_tasks: [],
+    history: [],
+    counts: {
+      running: 0,
+      queued: 0,
+      completed: 0,
+      cancelled: 0,
+      error: 0,
+      total_active_and_queued: 0,
+    },
+  });
+  const [busyTaskActionId, setBusyTaskActionId] = useState<string | null>(null);
+
+  const loadTaskQueue = async () => {
+    try {
+      const res = await fetch("/api/debug/tasks");
+      if (res.ok) {
+        const data: TaskQueueSnapshot = await res.json();
+        setTaskQueue(data);
+      }
+    } catch {
+      // ignore transient errors
+    }
+  };
+
+  const handleCancelQueuedOrActiveTask = async (taskId: string) => {
+    setBusyTaskActionId(taskId);
+    try {
+      const res = await fetch(`/api/debug/tasks/${encodeURIComponent(taskId)}/cancel`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.task_queue) {
+          setTaskQueue(data.task_queue);
+        } else {
+          await loadTaskQueue();
+        }
+        refreshStatus();
+      }
+    } finally {
+      setBusyTaskActionId(null);
+    }
+  };
+
+  const handlePrioritizeQueuedTask = async (taskId: string) => {
+    setBusyTaskActionId(taskId);
+    try {
+      const res = await fetch(`/api/debug/tasks/${encodeURIComponent(taskId)}/prioritize`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.task_queue) {
+          setTaskQueue(data.task_queue);
+        } else {
+          await loadTaskQueue();
+        }
+        refreshStatus();
+      }
+    } finally {
+      setBusyTaskActionId(null);
+    }
+  };
+
+  const handleClearQueuedTasks = async () => {
+    setBusyTaskActionId("clear_queued");
+    try {
+      const res = await fetch("/api/debug/tasks/clear-queued", {
+        method: "POST",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.task_queue) {
+          setTaskQueue(data.task_queue);
+        } else {
+          await loadTaskQueue();
+        }
+        refreshStatus();
+      }
+    } finally {
+      setBusyTaskActionId(null);
+    }
+  };
+
+  const handleClearTaskHistory = async () => {
+    setBusyTaskActionId("clear_history");
+    try {
+      const res = await fetch("/api/debug/tasks/clear-history", {
+        method: "POST",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.task_queue) {
+          setTaskQueue(data.task_queue);
+        } else {
+          await loadTaskQueue();
+        }
+      }
+    } finally {
+      setBusyTaskActionId(null);
+    }
+  };
+
   const loadFeedbackAndStats = async (
     filterOverride?: "" | "incorrect" | "correct"
   ) => {
@@ -679,6 +791,9 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
       if (ovRes.ok) {
         const ovData = await ovRes.json();
         setOverview(ovData);
+        if (ovData.task_queue) {
+          setTaskQueue(ovData.task_queue);
+        }
       }
       if (cfgRes.ok) {
         const cfgData: AIConfigState = await cfgRes.json();
@@ -722,9 +837,38 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
 
   useEffect(() => {
     loadAiConfig();
+    void loadTaskQueue();
     void loadFeedbackAndStats();
     void fetchBackendFeatureFlags();
   }, []);
+
+  useEffect(() => {
+    const onQueueEvent = (e: Event) => {
+      const custom = e as CustomEvent<TaskQueueSnapshot>;
+      if (custom.detail) {
+        setTaskQueue(custom.detail);
+      }
+    };
+    const onPipelineEvent = () => {
+      void loadTaskQueue();
+    };
+    window.addEventListener("matrika:task-queue", onQueueEvent);
+    window.addEventListener("matrika:pipeline-state", onPipelineEvent);
+    return () => {
+      window.removeEventListener("matrika:task-queue", onQueueEvent);
+      window.removeEventListener("matrika:pipeline-state", onPipelineEvent);
+    };
+  }, []);
+
+  const hasActiveOrQueuedTasks = (taskQueue.counts?.total_active_and_queued || 0) > 0;
+  useEffect(() => {
+    const pollMs = hasActiveOrQueuedTasks ? 1500 : 6000;
+    const t = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadTaskQueue();
+    }, pollMs);
+    return () => window.clearInterval(t);
+  }, [hasActiveOrQueuedTasks]);
 
   useEffect(() => {
     loadDebug();
@@ -1167,8 +1311,84 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
     stageConfigs.layout.provider === "freellm";
 
   const [activeConsoleTab, setActiveConsoleTab] = useState<
-    "all" | "ai" | "benchmark" | "flags" | "inspector"
+    "all" | "queue" | "ai" | "benchmark" | "flags" | "inspector"
   >("all");
+
+  const formatTaskCategoryBadge = (cat: string) => {
+    switch (cat) {
+      case "ocr":
+        return {
+          labelSk: "AI OCR",
+          labelEn: "AI OCR",
+          cls: "bg-amber-100 text-amber-900 border-amber-300",
+        };
+      case "familysearch":
+        return {
+          labelSk: "FamilySearch MCP",
+          labelEn: "FamilySearch MCP",
+          cls: "bg-emerald-100 text-emerald-900 border-emerald-300",
+        };
+      case "harvest":
+        return {
+          labelSk: "Slovakiana",
+          labelEn: "Slovakiana",
+          cls: "bg-blue-100 text-blue-900 border-blue-300",
+        };
+      default:
+        return {
+          labelSk: "Debug",
+          labelEn: "Debug",
+          cls: "bg-purple-100 text-purple-900 border-purple-300",
+        };
+    }
+  };
+
+  const formatTaskStatusBadge = (st: string) => {
+    switch (st) {
+      case "running":
+        return {
+          labelSk: "Prebieha",
+          labelEn: "Running",
+          cls: "bg-amber-600 text-white",
+        };
+      case "queued":
+        return {
+          labelSk: "Vo fronte",
+          labelEn: "Queued",
+          cls: "bg-stone-800 text-amber-300",
+        };
+      case "completed":
+        return {
+          labelSk: "Dokončené",
+          labelEn: "Completed",
+          cls: "bg-emerald-100 text-emerald-900 border border-emerald-300",
+        };
+      case "cancelled":
+        return {
+          labelSk: "Zrušené",
+          labelEn: "Cancelled",
+          cls: "bg-stone-200 text-stone-700 border border-stone-300",
+        };
+      case "paused":
+        return {
+          labelSk: "Pozastavené",
+          labelEn: "Paused",
+          cls: "bg-amber-100 text-amber-900 border border-amber-300",
+        };
+      case "error":
+        return {
+          labelSk: "Chyba",
+          labelEn: "Error",
+          cls: "bg-red-100 text-red-900 border border-red-300",
+        };
+      default:
+        return {
+          labelSk: st,
+          labelEn: st,
+          cls: "bg-stone-100 text-stone-700",
+        };
+    }
+  };
 
   return (
     <div className="space-y-5 text-sm">
@@ -1260,7 +1480,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
           </div>
         </div>
 
-        {/* 4-Tab Bar (with All Sections default so all tools and E2E selectors are accessible) */}
+        {/* 5-Tab Bar (with All Sections default so all tools and E2E selectors are accessible) */}
         <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-stone-200">
           {(
             [
@@ -1268,26 +1488,37 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
                 id: "all",
                 labelSk: "Všetky sekcie",
                 labelEn: "All Sections",
+                badge: null,
+              },
+              {
+                id: "queue",
+                labelSk: "Fronta úloh (Queue)",
+                labelEn: "Task Queue",
+                badge: taskQueue.counts?.total_active_and_queued || null,
               },
               {
                 id: "ai",
                 labelSk: "1. AI Modely a Fázy",
                 labelEn: "1. AI Models & Stages",
+                badge: null,
               },
               {
                 id: "benchmark",
                 labelSk: "2. Kvalita OCR & Benchmark",
                 labelEn: "2. OCR Quality & Benchmark",
+                badge: null,
               },
               {
                 id: "flags",
                 labelSk: "3. Feature Flags",
                 labelEn: "3. Feature Flags",
+                badge: null,
               },
               {
                 id: "inspector",
                 labelSk: "4. Inšpektor skenov a stôp",
                 labelEn: "4. Scan & Trace Inspector",
+                badge: null,
               },
             ] as const
           ).map((tab) => {
@@ -1296,19 +1527,433 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
               <button
                 key={tab.id}
                 type="button"
+                data-testid={`debug-tab-${tab.id}`}
                 onClick={() => setActiveConsoleTab(tab.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition ${
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer inline-flex items-center gap-1.5 transition ${
                   active
                     ? "bg-amber-600 text-white shadow-2xs"
                     : "bg-stone-100 hover:bg-stone-200 text-stone-700"
                 }`}
               >
-                {lang === "sk" ? tab.labelSk : tab.labelEn}
+                <span>{lang === "sk" ? tab.labelSk : tab.labelEn}</span>
+                {tab.badge !== null && tab.badge > 0 && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full text-[11px] font-bold leading-none ${
+                      active
+                        ? "bg-white text-amber-800"
+                        : "bg-amber-600 text-white"
+                    }`}
+                  >
+                    {tab.badge}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
       </div>
+
+      {/* Task Queue & Background Pipeline Card */}
+      {(activeConsoleTab === "all" || activeConsoleTab === "queue") && (
+        <div
+          data-testid="debug-task-queue-card"
+          className="bg-white rounded-xl p-4 border border-stone-300 shadow-2xs space-y-4"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                  <ListOrdered className="w-5 h-5 text-amber-600" />
+                  <span>
+                    {lang === "sk"
+                      ? "Fronta úloh a spracovania (Task Queue)"
+                      : "Task Queue & Background Pipeline"}
+                  </span>
+                </h2>
+                <span
+                  data-testid="debug-queue-running-badge"
+                  className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${
+                    taskQueue.counts.running > 0
+                      ? "bg-amber-100 text-amber-900 border-amber-300"
+                      : "bg-stone-100 text-stone-700 border-stone-200"
+                  }`}
+                >
+                  {lang === "sk" ? "Práve beží:" : "Running:"}{" "}
+                  <strong data-testid="debug-queue-running-count">
+                    {taskQueue.counts.running}
+                  </strong>
+                </span>
+                <span
+                  data-testid="debug-queue-waiting-badge"
+                  className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${
+                    taskQueue.counts.queued > 0
+                      ? "bg-stone-900 text-amber-300 border-stone-800"
+                      : "bg-stone-100 text-stone-700 border-stone-200"
+                  }`}
+                >
+                  {lang === "sk" ? "Čaká vo fronte:" : "Waiting in queue:"}{" "}
+                  <strong data-testid="debug-queue-waiting-count">
+                    {taskQueue.counts.queued}
+                  </strong>
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-900 border border-emerald-200">
+                  {lang === "sk" ? "Dokončené:" : "Completed:"}{" "}
+                  <strong data-testid="debug-queue-completed-count">
+                    {taskQueue.counts.completed}
+                  </strong>
+                </span>
+                {(taskQueue.counts.cancelled > 0 || taskQueue.counts.error > 0) && (
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-stone-100 text-stone-700 border border-stone-300">
+                    {lang === "sk" ? "Zrušené / Chyby:" : "Cancelled / Errors:"}{" "}
+                    <strong>
+                      {taskQueue.counts.cancelled + taskQueue.counts.error}
+                    </strong>
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-stone-600">
+                {lang === "sk"
+                  ? "Nové úlohy (AI OCR hárkov a matrík, párovanie s FamilySearch MCP, sťahovanie zo Slovakiany) sa automaticky radia do fronty (FIFO) bez prerušenia prebiehajúcej úlohy."
+                  : "New tasks (Census & Matrika AI OCR, FamilySearch MCP pairing, Slovakiana downloads) are automatically queued (FIFO) without interrupting or cancelling the ongoing task."}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {taskQueue.counts.queued > 0 && (
+                <button
+                  type="button"
+                  data-testid="debug-queue-clear-waiting-btn"
+                  disabled={busyTaskActionId !== null}
+                  onClick={handleClearQueuedTasks}
+                  className="px-3 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 text-red-900 border border-red-300 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>
+                    {lang === "sk"
+                      ? `Zrušiť čakajúce (${taskQueue.counts.queued})`
+                      : `Clear queued (${taskQueue.counts.queued})`}
+                  </span>
+                </button>
+              )}
+              {taskQueue.history.length > 0 && (
+                <button
+                  type="button"
+                  data-testid="debug-queue-clear-history-btn"
+                  disabled={busyTaskActionId !== null}
+                  onClick={handleClearTaskHistory}
+                  className="px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 border border-stone-300 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>
+                    {lang === "sk" ? "Vyčistiť históriu" : "Clear history"}
+                  </span>
+                </button>
+              )}
+              <button
+                type="button"
+                data-testid="debug-queue-refresh-btn"
+                onClick={() => void loadTaskQueue()}
+                className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer transition"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>{lang === "sk" ? "Obnoviť frontu" : "Refresh queue"}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Currently Running Task */}
+            <div
+              data-testid="debug-queue-active-section"
+              className="bg-stone-50 rounded-xl p-3.5 border border-stone-200 space-y-2.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-stone-700 flex items-center gap-1.5">
+                  <Activity className="w-4 h-4 text-amber-600" />
+                  <span>
+                    {lang === "sk"
+                      ? "1. Práve prebiehajúca úloha"
+                      : "1. Currently Running Task"}
+                  </span>
+                </span>
+                {taskQueue.active_task && (
+                  <span className="px-2 py-0.5 rounded-full bg-amber-600 text-white text-[11px] font-bold animate-pulse">
+                    {lang === "sk" ? "AKTÍVNA" : "ACTIVE"}
+                  </span>
+                )}
+              </div>
+
+              {taskQueue.active_task ? (
+                (() => {
+                  const at: QueuedTaskItem = taskQueue.active_task;
+                  const catBadge = formatTaskCategoryBadge(at.category);
+                  const pct = Math.max(5, Math.min(99, at.progress_pct || 10));
+                  const durSec = at.duration_ms
+                    ? Math.max(1, Math.round(at.duration_ms / 1000))
+                    : 1;
+                  return (
+                    <div
+                      data-testid="debug-active-task-item"
+                      className="bg-amber-50/90 border border-amber-300 rounded-lg p-3 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="space-y-1 min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <RefreshCw className="w-3.5 h-3.5 text-amber-700 animate-spin shrink-0" />
+                            <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 font-mono text-[11px] font-bold">
+                              #{at.id}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded border text-[11px] font-bold ${catBadge.cls}`}
+                            >
+                              {lang === "sk" ? catBadge.labelSk : catBadge.labelEn}
+                            </span>
+                            {at.active_stage && (
+                              <span className="px-2 py-0.5 rounded bg-amber-600 text-white font-mono text-[11px] font-bold">
+                                {at.active_stage}
+                              </span>
+                            )}
+                            {at.active_model && (
+                              <span className="px-2 py-0.5 rounded bg-white border border-stone-300 text-stone-800 font-mono text-[11px]">
+                                {at.active_model}
+                              </span>
+                            )}
+                          </div>
+                          <div className="font-bold text-sm text-stone-900">
+                            {lang === "sk" ? at.title_sk : at.title_en}
+                          </div>
+                          <div className="text-xs text-stone-700">
+                            {lang === "sk" ? at.message_sk : at.message_en}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {at.target_url && (
+                            <Link
+                              to={at.target_url}
+                              className="px-2.5 py-1 rounded-md bg-white hover:bg-stone-100 border border-stone-300 text-stone-800 text-xs font-semibold"
+                            >
+                              {lang === "sk" ? "Otvoriť" : "Open"}
+                            </Link>
+                          )}
+                          <button
+                            type="button"
+                            data-testid={`debug-task-cancel-${at.id}`}
+                            disabled={busyTaskActionId === at.task_id}
+                            onClick={() => handleCancelQueuedOrActiveTask(at.task_id)}
+                            className="px-2.5 py-1 rounded-md bg-red-600 hover:bg-red-700 text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            <span>{lang === "sk" ? "Zastaviť" : "Stop"}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-1">
+                        <div className="flex-1 bg-amber-200/80 rounded-full h-2 overflow-hidden border border-amber-300">
+                          <div
+                            className="bg-amber-600 h-full transition-all duration-300"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <span className="text-xs font-bold text-amber-950 shrink-0">
+                          {pct}% · {durSec} s
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : (
+                <div
+                  data-testid="debug-queue-idle-placeholder"
+                  className="bg-white border border-stone-200 rounded-lg p-4 text-center text-xs text-stone-600"
+                >
+                  {lang === "sk"
+                    ? "Žiadna úloha momentálne neprebieha — fronta je voľná."
+                    : "No task is currently running — queue is idle."}
+                </div>
+              )}
+            </div>
+
+            {/* Queued Waiting Tasks */}
+            <div
+              data-testid="debug-queue-waiting-section"
+              className="bg-stone-50 rounded-xl p-3.5 border border-stone-200 space-y-2.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-stone-700 flex items-center gap-1.5">
+                  <Clock className="w-4 h-4 text-stone-600" />
+                  <span>
+                    {lang === "sk"
+                      ? `2. Čakajúce úlohy vo fronte (${taskQueue.queued_tasks.length})`
+                      : `2. Queued Tasks Waiting in Line (${taskQueue.queued_tasks.length})`}
+                  </span>
+                </span>
+              </div>
+
+              {taskQueue.queued_tasks.length > 0 ? (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {taskQueue.queued_tasks.map((qt, idx) => {
+                    const catBadge = formatTaskCategoryBadge(qt.category);
+                    const pos = qt.queue_position ?? idx + 1;
+                    return (
+                      <div
+                        key={qt.id}
+                        data-testid={`debug-queued-task-${qt.id}`}
+                        className="bg-white border border-stone-300 rounded-lg p-2.5 flex flex-wrap items-center justify-between gap-2"
+                      >
+                        <div className="space-y-1 min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 font-mono text-[11px] font-bold">
+                              {lang === "sk" ? `Poradie #${pos}` : `Queue #${pos}`}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-stone-200 text-stone-800 font-mono text-[11px] font-semibold">
+                              #{qt.id}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded border text-[11px] font-bold ${catBadge.cls}`}
+                            >
+                              {lang === "sk" ? catBadge.labelSk : catBadge.labelEn}
+                            </span>
+                          </div>
+                          <div className="font-bold text-xs text-stone-900 truncate">
+                            {lang === "sk" ? qt.title_sk : qt.title_en}
+                          </div>
+                          <div className="text-[11px] text-stone-600 truncate">
+                            {lang === "sk" ? qt.message_sk : qt.message_en}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {pos > 1 && (
+                            <button
+                              type="button"
+                              data-testid={`debug-task-prioritize-${qt.id}`}
+                              disabled={busyTaskActionId === qt.task_id}
+                              onClick={() => handlePrioritizeQueuedTask(qt.task_id)}
+                              title={
+                                lang === "sk"
+                                  ? "Posunúť na 1. miesto vo fronte"
+                                  : "Move to #1 in queue"
+                              }
+                              className="px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                              <span>{lang === "sk" ? "Prednostne" : "Prioritize"}</span>
+                            </button>
+                          )}
+                          {qt.target_url && (
+                            <Link
+                              to={qt.target_url}
+                              className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 border border-stone-300 text-stone-800 text-xs font-semibold"
+                            >
+                              {lang === "sk" ? "Otvoriť" : "Open"}
+                            </Link>
+                          )}
+                          <button
+                            type="button"
+                            data-testid={`debug-task-cancel-${qt.id}`}
+                            disabled={busyTaskActionId === qt.task_id}
+                            onClick={() => handleCancelQueuedOrActiveTask(qt.task_id)}
+                            title={
+                              lang === "sk"
+                                ? "Odstrániť úlohu z fronty"
+                                : "Remove task from queue"
+                            }
+                            className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-800 border border-red-300 text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            <span>{lang === "sk" ? "Zrušiť" : "Cancel"}</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div
+                  data-testid="debug-queue-empty-placeholder"
+                  className="bg-white border border-stone-200 rounded-lg p-4 text-center text-xs text-stone-600"
+                >
+                  {lang === "sk"
+                    ? "Žiadne ďalšie úlohy nečakajú vo fronte."
+                    : "No additional tasks waiting in queue."}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Recent Task History */}
+          {taskQueue.history.length > 0 && (
+            <div
+              data-testid="debug-queue-history-section"
+              className="bg-stone-50 rounded-xl p-3.5 border border-stone-200 space-y-2"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-stone-700">
+                  {lang === "sk"
+                    ? `3. História nedávnych úloh (${taskQueue.history.length})`
+                    : `3. Recent Task History (${taskQueue.history.length})`}
+                </span>
+              </div>
+              <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+                {taskQueue.history.slice(0, 15).map((ht) => {
+                  const catBadge = formatTaskCategoryBadge(ht.category);
+                  const stBadge = formatTaskStatusBadge(ht.status);
+                  const durSec =
+                    ht.duration_ms != null
+                      ? `${Math.max(0.1, Math.round(ht.duration_ms / 100) / 10)} s`
+                      : null;
+                  return (
+                    <div
+                      key={ht.id}
+                      data-testid={`debug-history-task-${ht.id}`}
+                      className="bg-white border border-stone-200 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs"
+                    >
+                      <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1">
+                        <span className="px-1.5 py-0.5 rounded bg-stone-100 border border-stone-200 font-mono text-[11px] font-semibold text-stone-700">
+                          #{ht.id}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${stBadge.cls}`}
+                        >
+                          {lang === "sk" ? stBadge.labelSk : stBadge.labelEn}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${catBadge.cls}`}
+                        >
+                          {lang === "sk" ? catBadge.labelSk : catBadge.labelEn}
+                        </span>
+                        <span className="font-semibold text-stone-900 truncate">
+                          {lang === "sk" ? ht.title_sk : ht.title_en}
+                        </span>
+                        <span className="text-stone-500 truncate hidden sm:inline">
+                          — {lang === "sk" ? ht.message_sk : ht.message_en}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {durSec && (
+                          <span className="font-mono text-[11px] text-stone-600">
+                            {durSec}
+                          </span>
+                        )}
+                        {ht.target_url && (
+                          <Link
+                            to={ht.target_url}
+                            className="px-2 py-0.5 rounded bg-stone-100 hover:bg-stone-200 border border-stone-300 text-stone-800 text-[11px] font-semibold"
+                          >
+                            {lang === "sk" ? "Otvoriť" : "Open"}
+                          </Link>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Top AI Status & Per-Pipeline-Stage Provider / Model Configuration Card */}
       {(activeConsoleTab === "all" || activeConsoleTab === "ai") && (

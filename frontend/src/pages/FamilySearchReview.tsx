@@ -148,6 +148,9 @@ function RowCropWithContextHover({
 
 interface FsMatchProgress {
   running: boolean;
+  queued?: boolean;
+  queued_count?: number;
+  queue_position?: number | null;
   mode: "idle" | "rematch" | "auto" | string;
   processed: number;
   total: number;
@@ -177,6 +180,10 @@ function extractFsProgress(payload: any): FsMatchProgress | null {
   }
   return {
     running: Boolean(src.running),
+    queued: Boolean(src.queued),
+    queued_count: Number(src.queued_count ?? 0),
+    queue_position:
+      typeof src.queue_position === "number" ? src.queue_position : null,
     mode: String(src.mode || "idle"),
     processed: Number(src.processed ?? 0),
     total: Number(src.total ?? 0),
@@ -379,7 +386,7 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
   }, []);
 
   const isActiveMatching = Boolean(
-    syncingAll || progress?.running || refreshingId !== null
+    syncingAll || progress?.running || progress?.queued || refreshingId !== null
   );
 
   useEffect(() => {
@@ -746,7 +753,15 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
               <div className="flex items-center gap-2 font-bold text-amber-950">
                 <RefreshCw className="w-4 h-4 text-amber-700 animate-spin shrink-0" />
                 <span>
-                  {lang === "sk"
+                  {progress?.queued && !progress?.running
+                    ? lang === "sk"
+                      ? `Zaradené vo fronte úloh (#${
+                          progress.queue_position || 1
+                        }) – párovanie sa spustí automaticky po dokončení prebiehajúcej úlohy…`
+                      : `Queued (#${
+                          progress.queue_position || 1
+                        }) – pairing will start automatically after the ongoing task finishes…`
+                    : lang === "sk"
                     ? progress?.mode === "auto"
                       ? "Automatické párovanie s FamilySearch MCP prebieha…"
                       : "Párovanie s FamilySearch MCP prebieha…"
@@ -756,7 +771,11 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                 </span>
               </div>
               <span className="px-2 py-0.5 rounded-full bg-amber-600 text-white font-bold text-xs">
-                {matchingPct}%
+                {progress?.queued && !progress?.running
+                  ? lang === "sk"
+                    ? `Vo fronte #${progress.queue_position || 1}`
+                    : `Queued #${progress.queue_position || 1}`
+                  : `${matchingPct}%`}
               </span>
             </div>
 

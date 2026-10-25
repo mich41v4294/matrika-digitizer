@@ -17,6 +17,7 @@ from backend.app.config import settings
 from backend.app.db.models import Batch, ScanImage
 from backend.app.db.session import SessionDep
 from backend.app.pipeline.orchestrator import process_single_scan_pipeline
+from backend.app.pipeline.task_queue import task_queue
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 
@@ -298,12 +299,22 @@ async def load_sample_scans(
 
     if req.auto_process_first and created_scans:
         first_id = created_scans[0]["id"]
-        background_tasks.add_task(
-            process_single_scan_pipeline,
-            first_id,
-            max_rows=req.max_rows_first,
-            run_mcp=True,
-            watchlist_filter=req.watchlist_filter,
+        first_name = created_scans[0]["filename"]
+        task_queue.enqueue_background(
+            lambda: process_single_scan_pipeline(
+                first_id,
+                max_rows=req.max_rows_first,
+                run_mcp=True,
+                watchlist_filter=req.watchlist_filter,
+            ),
+            task_type="matrika_scan_ocr",
+            category="ocr",
+            title_sk=f"AI OCR ukážkového skenu: {first_name}",
+            title_en=f"Sample scan AI OCR: {first_name}",
+            initial_stage="layout",
+            active_model=settings.model_ocr,
+            target_url=f"/knihy?scan={first_id}",
+            metadata={"scan_id": first_id},
         )
 
     return {

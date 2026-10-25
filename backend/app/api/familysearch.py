@@ -21,7 +21,7 @@ from backend.app.db.models import (
     ScanImage,
     WorkflowTrace,
 )
-from backend.app.db.session import SessionDep
+from backend.app.db.session import SessionDep, engine
 from backend.app.mcp.familysearch_client import (
     _ensure_split_spouse_in_fs_url,
     _format_fact_person_label,
@@ -32,6 +32,7 @@ from backend.app.mcp.familysearch_client import (
     fs_mcp_manager,
     write_fs_env,
 )
+from backend.app.pipeline.task_queue import task_queue
 
 router = APIRouter(prefix="/api/familysearch", tags=["familysearch"])
 
@@ -303,36 +304,92 @@ async def refresh_fs_match(fact_id: int, session: SessionDep) -> dict[str, Any]:
     fact = session.get(PersonFact, fact_id)
     if not fact:
         raise HTTPException(status_code=404, detail="Fact not found")
-    row = session.get(RecordRow, fact.row_id) if fact.row_id else None
     person_label = _format_fact_person_label(fact)
-    await fs_mcp_manager.start_progress(
-        mode="auto",
-        total=1,
-        current_person=person_label,
-        session=session,
+    bind = session.get_bind() or engine
+
+    async def _do_refresh() -> dict[str, Any]:
+        from sqlmodel import Session
+        from backend.app.api.ws import ws_manager
+
+        with Session(bind) as task_session:
+            t_fact = task_session.get(PersonFact, fact_id)
+            if not t_fact:
+                raise HTTPException(status_code=404, detail="Fact not found")
+            t_row = task_session.get(RecordRow, t_fact.row_id) if t_fact.row_id else None
+            await fs_mcp_manager.start_progress(
+                mode="auto",
+                total=1,
+                current_person=person_label,
+                session=task_session,
+            )
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "active_stage": "mcp_match",
+                    "active_model": "familysearch-mcp",
+                    "current_scan_id": t_fact.scan_id,
+                    "current_row_id": t_fact.row_id,
+                    "progress_pct": 50,
+                    "message_sk": f"Obnovujem FamilySearch párovanie pre {person_label}…",
+                    "message_en": f"Refreshing FamilySearch pairing for {person_label}…",
+                },
+            )
+            try:
+                match = await fs_mcp_manager.match_person_fact(task_session, t_fact, t_row)
+                is_matched = bool(match and (match.fs_person_id or "").strip())
+                await fs_mcp_manager.step_progress(
+                    increment_processed=1,
+                    increment_matched=1 if is_matched else 0,
+                    current_person=person_label,
+                    session=task_session,
+                )
+                progress = await fs_mcp_manager.finish_progress(session=task_session)
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "idle",
+                        "active_model": None,
+                        "current_scan_id": t_fact.scan_id,
+                        "current_row_id": t_fact.row_id,
+                        "progress_pct": 100,
+                        "message_sk": f"FamilySearch párovanie dokončené ({person_label}).",
+                        "message_en": f"FamilySearch pairing completed ({person_label}).",
+                    },
+                )
+            except Exception as exc:
+                await fs_mcp_manager.finish_progress(session=task_session, error=str(exc))
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "idle",
+                        "active_model": None,
+                        "progress_pct": 0,
+                        "message_sk": f"Chyba pri FamilySearch párovaní ({person_label}): {exc}",
+                        "message_en": f"FamilySearch pairing error ({person_label}): {exc}",
+                    },
+                )
+                raise
+            if not match or not (match.fs_person_id or "").strip():
+                return {"status": "unmatched", "match_id": None, "fs_status": "unmatched", "progress": progress}
+            return {
+                "status": "ok",
+                "match_id": match.id,
+                "fs_person_id": match.fs_person_id,
+                "fs_status": match.match_status,
+                "progress": progress,
+            }
+
+    return await task_queue.run_or_enqueue(
+        _do_refresh,
+        task_type="fs_match_single",
+        category="familysearch",
+        title_sk=f"Párovanie s FamilySearch: {person_label}",
+        title_en=f"FamilySearch pairing: {person_label}",
+        initial_stage="mcp_match",
+        active_model="familysearch-mcp",
+        target_url="/familysearch",
+        metadata={"fact_id": fact_id, "scan_id": fact.scan_id, "row_id": fact.row_id},
     )
-    try:
-        match = await fs_mcp_manager.match_person_fact(session, fact, row)
-        is_matched = bool(match and (match.fs_person_id or "").strip())
-        await fs_mcp_manager.step_progress(
-            increment_processed=1,
-            increment_matched=1 if is_matched else 0,
-            current_person=person_label,
-            session=session,
-        )
-        progress = await fs_mcp_manager.finish_progress(session=session)
-    except Exception as exc:
-        await fs_mcp_manager.finish_progress(session=session, error=str(exc))
-        raise
-    if not match or not (match.fs_person_id or "").strip():
-        return {"status": "unmatched", "match_id": None, "fs_status": "unmatched", "progress": progress}
-    return {
-        "status": "ok",
-        "match_id": match.id,
-        "fs_person_id": match.fs_person_id,
-        "fs_status": match.match_status,
-        "progress": progress,
-    }
 
 
 @router.post("/match-row/{row_id}")
@@ -343,35 +400,8 @@ async def match_row_endpoint(row_id: int, session: SessionDep) -> dict[str, Any]
     fact = session.exec(select(PersonFact).where(PersonFact.row_id == row_id)).first()
     if not fact:
         raise HTTPException(status_code=404, detail="Fact not found for row")
-    person_label = _format_fact_person_label(fact)
-    await fs_mcp_manager.start_progress(
-        mode="auto",
-        total=1,
-        current_person=person_label,
-        session=session,
-    )
-    try:
-        match = await fs_mcp_manager.match_person_fact(session, fact, row)
-        is_matched = bool(match and (match.fs_person_id or "").strip())
-        await fs_mcp_manager.step_progress(
-            increment_processed=1,
-            increment_matched=1 if is_matched else 0,
-            current_person=person_label,
-            session=session,
-        )
-        progress = await fs_mcp_manager.finish_progress(session=session)
-    except Exception as exc:
-        await fs_mcp_manager.finish_progress(session=session, error=str(exc))
-        raise
-    if not match or not (match.fs_person_id or "").strip():
-        return {"status": "unmatched", "match_id": None, "fs_status": "unmatched", "progress": progress}
-    return {
-        "status": "ok",
-        "match_id": match.id,
-        "fs_person_id": match.fs_person_id,
-        "fs_status": match.match_status,
-        "progress": progress,
-    }
+    fact_id = int(fact.id or 0)
+    return await refresh_fs_match(fact_id, session)
 
 
 @router.post("/matches/{match_id}/review")
@@ -399,90 +429,198 @@ async def mark_match_reviewed(
 
 @router.post("/sync-all")
 @router.post("/rematch")
-async def sync_all_fs_matches(session: SessionDep) -> dict[str, Any]:
-    cleanup_unmatched_familysearch_rows(session)
-    facts = list(session.exec(select(PersonFact).order_by(PersonFact.id.asc())).all())
+async def sync_all_fs_matches(
+    session: SessionDep,
+    background: bool = False,
+) -> dict[str, Any]:
+    bind = session.get_bind() or engine
 
-    # Pre-load census sheets so we can accurately count non-nameless, non-overview people to check
-    sheet_ids = list({f.census_sheet_id for f in facts if f.census_sheet_id is not None})
-    sheets_by_id = (
-        {cs.id: cs for cs in session.exec(select(CensusSheet).where(CensusSheet.id.in_(sheet_ids))).all()}
-        if sheet_ids
-        else {}
-    )
+    async def _run_sync_all() -> dict[str, Any]:
+        import time as _time
+        from sqlmodel import Session
+        from backend.app.api.ws import ws_manager
 
-    valid_facts_to_check: list[PersonFact] = []
-    seen_sheet_ids: set[int] = set()
-    for fact in facts:
-        if _is_nameless_fact(fact):
-            continue
-        if fact.record_type == "census" and fact.census_sheet_id:
-            if fact.census_sheet_id in seen_sheet_ids:
-                continue
-            seen_sheet_ids.add(fact.census_sheet_id)
-            sheet = sheets_by_id.get(fact.census_sheet_id)
-            if sheet and getattr(sheet, "sheet_type", "household") not in ("overview", "municipal_overview"):
-                sheet_facts = [
-                    sf
-                    for sf in facts
-                    if sf.census_sheet_id == sheet.id and not _is_nameless_fact(sf)
-                ]
-                valid_facts_to_check.extend(sheet_facts)
-            continue
-        valid_facts_to_check.append(fact)
+        t0 = _time.perf_counter()
+        with Session(bind) as task_session:
+            cleanup_unmatched_familysearch_rows(task_session)
+            facts = list(task_session.exec(select(PersonFact).order_by(PersonFact.id.asc())).all())
 
-    total_to_check = len(valid_facts_to_check)
-    first_person = _format_fact_person_label(valid_facts_to_check[0]) if valid_facts_to_check else ""
-    await fs_mcp_manager.start_progress(
-        mode="rematch",
-        total=total_to_check,
-        current_person=first_person,
-        session=session,
-    )
-
-    synced = 0
-    synced_sheet_ids: set[int] = set()
-    try:
-        for fact in facts:
-            if _is_nameless_fact(fact):
-                continue
-            if fact.record_type == "census" and fact.census_sheet_id:
-                if fact.census_sheet_id not in synced_sheet_ids:
-                    synced_sheet_ids.add(fact.census_sheet_id)
-                    sheet = sheets_by_id.get(fact.census_sheet_id) or session.get(
-                        CensusSheet, fact.census_sheet_id
-                    )
-                    if sheet and getattr(sheet, "sheet_type", "household") not in ("overview", "municipal_overview"):
-                        synced += await fs_mcp_manager.match_census_sheet(
-                            session,
-                            sheet,
-                            manage_progress=False,
-                        )
-                continue
-            person_label = _format_fact_person_label(fact)
-            await fs_mcp_manager.step_progress(current_person=person_label, session=session)
-            row = session.get(RecordRow, fact.row_id) if fact.row_id else None
-            m = await fs_mcp_manager.match_person_fact(session, fact, row)
-            is_matched = bool(m and (m.fs_person_id or "").strip())
-            if is_matched:
-                synced += 1
-            await fs_mcp_manager.step_progress(
-                increment_processed=1,
-                increment_matched=1 if is_matched else 0,
-                current_person=person_label,
-                session=session,
+            sheet_ids = list({f.census_sheet_id for f in facts if f.census_sheet_id is not None})
+            sheets_by_id = (
+                {cs.id: cs for cs in task_session.exec(select(CensusSheet).where(CensusSheet.id.in_(sheet_ids))).all()}
+                if sheet_ids
+                else {}
             )
-        cleanup_unmatched_familysearch_rows(session)
-        progress = await fs_mcp_manager.finish_progress(session=session)
-    except Exception as exc:
-        await fs_mcp_manager.finish_progress(session=session, error=str(exc))
-        raise
-    return {
-        "status": "ok",
-        "synced_count": synced,
-        "matched_count": synced,
-        "progress": progress,
-    }
+
+            valid_facts_to_check: list[PersonFact] = []
+            seen_sheet_ids: set[int] = set()
+            for fact in facts:
+                if _is_nameless_fact(fact):
+                    continue
+                if fact.record_type == "census" and fact.census_sheet_id:
+                    if fact.census_sheet_id in seen_sheet_ids:
+                        continue
+                    seen_sheet_ids.add(fact.census_sheet_id)
+                    sheet = sheets_by_id.get(fact.census_sheet_id)
+                    if sheet and getattr(sheet, "sheet_type", "household") not in ("overview", "municipal_overview"):
+                        sheet_facts = [
+                            sf
+                            for sf in facts
+                            if sf.census_sheet_id == sheet.id and not _is_nameless_fact(sf)
+                        ]
+                        valid_facts_to_check.extend(sheet_facts)
+                    continue
+                valid_facts_to_check.append(fact)
+
+            total_to_check = len(valid_facts_to_check)
+            first_person = _format_fact_person_label(valid_facts_to_check[0]) if valid_facts_to_check else ""
+            await fs_mcp_manager.start_progress(
+                mode="rematch",
+                total=total_to_check,
+                current_person=first_person,
+                session=task_session,
+            )
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "active_stage": "mcp_match",
+                    "active_model": "familysearch-mcp",
+                    "current_row_index": 0,
+                    "total_rows": total_to_check,
+                    "progress_pct": 10,
+                    "message_sk": f"Spúšťam párovanie s FamilySearch MCP ({total_to_check} osôb)…",
+                    "message_en": f"Starting FamilySearch MCP pairing ({total_to_check} persons)…",
+                },
+            )
+
+            synced = 0
+            synced_sheet_ids: set[int] = set()
+            try:
+                for fact in facts:
+                    if task_queue.is_current_task_cancelled():
+                        raise RuntimeError("FamilySearch pairing cancelled")
+                    if _is_nameless_fact(fact):
+                        continue
+                    if fact.record_type == "census" and fact.census_sheet_id:
+                        if fact.census_sheet_id not in synced_sheet_ids:
+                            synced_sheet_ids.add(fact.census_sheet_id)
+                            sheet = sheets_by_id.get(fact.census_sheet_id) or task_session.get(
+                                CensusSheet, fact.census_sheet_id
+                            )
+                            if sheet and getattr(sheet, "sheet_type", "household") not in ("overview", "municipal_overview"):
+                                synced += await fs_mcp_manager.match_census_sheet(
+                                    task_session,
+                                    sheet,
+                                    manage_progress=False,
+                                )
+                        continue
+                    person_label = _format_fact_person_label(fact)
+                    await fs_mcp_manager.step_progress(current_person=person_label, session=task_session)
+                    proc_now = int(fs_mcp_manager.progress_state.get("processed") or 0) + 1
+                    pct_now = min(98, max(10, int(100 * proc_now / max(1, total_to_check))))
+                    await ws_manager.broadcast(
+                        "state",
+                        {
+                            "active_stage": "mcp_match",
+                            "active_model": "familysearch-mcp",
+                            "current_scan_id": fact.scan_id,
+                            "current_row_id": fact.row_id,
+                            "current_row_index": proc_now,
+                            "total_rows": total_to_check,
+                            "progress_pct": pct_now,
+                            "message_sk": f"Párujem s FamilySearch ({proc_now}/{total_to_check}): {person_label}…",
+                            "message_en": f"Matching with FamilySearch ({proc_now}/{total_to_check}): {person_label}…",
+                        },
+                    )
+                    row = task_session.get(RecordRow, fact.row_id) if fact.row_id else None
+                    m = await fs_mcp_manager.match_person_fact(task_session, fact, row)
+                    is_matched = bool(m and (m.fs_person_id or "").strip())
+                    if is_matched:
+                        synced += 1
+                    await fs_mcp_manager.step_progress(
+                        increment_processed=1,
+                        increment_matched=1 if is_matched else 0,
+                        current_person=person_label,
+                        session=task_session,
+                    )
+                cleanup_unmatched_familysearch_rows(task_session)
+                progress = await fs_mcp_manager.finish_progress(session=task_session)
+                dur_sec = max(1, int(round(_time.perf_counter() - t0)))
+                done_sk = f"FamilySearch párovanie dokončené ({synced} zhôd z {total_to_check} skontrolovaných osôb)."
+                done_en = f"FamilySearch pairing completed ({synced} matches out of {total_to_check} checked persons)."
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "idle",
+                        "active_model": None,
+                        "current_row_index": total_to_check,
+                        "total_rows": total_to_check,
+                        "progress_pct": 100,
+                        "message_sk": done_sk,
+                        "message_en": done_en,
+                    },
+                )
+                await ws_manager.emit_completion(
+                    {
+                        "status": "completed",
+                        "kind": "familysearch_rematch",
+                        "rows_processed": total_to_check,
+                        "matched_count": synced,
+                        "duration_sec": dur_sec,
+                        "title_sk": "FamilySearch párovanie dokončené",
+                        "title_en": "FamilySearch pairing completed",
+                        "message_sk": done_sk,
+                        "message_en": done_en,
+                        "target_url": "/familysearch",
+                    }
+                )
+            except Exception as exc:
+                await fs_mcp_manager.finish_progress(session=task_session, error=str(exc))
+                await ws_manager.broadcast(
+                    "state",
+                    {
+                        "active_stage": "idle",
+                        "active_model": None,
+                        "progress_pct": 0,
+                        "message_sk": f"Chyba pri párovaní s FamilySearch: {exc}",
+                        "message_en": f"Error during FamilySearch pairing: {exc}",
+                    },
+                )
+                raise
+            return {
+                "status": "ok",
+                "synced_count": synced,
+                "matched_count": synced,
+                "progress": progress,
+            }
+
+    if background:
+        queued_task = task_queue.enqueue_background(
+            _run_sync_all,
+            task_type="fs_rematch_all",
+            category="familysearch",
+            title_sk="Párovanie s FamilySearch MCP (všetky osoby)",
+            title_en="FamilySearch MCP Pairing (all persons)",
+            initial_stage="mcp_match",
+            active_model="familysearch-mcp",
+            target_url="/familysearch",
+        )
+        return {
+            "status": "queued" if queued_task.get("status") == "queued" else "started",
+            "task": queued_task,
+            "progress": fs_mcp_manager.get_progress_state(session),
+        }
+
+    return await task_queue.run_or_enqueue(
+        _run_sync_all,
+        task_type="fs_rematch_all",
+        category="familysearch",
+        title_sk="Párovanie s FamilySearch MCP (všetky osoby)",
+        title_en="FamilySearch MCP Pairing (all persons)",
+        initial_stage="mcp_match",
+        active_model="familysearch-mcp",
+        target_url="/familysearch",
+    )
 
 
 rematch_all_fs_matches = sync_all_fs_matches

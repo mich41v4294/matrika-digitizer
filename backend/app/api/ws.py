@@ -31,6 +31,9 @@ class ConnectionManager:
             "message_sk": "Systém je pripravený.",
             "message_en": "Pipeline idle and ready.",
             "last_completed": None,
+            "queued_count": 0,
+            "active_task": None,
+            "queued_tasks": [],
         }
         self.recent_completions: list[dict[str, Any]] = []
 
@@ -41,7 +44,18 @@ class ConnectionManager:
             pass
         await websocket.accept()
         self.active_connections.add(websocket)
+        try:
+            from backend.app.pipeline.task_queue import task_queue
+
+            snap = task_queue.get_snapshot()
+            self.latest_state["queued_count"] = snap["counts"]["queued"]
+            self.latest_state["active_task"] = snap["active_task"]
+            self.latest_state["queued_tasks"] = snap["queued_tasks"]
+        except Exception:
+            snap = None
         await websocket.send_text(json.dumps({"type": "state", "data": self.latest_state}, default=str))
+        if snap is not None:
+            await websocket.send_text(json.dumps({"type": "task_queue", "data": snap}, default=str))
         try:
             from backend.app.config import settings
 
@@ -60,6 +74,25 @@ class ConnectionManager:
         except RuntimeError:
             pass
         if event_type == "state":
+            payload = dict(payload)
+            from_queue = bool(payload.pop("_from_task_queue", False))
+            try:
+                from backend.app.pipeline.task_queue import task_queue
+
+                if (
+                    task_queue.has_running_task()
+                    and not from_queue
+                    and not task_queue.is_inside_active_task()
+                ):
+                    return
+                task_queue.on_pipeline_state_update(payload)
+                snap = task_queue.get_snapshot()
+                payload["queued_count"] = snap["counts"]["queued"]
+                payload["active_task"] = snap["active_task"]
+                payload["queued_tasks"] = snap["queued_tasks"]
+            except Exception:
+                snap = None
+
             now = time.time()
             prev_stage = self.latest_state.get("active_stage", "idle")
             new_stage = payload.get("active_stage", prev_stage)

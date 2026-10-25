@@ -615,6 +615,17 @@ class FamilySearchMcpManager:
         else:
             pct = 100 if total > 0 and processed >= total else 0
         state["progress_pct"] = max(0, min(100, pct))
+        try:
+            from backend.app.pipeline.task_queue import task_queue
+
+            q_fs = task_queue.get_familysearch_queue_info()
+            state["queued"] = q_fs["queued"]
+            state["queued_count"] = q_fs["queued_count"]
+            state["queue_position"] = q_fs["queue_position"]
+        except Exception:
+            state["queued"] = False
+            state["queued_count"] = 0
+            state["queue_position"] = None
         return state
 
     async def broadcast_progress(
@@ -2000,12 +2011,44 @@ async def trigger_auto_fs_match_for_fact(fact_id: int) -> FamilySearchMatch | No
     Background task helper that automatically runs FamilySearch MCP matching whenever
     a PersonFact is created or updated, and broadcasts live progress + WebSocket updates.
     """
-    from backend.app.api.ws import ws_manager
     from backend.app.db.session import engine
+    from backend.app.pipeline.task_queue import task_queue
 
     person_label = f"#{fact_id}"
     scan_id: int | None = None
     row_id: int | None = None
+    try:
+        with Session(engine) as session:
+            fact = session.get(PersonFact, fact_id)
+            if fact:
+                person_label = _format_fact_person_label(fact)
+                scan_id = fact.scan_id
+                row_id = fact.row_id
+    except Exception:
+        pass
+
+    return await task_queue.run_or_enqueue(
+        lambda: _trigger_auto_fs_match_for_fact_inner(fact_id, person_label, scan_id, row_id),
+        task_type="fs_auto_match",
+        category="familysearch",
+        title_sk=f"Automatické FamilySearch párovanie: {person_label}",
+        title_en=f"Auto FamilySearch pairing: {person_label}",
+        initial_stage="mcp_match",
+        active_model="familysearch-mcp",
+        target_url="/familysearch",
+        metadata={"fact_id": fact_id, "scan_id": scan_id, "row_id": row_id},
+    )
+
+
+async def _trigger_auto_fs_match_for_fact_inner(
+    fact_id: int,
+    person_label: str,
+    scan_id: int | None,
+    row_id: int | None,
+) -> FamilySearchMatch | None:
+    from backend.app.api.ws import ws_manager
+    from backend.app.db.session import engine
+
     try:
         with Session(engine) as session:
             fact = session.get(PersonFact, fact_id)
@@ -2026,6 +2069,19 @@ async def trigger_auto_fs_match_for_fact(fact_id: int) -> FamilySearchMatch | No
                 )
                 await fs_mcp_manager.step_progress(current_person=person_label, session=session)
 
+        await ws_manager.broadcast(
+            "state",
+            {
+                "active_stage": "mcp_match",
+                "active_model": "familysearch-mcp",
+                "current_scan_id": scan_id,
+                "current_row_id": row_id,
+                "progress_pct": 50,
+                "message_sk": f"Párujem osobu s FamilySearch ({person_label})…",
+                "message_en": f"Matching person with FamilySearch ({person_label})…",
+            },
+        )
+
         match = await match_person_fact_by_id(fact_id)
         is_matched = bool(match is not None and match.fs_person_id and str(match.fs_person_id).strip())
         await fs_mcp_manager.step_progress(
@@ -2038,23 +2094,28 @@ async def trigger_auto_fs_match_for_fact(fact_id: int) -> FamilySearchMatch | No
         ):
             await fs_mcp_manager.finish_progress()
 
-        if is_matched and match is not None:
-            try:
-                if ws_manager.latest_state.get("active_stage") in (None, "idle"):
-                    await ws_manager.broadcast(
-                        "state",
-                        {
-                            "active_stage": "idle",
-                            "active_model": "familysearch-mcp",
-                            "current_scan_id": scan_id,
-                            "current_row_id": row_id,
-                            "progress_pct": 100,
-                            "message_sk": f"Nájdená zhoda vo FamilySearch pre {person_label} ({match.fs_person_id}).",
-                            "message_en": f"Found FamilySearch match for {person_label} ({match.fs_person_id}).",
-                        },
-                    )
-            except Exception:
-                pass
+        done_sk = (
+            f"Nájdená zhoda vo FamilySearch pre {person_label} ({match.fs_person_id})."
+            if (is_matched and match is not None)
+            else f"FamilySearch párovanie dokončené pre {person_label}."
+        )
+        done_en = (
+            f"Found FamilySearch match for {person_label} ({match.fs_person_id})."
+            if (is_matched and match is not None)
+            else f"FamilySearch pairing completed for {person_label}."
+        )
+        await ws_manager.broadcast(
+            "state",
+            {
+                "active_stage": "idle",
+                "active_model": None,
+                "current_scan_id": scan_id,
+                "current_row_id": row_id,
+                "progress_pct": 100,
+                "message_sk": done_sk,
+                "message_en": done_en,
+            },
+        )
         return match
     except Exception as exc:
         try:

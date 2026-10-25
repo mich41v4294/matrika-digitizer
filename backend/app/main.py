@@ -67,31 +67,41 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def verify_optional_api_key(request: Request, call_next):
-    configured_key = (settings.app_api_key or "").strip()
-    if configured_key:
-        path = request.url.path
-        method = request.method.upper()
-        is_public_feature_flags_get = method == "GET" and path in {
-            "/api/debug/feature-flags",
-            "/api/feature-flags",
-        }
-        needs_auth = (path.startswith("/api/debug") and not is_public_feature_flags_get) or (
-            path.startswith("/api/") and method in {"POST", "PUT", "PATCH", "DELETE"}
-        )
-        if needs_auth:
-            provided = (request.headers.get("X-API-Key") or "").strip()
-            if not provided:
-                auth_header = (request.headers.get("Authorization") or "").strip()
-                if auth_header.lower().startswith("bearer "):
-                    provided = auth_header[7:].strip()
-            if provided != configured_key:
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "Invalid or missing API key."},
+class OptionalApiKeyMiddleware:
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            configured_key = (settings.app_api_key or "").strip()
+            if configured_key:
+                request = Request(scope, receive=receive)
+                path = request.url.path
+                method = request.method.upper()
+                is_public_feature_flags_get = method == "GET" and path in {
+                    "/api/debug/feature-flags",
+                    "/api/feature-flags",
+                }
+                needs_auth = (path.startswith("/api/debug") and not is_public_feature_flags_get) or (
+                    path.startswith("/api/") and method in {"POST", "PUT", "PATCH", "DELETE"}
                 )
-    return await call_next(request)
+                if needs_auth:
+                    provided = (request.headers.get("X-API-Key") or "").strip()
+                    if not provided:
+                        auth_header = (request.headers.get("Authorization") or "").strip()
+                        if auth_header.lower().startswith("bearer "):
+                            provided = auth_header[7:].strip()
+                    if provided != configured_key:
+                        resp = JSONResponse(
+                            status_code=401,
+                            content={"detail": "Invalid or missing API key."},
+                        )
+                        await resp(scope, receive, send)
+                        return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(OptionalApiKeyMiddleware)
 
 settings.ensure_dirs()
 app.mount(
@@ -394,6 +404,13 @@ async def system_status() -> dict[str, Any]:
                 "census_sheets": census_sheets_count,
             }
 
+    from backend.app.pipeline.task_queue import task_queue
+
+    q_snap = task_queue.get_snapshot()
+    ws.ws_manager.latest_state["queued_count"] = q_snap["counts"]["queued"]
+    ws.ws_manager.latest_state["active_task"] = q_snap["active_task"]
+    ws.ws_manager.latest_state["queued_tasks"] = q_snap["queued_tasks"]
+
     return {
         "pangolin_public_url": settings.pangolin_public_url,
         "build_commit": get_build_commit_hash(),
@@ -404,6 +421,7 @@ async def system_status() -> dict[str, Any]:
         },
         "counts": counts_payload,
         "pipeline_state": ws.ws_manager.latest_state,
+        "task_queue": q_snap,
         "feature_flags": settings.get_feature_flags(),
     }
 

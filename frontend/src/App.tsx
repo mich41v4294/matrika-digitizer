@@ -58,6 +58,44 @@ export interface OcrCompletionEvent {
   target_url?: string | null;
 }
 
+export interface QueuedTaskItem {
+  id: number;
+  task_id: string;
+  task_type: string;
+  category: "ocr" | "familysearch" | "harvest" | "debug" | string;
+  title_sk: string;
+  title_en: string;
+  status: "queued" | "running" | "completed" | "cancelled" | "paused" | "error" | string;
+  priority: number;
+  queue_position: number | null;
+  progress_pct: number;
+  active_stage: string;
+  active_model: string | null;
+  message_sk: string;
+  message_en: string;
+  target_url: string | null;
+  metadata?: Record<string, any>;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  duration_ms: number | null;
+  error: string | null;
+}
+
+export interface TaskQueueSnapshot {
+  active_task: QueuedTaskItem | null;
+  queued_tasks: QueuedTaskItem[];
+  history: QueuedTaskItem[];
+  counts: {
+    running: number;
+    queued: number;
+    completed: number;
+    cancelled: number;
+    error: number;
+    total_active_and_queued: number;
+  };
+}
+
 export interface PipelineState {
   active_stage: string;
   active_model: string | null;
@@ -77,6 +115,9 @@ export interface PipelineState {
   message_sk: string;
   message_en: string;
   last_completed?: OcrCompletionEvent | null;
+  queued_count?: number;
+  active_task?: QueuedTaskItem | null;
+  queued_tasks?: QueuedTaskItem[];
 }
 
 export interface SystemStatus {
@@ -108,6 +149,7 @@ export interface SystemStatus {
     census_sheets?: number;
   };
   pipeline_state: PipelineState;
+  task_queue?: TaskQueueSnapshot;
   feature_flags?: Partial<FeatureFlags>;
 }
 
@@ -412,6 +454,27 @@ export default function App() {
             } else if (msg.type === "sheet_updated" && msg.data) {
               window.dispatchEvent(
                 new CustomEvent("matrika:sheet-updated", { detail: msg.data })
+              );
+            } else if (msg.type === "task_queue" && msg.data) {
+              const qSnap = msg.data as TaskQueueSnapshot;
+              setStatus((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      task_queue: qSnap,
+                      pipeline_state: {
+                        ...prev.pipeline_state,
+                        queued_count: qSnap.counts?.queued ?? 0,
+                        active_task: qSnap.active_task ?? null,
+                        queued_tasks: qSnap.queued_tasks ?? [],
+                      },
+                    }
+                  : prev
+              );
+              window.dispatchEvent(
+                new CustomEvent<TaskQueueSnapshot>("matrika:task-queue", {
+                  detail: qSnap,
+                })
               );
             } else if (msg.type === "feature_flags" && msg.data) {
               const rawFlags =
@@ -751,7 +814,7 @@ export default function App() {
               to="/debug"
               title={lang === "sk" ? "Admin & Debug konzola" : "Admin & Debug Console"}
               aria-label={lang === "sk" ? "Admin & Debug konzola" : "Admin & Debug Console"}
-              className={`${
+              className={`relative ${
                 leftMenuCollapsed ? "lg:w-9 lg:px-0 lg:flex-none" : "flex-1 px-2.5"
               } py-1.5 min-h-[32px] rounded-lg font-semibold text-xs inline-flex items-center justify-center gap-1.5 transition ${
                 debugActive
@@ -761,6 +824,18 @@ export default function App() {
             >
               <Activity className="w-3.5 h-3.5 shrink-0" />
               <span className={leftMenuCollapsed ? "lg:hidden" : ""}>Debug</span>
+              {(status?.task_queue?.counts?.total_active_and_queued || 0) > 0 && (
+                <span
+                  data-testid="nav-debug-queue-badge"
+                  className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${
+                    debugActive
+                      ? "bg-white text-amber-800"
+                      : "bg-amber-600 text-white"
+                  } ${leftMenuCollapsed ? "lg:hidden" : ""}`}
+                >
+                  {status?.task_queue?.counts?.total_active_and_queued}
+                </span>
+              )}
             </Link>
           </div>
         </div>
@@ -826,6 +901,23 @@ export default function App() {
               )}
             </div>
             <div className="flex items-center gap-2.5 shrink-0">
+              {(ps.queued_count ?? status?.task_queue?.counts?.queued ?? 0) > 0 && (
+                <Link
+                  to="/debug"
+                  data-testid="global-banner-queue-badge"
+                  title={
+                    lang === "sk"
+                      ? "Zobraziť frontu čakajúcich úloh v Debug menu"
+                      : "View waiting tasks queue in Debug menu"
+                  }
+                  className="px-2.5 py-0.5 rounded-full bg-stone-900 hover:bg-stone-800 text-amber-300 text-xs font-bold inline-flex items-center gap-1 transition"
+                >
+                  <span>
+                    +{ps.queued_count ?? status?.task_queue?.counts?.queued}{" "}
+                    {lang === "sk" ? "vo fronte" : "in queue"}
+                  </span>
+                </Link>
+              )}
               {elapsedSec > 0 && (
                 <span className="text-xs font-semibold text-stone-700">{elapsedSec} s</span>
               )}

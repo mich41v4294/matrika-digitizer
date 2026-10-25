@@ -633,20 +633,25 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [loadingFacets, setLoadingFacets] = useState<boolean>(false);
   const [jobActionId, setJobActionId] = useState<number | null>(null);
-  const [processingSheetId, setProcessingSheetId] = useState<string | null>(null);
   const [livePipelineState, setLivePipelineState] = useState<PipelineState | null>(null);
-  const [localSheetProgress, setLocalSheetProgress] = useState<{
-    sheetKey: string;
-    active_stage: string;
-    active_model: string | null;
-    progress_pct: number;
-    current_row_index: number | null;
-    total_rows: number | null;
-    message_sk: string;
-    message_en: string;
-    started_at_ms: number;
-    elapsed_sec: number;
-  } | null>(null);
+  const [localSheetProgressMap, setLocalSheetProgressMap] = useState<
+    Record<
+      string,
+      {
+        sheetKey: string;
+        active_stage: string;
+        active_model: string | null;
+        progress_pct: number;
+        current_row_index: number | null;
+        total_rows: number | null;
+        message_sk: string;
+        message_en: string;
+        started_at_ms: number;
+        elapsed_sec: number;
+      }
+    >
+  >({});
+  const processingSheetId = Object.keys(localSheetProgressMap)[0] || null;
   const [recentlyCompletedSheets, setRecentlyCompletedSheets] = useState<
     Record<
       string,
@@ -687,24 +692,23 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       if (custom.detail) {
         const d = custom.detail;
         setLivePipelineState(d);
-        if (d.active_stage && d.active_stage !== "idle") {
-          setLocalSheetProgress((prev) => {
-            if (!prev) return prev;
-            if (
-              d.current_slovakiana_key &&
-              d.current_slovakiana_key !== prev.sheetKey
-            ) {
-              return prev;
-            }
+        if (d.active_stage && d.active_stage !== "idle" && d.current_slovakiana_key) {
+          const skKey = d.current_slovakiana_key;
+          setLocalSheetProgressMap((prev) => {
+            const cur = prev[skKey];
+            if (!cur) return prev;
             return {
               ...prev,
-              active_stage: d.active_stage,
-              active_model: d.active_model ?? prev.active_model,
-              progress_pct: Math.max(prev.progress_pct, Math.min(99, Number(d.progress_pct || 12))),
-              current_row_index: d.current_row_index ?? prev.current_row_index,
-              total_rows: d.total_rows ?? prev.total_rows,
-              message_sk: d.message_sk || prev.message_sk,
-              message_en: d.message_en || prev.message_en,
+              [skKey]: {
+                ...cur,
+                active_stage: d.active_stage,
+                active_model: d.active_model ?? cur.active_model,
+                progress_pct: Math.max(cur.progress_pct, Math.min(99, Number(d.progress_pct || 12))),
+                current_row_index: d.current_row_index ?? cur.current_row_index,
+                total_rows: d.total_rows ?? cur.total_rows,
+                message_sk: d.message_sk || cur.message_sk,
+                message_en: d.message_en || cur.message_en,
+              },
             };
           });
         }
@@ -739,24 +743,23 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
           } else if (msg.type === "state" && msg.data) {
             const d = msg.data as PipelineState;
             setLivePipelineState(d);
-            if (d.active_stage && d.active_stage !== "idle") {
-              setLocalSheetProgress((prev) => {
-                if (!prev) return prev;
-                if (
-                  d.current_slovakiana_key &&
-                  d.current_slovakiana_key !== prev.sheetKey
-                ) {
-                  return prev;
-                }
+            if (d.active_stage && d.active_stage !== "idle" && d.current_slovakiana_key) {
+              const skKey = d.current_slovakiana_key;
+              setLocalSheetProgressMap((prev) => {
+                const cur = prev[skKey];
+                if (!cur) return prev;
                 return {
                   ...prev,
-                  active_stage: d.active_stage,
-                  active_model: d.active_model ?? prev.active_model,
-                  progress_pct: Math.max(prev.progress_pct, Math.min(99, Number(d.progress_pct || 12))),
-                  current_row_index: d.current_row_index ?? prev.current_row_index,
-                  total_rows: d.total_rows ?? prev.total_rows,
-                  message_sk: d.message_sk || prev.message_sk,
-                  message_en: d.message_en || prev.message_en,
+                  [skKey]: {
+                    ...cur,
+                    active_stage: d.active_stage,
+                    active_model: d.active_model ?? cur.active_model,
+                    progress_pct: Math.max(cur.progress_pct, Math.min(99, Number(d.progress_pct || 12))),
+                    current_row_index: d.current_row_index ?? cur.current_row_index,
+                    total_rows: d.total_rows ?? cur.total_rows,
+                    message_sk: d.message_sk || cur.message_sk,
+                    message_en: d.message_en || cur.message_en,
+                  },
                 };
               });
             }
@@ -805,16 +808,22 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   useEffect(() => {
     if (!processingSheetId) return;
     const ticker = window.setInterval(() => {
-      setLocalSheetProgress((prev) => {
-        if (!prev) return prev;
-        const elapsed = Math.max(1, Math.round((Date.now() - prev.started_at_ms) / 1000));
-        const step = prev.progress_pct < 35 ? 2 : prev.progress_pct < 75 ? 1 : 0.5;
-        const nextPct = Math.min(94, Math.floor(prev.progress_pct + step));
-        return {
-          ...prev,
-          elapsed_sec: elapsed,
-          progress_pct: Math.max(prev.progress_pct, nextPct),
-        };
+      setLocalSheetProgressMap((prev) => {
+        const keys = Object.keys(prev);
+        if (keys.length === 0) return prev;
+        const next = { ...prev };
+        for (const k of keys) {
+          const item = next[k];
+          const elapsed = Math.max(1, Math.round((Date.now() - item.started_at_ms) / 1000));
+          const step = item.progress_pct < 35 ? 2 : item.progress_pct < 75 ? 1 : 0.5;
+          const nextPct = Math.min(94, Math.floor(item.progress_pct + step));
+          next[k] = {
+            ...item,
+            elapsed_sec: elapsed,
+            progress_pct: Math.max(item.progress_pct, nextPct),
+          };
+        }
+        return next;
       });
     }, 650);
     return () => window.clearInterval(ticker);
@@ -1545,24 +1554,26 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
 
   const handleProcessSingleSheet = async (sheetKey: string) => {
     const startMs = Date.now();
-    setProcessingSheetId(sheetKey);
     setRecentlyCompletedSheets((prev) => {
       const next = { ...prev };
       delete next[sheetKey];
       return next;
     });
-    setLocalSheetProgress({
-      sheetKey,
-      active_stage: "census_download",
-      active_model: "glm-ocr",
-      progress_pct: 10,
-      current_row_index: null,
-      total_rows: null,
-      message_sk: `Spúšťam sťahovanie a AI OCR čítanie hárku (${sheetKey})…`,
-      message_en: `Starting scan download and AI OCR for sheet (${sheetKey})…`,
-      started_at_ms: startMs,
-      elapsed_sec: 0,
-    });
+    setLocalSheetProgressMap((prev) => ({
+      ...prev,
+      [sheetKey]: {
+        sheetKey,
+        active_stage: "census_download",
+        active_model: "glm-ocr",
+        progress_pct: 10,
+        current_row_index: null,
+        total_rows: null,
+        message_sk: `Spúšťam sťahovanie a AI OCR čítanie hárku (${sheetKey})…`,
+        message_en: `Starting scan download and AI OCR for sheet (${sheetKey})…`,
+        started_at_ms: startMs,
+        elapsed_sec: 0,
+      },
+    }));
     try {
       const r = await fetch(
         `/api/census/sheets/${sheetKey}/download-and-process?run_pipeline=true&run_mcp=true`,
@@ -1638,20 +1649,48 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
           : prev
       );
     } finally {
-      setProcessingSheetId(null);
-      setLocalSheetProgress(null);
+      setLocalSheetProgressMap((prev) => {
+        const next = { ...prev };
+        delete next[sheetKey];
+        return next;
+      });
     }
   };
 
   const getAttachedSheetState = (sheetKey?: string | null, sheetId?: number | null) => {
     if (!sheetKey && !sheetId) return null;
-    const isLocalActive = Boolean(sheetKey && processingSheetId === sheetKey);
+    const localSheetProgress = sheetKey ? localSheetProgressMap[sheetKey] : null;
+    const isLocalActive = Boolean(localSheetProgress);
     const isBackendActive = Boolean(
       livePipelineState?.active_stage &&
         livePipelineState.active_stage !== "idle" &&
         ((sheetKey && livePipelineState.current_slovakiana_key === sheetKey) ||
           (sheetId != null && livePipelineState.current_sheet_id === sheetId))
     );
+    const queuedTaskForSheet = (livePipelineState?.queued_tasks || []).find(
+      (qt) =>
+        (sheetKey && qt.metadata?.slovakiana_key === sheetKey) ||
+        (sheetId != null && qt.metadata?.sheet_id === sheetId)
+    );
+    if (queuedTaskForSheet && !isBackendActive) {
+      const qPos = queuedTaskForSheet.queue_position ?? 1;
+      return {
+        active: true,
+        completed: false,
+        stage: "queued",
+        model: null,
+        pct: 5,
+        rowIdx: null,
+        totRows: null,
+        msgSk:
+          queuedTaskForSheet.message_sk ||
+          `Vo fronte (#${qPos}) – čaká na dokončenie prebiehajúcej úlohy…`,
+        msgEn:
+          queuedTaskForSheet.message_en ||
+          `Queued (#${qPos}) – waiting for ongoing task to complete…`,
+        elapsedSec: localSheetProgress?.elapsed_sec || 0,
+      };
+    }
     if (isLocalActive || isBackendActive) {
       const stage =
         (isBackendActive ? livePipelineState?.active_stage : null) ||

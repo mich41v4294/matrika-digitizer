@@ -24,11 +24,13 @@ from backend.app.census.worker import (
     download_and_process_single_census_sheet,
     get_job_runtime_info,
     is_job_running_in_memory,
+    mark_job_active_in_memory,
     request_job_pause,
     run_catalog_harvest_job,
     run_download_and_pipeline_job,
     upsert_census_sheet_from_dict,
 )
+from backend.app.pipeline.task_queue import task_queue
 from backend.app.db.models import (
     CensusDownloadJob,
     CensusHousehold,
@@ -853,6 +855,7 @@ def list_census_jobs(session: SessionDep) -> dict[str, Any]:
             j.total_items,
             int((rt or {}).get("total_sheets") or 0),
         )
+        q_info = task_queue.get_census_job_queue_info(j.id) if j.id is not None else None
         out.append(
             {
                 **j.model_dump(),
@@ -864,6 +867,9 @@ def list_census_jobs(session: SessionDep) -> dict[str, Any]:
                 "failed_sheets": j.failed_items,
                 "current_page": j.cursor_page,
                 "is_active_runtime": bool(j.id and is_job_running_in_memory(j.id)),
+                "queue_status": q_info["queue_status"] if q_info else None,
+                "queue_position": q_info["queue_position"] if q_info else None,
+                "task_id": q_info["task_id"] if q_info else None,
                 "current_sheet_id": rt.get("current_sheet_id") if rt else None,
                 "current_slovakiana_key": rt.get("current_slovakiana_key") if rt else None,
                 "current_sheet_label": rt.get("current_sheet_label") if rt else None,
@@ -880,6 +886,7 @@ def delete_or_cancel_census_job(job_id: int, session: SessionDep) -> dict[str, A
     if not job:
         raise HTTPException(status_code=404, detail="CensusDownloadJob not found")
     request_job_pause(job_id)
+    task_queue.cancel_tasks_for_census_job(job_id)
     session.delete(job)
     session.commit()
     return {"status": "deleted", "job_id": job_id}
@@ -927,22 +934,41 @@ async def start_census_job(
     session.add(job)
     session.commit()
     session.refresh(job)
+    jid = int(job.id or 0)
+    mark_job_active_in_memory(jid)
 
     if req.job_type == "catalog_harvest":
         max_pages = max(1, ((req.max_sheets or 200) + 199) // 200)
-        background_tasks.add_task(
-            run_catalog_harvest_job,
-            job.id or 0,
-            max_pages=max_pages,
-            page_size=min(200, req.max_sheets or 200),
+        page_sz = min(200, req.max_sheets or 200)
+        queued_task = task_queue.enqueue_background(
+            lambda: run_catalog_harvest_job(
+                jid,
+                max_pages=max_pages,
+                page_size=page_sz,
+            ),
+            task_type="census_harvest",
+            category="harvest",
+            title_sk=job_name,
+            title_en=job_name,
+            initial_stage="census_harvest",
+            active_model="slovakiana-wcm-api",
+            target_url="/scitacie-harky",
+            metadata={"job_id": jid},
         )
     else:
-        background_tasks.add_task(
-            run_download_and_pipeline_job,
-            job.id or 0,
+        queued_task = task_queue.enqueue_background(
+            lambda: run_download_and_pipeline_job(jid),
+            task_type="census_overview_ocr" if is_overview_only else "census_batch_ocr",
+            category="ocr",
+            title_sk=job_name,
+            title_en=job_name,
+            initial_stage="census_download",
+            active_model="slovakiana-iiif",
+            target_url="/scitacie-harky",
+            metadata={"job_id": jid},
         )
 
-    return {"status": "started", "job": job}
+    return {"status": "started", "job": job, "task": queued_task}
 
 
 @router.post("/jobs/{job_id}/pause")
@@ -951,6 +977,7 @@ def pause_census_job(job_id: int, session: SessionDep) -> dict[str, Any]:
     if not job:
         raise HTTPException(status_code=404, detail="CensusDownloadJob not found")
     request_job_pause(job_id)
+    task_queue.cancel_tasks_for_census_job(job_id)
     job.status = "paused"
     job.updated_at = datetime.now(timezone.utc)
     session.add(job)
@@ -973,13 +1000,37 @@ async def resume_census_job(
     session.add(job)
     session.commit()
     session.refresh(job)
+    jid = int(job.id or 0)
+    mark_job_active_in_memory(jid)
+    flt = json.loads(job.filter_json or "{}")
+    job_name = str(flt.get("name") or f"{job.job_type} #{jid}")
 
     if job.job_type == "catalog_harvest":
-        background_tasks.add_task(run_catalog_harvest_job, job.id or 0)
+        queued_task = task_queue.enqueue_background(
+            lambda: run_catalog_harvest_job(jid),
+            task_type="census_harvest",
+            category="harvest",
+            title_sk=job_name,
+            title_en=job_name,
+            initial_stage="census_harvest",
+            active_model="slovakiana-wcm-api",
+            target_url="/scitacie-harky",
+            metadata={"job_id": jid},
+        )
     else:
-        background_tasks.add_task(run_download_and_pipeline_job, job.id or 0)
+        queued_task = task_queue.enqueue_background(
+            lambda: run_download_and_pipeline_job(jid),
+            task_type="census_overview_ocr" if flt.get("overview_only") else "census_batch_ocr",
+            category="ocr",
+            title_sk=job_name,
+            title_en=job_name,
+            initial_stage="census_download",
+            active_model="slovakiana-iiif",
+            target_url="/scitacie-harky",
+            metadata={"job_id": jid},
+        )
 
-    return {"status": "resumed", "job": job}
+    return {"status": "resumed", "job": job, "task": queued_task}
 
 
 @router.get("/sheets")

@@ -41,6 +41,7 @@ from backend.app.pipeline.extraction_stage import (
 )
 from backend.app.pipeline.layout import LayoutResult, slice_matrika_spread
 from backend.app.pipeline.ocr_stage import run_ocr_for_row, run_ocr_for_scan_header
+from backend.app.pipeline.task_queue import task_queue
 
 
 def _matches_watchlist(fact: PersonFact, watchlist_filter: str | None) -> bool:
@@ -237,6 +238,67 @@ def _sheet_context_dict(sheet: CensusSheet | None, fallback_label: str = "") -> 
 
 
 async def process_single_scan_pipeline(
+    scan_id: int,
+    *,
+    max_rows: int | None = None,
+    run_mcp: bool = True,
+    watchlist_filter: str | None = None,
+    finalize_idle: bool = True,
+    skip_row_ocr: bool | None = None,
+) -> dict[str, Any]:
+    if not task_queue.is_inside_active_task():
+        scan_label = f"Sken #{scan_id}"
+        sheet_id_meta: int | None = None
+        sheet_key_meta: str | None = None
+        try:
+            with Session(engine) as s_meta:
+                sc = s_meta.get(ScanImage, scan_id)
+                if sc:
+                    scan_label = sc.filename or scan_label
+                    sheet_id_meta = sc.census_sheet_id
+                    if sc.census_sheet_id:
+                        sh = s_meta.get(CensusSheet, sc.census_sheet_id)
+                        if sh:
+                            sheet_key_meta = sh.slovakiana_key
+        except Exception:
+            pass
+        return await task_queue.run_or_enqueue(
+            lambda: _process_single_scan_pipeline_inner(
+                scan_id,
+                max_rows=max_rows,
+                run_mcp=run_mcp,
+                watchlist_filter=watchlist_filter,
+                finalize_idle=finalize_idle,
+                skip_row_ocr=skip_row_ocr,
+            ),
+            task_type="matrika_scan_ocr" if not sheet_id_meta else "census_sheet_ocr",
+            category="ocr",
+            title_sk=f"AI OCR skenu: {scan_label}",
+            title_en=f"Scan AI OCR: {scan_label}",
+            initial_stage="layout",
+            active_model=settings.model_ocr,
+            target_url=(
+                f"/scitacie-harky/{sheet_key_meta or sheet_id_meta}"
+                if sheet_id_meta
+                else f"/knihy?scan={scan_id}"
+            ),
+            metadata={
+                "scan_id": scan_id,
+                "sheet_id": sheet_id_meta,
+                "slovakiana_key": sheet_key_meta,
+            },
+        )
+    return await _process_single_scan_pipeline_inner(
+        scan_id,
+        max_rows=max_rows,
+        run_mcp=run_mcp,
+        watchlist_filter=watchlist_filter,
+        finalize_idle=finalize_idle,
+        skip_row_ocr=skip_row_ocr,
+    )
+
+
+async def _process_single_scan_pipeline_inner(
     scan_id: int,
     *,
     max_rows: int | None = None,
@@ -638,6 +700,49 @@ async def process_batch_stage_queued(
     only_undone: bool = True,
     skip_row_ocr: bool | None = None,
 ) -> dict[str, Any]:
+    if not task_queue.is_inside_active_task():
+        batch_label = f"Dávka #{batch_id}"
+        try:
+            with Session(engine) as s_meta:
+                b = s_meta.get(Batch, batch_id)
+                if b and b.name:
+                    batch_label = b.name
+        except Exception:
+            pass
+        return await task_queue.run_or_enqueue(
+            lambda: _process_batch_stage_queued_inner(
+                batch_id,
+                max_rows_per_scan=max_rows_per_scan,
+                run_mcp=run_mcp,
+                only_undone=only_undone,
+                skip_row_ocr=skip_row_ocr,
+            ),
+            task_type="matrika_batch_ocr",
+            category="ocr",
+            title_sk=f"Hromadné OCR dávky: {batch_label}",
+            title_en=f"Batch OCR: {batch_label}",
+            initial_stage="layout",
+            active_model=settings.model_ocr,
+            target_url="/knihy",
+            metadata={"batch_id": batch_id},
+        )
+    return await _process_batch_stage_queued_inner(
+        batch_id,
+        max_rows_per_scan=max_rows_per_scan,
+        run_mcp=run_mcp,
+        only_undone=only_undone,
+        skip_row_ocr=skip_row_ocr,
+    )
+
+
+async def _process_batch_stage_queued_inner(
+    batch_id: int,
+    *,
+    max_rows_per_scan: int | None = None,
+    run_mcp: bool = True,
+    only_undone: bool = True,
+    skip_row_ocr: bool | None = None,
+) -> dict[str, Any]:
     """
     Strictly stage-batches an entire multi-image Batch across ALL not-done scans:
     1. All pending scans -> OpenCV Layout Slicing
@@ -1020,6 +1125,59 @@ async def process_census_sheet_pipeline(
     full-extracting only `overview` and `municipal_overview` sheets and stopping before row OCR
     if the sheet is a regular `household` sheet.
     """
+    if not task_queue.is_inside_active_task():
+        sh_label = f"Hárok #{sheet_id}"
+        sh_key: str | None = None
+        try:
+            with Session(engine) as s_meta:
+                sh = s_meta.get(CensusSheet, sheet_id)
+                if sh:
+                    ctx = _sheet_context_dict(sh)
+                    sh_label = str(ctx.get("current_sheet_label") or sh.slovakiana_key or sh_label)
+                    sh_key = sh.slovakiana_key
+        except Exception:
+            pass
+        return await task_queue.run_or_enqueue(
+            lambda: _process_census_sheet_pipeline_wrapped(
+                sheet_id,
+                max_rows=max_rows,
+                run_mcp=run_mcp,
+                force_sheet_type=force_sheet_type,
+                finalize_idle=finalize_idle,
+                overview_only=overview_only,
+            ),
+            task_type="census_sheet_ocr",
+            category="ocr",
+            title_sk=f"AI OCR sčítacieho hárku: {sh_label}",
+            title_en=f"Census sheet AI OCR: {sh_label}",
+            initial_stage="layout",
+            active_model=settings.model_ocr,
+            target_url=f"/scitacie-harky/{sh_key or sheet_id}",
+            metadata={
+                "sheet_id": sheet_id,
+                "slovakiana_key": sh_key,
+                "sheet_label": sh_label,
+            },
+        )
+    return await _process_census_sheet_pipeline_wrapped(
+        sheet_id,
+        max_rows=max_rows,
+        run_mcp=run_mcp,
+        force_sheet_type=force_sheet_type,
+        finalize_idle=finalize_idle,
+        overview_only=overview_only,
+    )
+
+
+async def _process_census_sheet_pipeline_wrapped(
+    sheet_id: int,
+    *,
+    max_rows: int | None = None,
+    run_mcp: bool = True,
+    force_sheet_type: str | None = None,
+    finalize_idle: bool = True,
+    overview_only: bool = False,
+) -> dict[str, Any]:
     try:
         return await _process_census_sheet_pipeline_inner(
             sheet_id,

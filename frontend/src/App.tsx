@@ -63,6 +63,7 @@ export interface QueuedTaskItem {
   task_id: string;
   task_type: string;
   category: "ocr" | "familysearch" | "harvest" | "debug" | string;
+  provider?: "local" | "freellm" | string;
   title_sk: string;
   title_en: string;
   status: "queued" | "running" | "completed" | "cancelled" | "paused" | "error" | string;
@@ -84,8 +85,17 @@ export interface QueuedTaskItem {
 
 export interface TaskQueueSnapshot {
   active_task: QueuedTaskItem | null;
+  running_tasks?: QueuedTaskItem[];
   queued_tasks: QueuedTaskItem[];
   history: QueuedTaskItem[];
+  concurrency?: {
+    local_max_concurrent: number;
+    active_local_requests: number;
+    waiting_local_requests: number;
+    active_freellm_requests: number;
+    freellm_queued_requests?: number;
+    freellm_concurrent_unlimited?: boolean;
+  };
   counts: {
     running: number;
     queued: number;
@@ -93,6 +103,10 @@ export interface TaskQueueSnapshot {
     cancelled: number;
     error: number;
     total_active_and_queued: number;
+    local_max_concurrent?: number;
+    active_local_requests?: number;
+    waiting_local_requests?: number;
+    active_freellm_requests?: number;
   };
 }
 

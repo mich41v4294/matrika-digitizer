@@ -916,27 +916,110 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
 
     def test_task_queue_fifo_ocr_and_familysearch_and_debug_endpoints(self) -> None:
         """
-        Verify that creating a new task (like FamilySearch pairing or a second OCR task)
-        while an OCR task is ongoing queues the new task in FIFO order instead of
-        cancelling or overwriting the ongoing task, and exposes full queue controls
-        under /api/debug/tasks.
+        Verify:
+        1. Default `local_max_concurrent` is 5, and `ai_client.chat_completion` caps concurrent
+           local model requests to 5 while sending `freellm` model requests concurrently without queuing.
+        2. `TaskQueueManager` never queues `freellm` tasks (they run concurrently as they arrive)
+           and enforces `local_max_concurrent` (default 5, configurable) on local tasks, exposing
+           full queue visibility and controls (`prioritize`, `cancel`, `clear-queued`) under `/api/debug/tasks`.
         """
         import asyncio
+        from unittest.mock import patch
         from fastapi.testclient import TestClient
         from backend.app.api.ws import ws_manager
+        from backend.app.config import settings
         from backend.app.main import app
+        from backend.app.pipeline.ai_client import ai_client
         from backend.app.pipeline.task_queue import task_queue
 
         client = TestClient(app)
+        self.assertEqual(settings.local_max_concurrent, 5)
+
+        async def _scenario_ai_client_concurrency() -> None:
+            # Verify ai_client._acquire_model_slot:
+            # (A) FreeLLM requests: 8 concurrent requests -> all 8 run concurrently without queuing!
+            freellm_barrier = asyncio.Event()
+            freellm_entered = 0
+            freellm_all_in = asyncio.Event()
+            max_freellm_active = 0
+
+            async def _freellm_worker(idx: int) -> int:
+                nonlocal freellm_entered, max_freellm_active
+                async with ai_client._acquire_model_slot(
+                    provider="freellm",
+                    stage="extract",
+                    model="gpt-4o-mini",
+                    row_id=idx,
+                ):
+                    freellm_entered += 1
+                    conc = ai_client.get_concurrency_state()
+                    max_freellm_active = max(max_freellm_active, conc["active_freellm_requests"])
+                    if freellm_entered == 8:
+                        freellm_all_in.set()
+                    await freellm_barrier.wait()
+                    return idx
+
+            fl_tasks = [asyncio.create_task(_freellm_worker(i)) for i in range(1, 9)]
+            await asyncio.wait_for(freellm_all_in.wait(), timeout=2.0)
+            fl_conc = ai_client.get_concurrency_state()
+            self.assertEqual(fl_conc["active_freellm_requests"], 8)
+            self.assertEqual(fl_conc["freellm_queued_requests"], 0)
+            self.assertEqual(max_freellm_active, 8)
+            freellm_barrier.set()
+            await asyncio.gather(*fl_tasks)
+            self.assertEqual(ai_client.get_concurrency_state()["active_freellm_requests"], 0)
+
+            # (B) Local model requests (default limit = 5): 8 concurrent requests -> max 5 active, 3 waiting!
+            local_release = asyncio.Event()
+            local_entered = 0
+            five_local_in = asyncio.Event()
+            max_local_active = 0
+
+            async def _local_worker(idx: int) -> int:
+                nonlocal local_entered, max_local_active
+                async with ai_client._acquire_model_slot(
+                    provider="local",
+                    stage="ocr",
+                    model="glm-ocr-g32-mixed_4_8-mlx",
+                    row_id=idx,
+                ):
+                    local_entered += 1
+                    conc = ai_client.get_concurrency_state()
+                    max_local_active = max(max_local_active, conc["active_local_requests"])
+                    if local_entered == 5:
+                        five_local_in.set()
+                    await local_release.wait()
+                    return idx
+
+            loc_tasks = [asyncio.create_task(_local_worker(i)) for i in range(1, 9)]
+            await asyncio.wait_for(five_local_in.wait(), timeout=2.0)
+            await asyncio.sleep(0.02)
+            loc_conc = ai_client.get_concurrency_state()
+            self.assertEqual(loc_conc["local_max_concurrent"], 5)
+            self.assertEqual(loc_conc["active_local_requests"], 5)
+            self.assertEqual(loc_conc["waiting_local_requests"], 3)
+            self.assertEqual(local_entered, 5)
+
+            local_release.set()
+            await asyncio.gather(*loc_tasks)
+            self.assertEqual(local_entered, 8)
+            self.assertEqual(max_local_active, 5)
+            self.assertEqual(ai_client.get_concurrency_state()["active_local_requests"], 0)
+            self.assertEqual(ai_client.get_concurrency_state()["waiting_local_requests"], 0)
+
+        asyncio.run(_scenario_ai_client_concurrency())
+
+        # Now test TaskQueueManager & /api/debug/tasks (with local_max_concurrent=1 to test queueing + freellm bypass, then restore 5)
         execution_order: list[str] = []
 
-        async def _scenario() -> None:
+        async def _scenario_task_queue() -> None:
             task_queue.clear_queued_tasks()
             task_queue.clear_history()
 
             ocr_started = asyncio.Event()
             release_ocr = asyncio.Event()
             fs_started = asyncio.Event()
+            freellm_done = asyncio.Event()
 
             async def _fake_ocr_task() -> dict[str, object]:
                 execution_order.append("ocr_start")
@@ -956,6 +1039,11 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                 await release_ocr.wait()
                 execution_order.append("ocr_end")
                 return {"status": "ok", "rows_processed": 5}
+
+            async def _fake_freellm_task() -> dict[str, object]:
+                execution_order.append("freellm_concurrent")
+                freellm_done.set()
+                return {"status": "ok", "provider": "freellm"}
 
             async def _fake_fs_task() -> dict[str, object]:
                 execution_order.append("fs_start")
@@ -984,112 +1072,141 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                 execution_order.append("cancelled_should_not_run")
                 return {"status": "ok"}
 
-            # 1. Start Task 1 (OCR)
-            t1_future = asyncio.create_task(
-                task_queue.run_or_enqueue(
-                    _fake_ocr_task,
-                    task_type="census_sheet_ocr",
+            with patch.object(settings, "local_max_concurrent", 1):
+                # 1. Start Task 1 (Local OCR)
+                t1_future = asyncio.create_task(
+                    task_queue.run_or_enqueue(
+                        _fake_ocr_task,
+                        task_type="census_sheet_ocr",
+                        category="ocr",
+                        provider="local",
+                        title_sk="AI OCR sčítacieho hárku: cair-qtest01",
+                        title_en="Census sheet AI OCR: cair-qtest01",
+                        initial_stage="ocr",
+                        active_model="local:glm-ocr-g32-mixed_4_8-mlx",
+                        target_url="/scitacie-harky/cair-qtest01",
+                        metadata={"sheet_id": 101, "slovakiana_key": "cair-qtest01"},
+                    )
+                )
+                await ocr_started.wait()
+
+                # 2. While Local Task 1 is running (and local slot 1/1 is full), submit a FreeLLM task:
+                #    it MUST NOT be queued — it runs immediately & concurrently!
+                fl_res = await task_queue.run_or_enqueue(
+                    _fake_freellm_task,
+                    task_type="freellm_extract",
                     category="ocr",
-                    title_sk="AI OCR sčítacieho hárku: cair-qtest01",
-                    title_en="Census sheet AI OCR: cair-qtest01",
-                    initial_stage="ocr",
-                    active_model="glm-ocr-g32-mixed_4_8-mlx",
-                    target_url="/scitacie-harky/cair-qtest01",
-                    metadata={"sheet_id": 101, "slovakiana_key": "cair-qtest01"},
+                    provider="freellm",
+                    title_sk="Cloud API extrakcia (freellm)",
+                    title_en="Cloud API extraction (freellm)",
+                    initial_stage="extract",
+                    active_model="freellm:gpt-4o-mini",
                 )
-            )
-            await ocr_started.wait()
+                self.assertEqual(fl_res["provider"], "freellm")
+                self.assertTrue(freellm_done.is_set())
 
-            # 2. While Task 1 (OCR) is ongoing, submit Task 2 (FamilySearch pairing),
-            #    Task 3 (Second OCR), and Task 4 (to be cancelled).
-            t2_future = asyncio.create_task(
-                task_queue.run_or_enqueue(
-                    _fake_fs_task,
-                    task_type="fs_rematch_all",
-                    category="familysearch",
-                    title_sk="Párovanie s FamilySearch MCP (všetky osoby)",
-                    title_en="FamilySearch MCP Pairing (all persons)",
-                    initial_stage="mcp_match",
-                    active_model="familysearch-mcp",
-                    target_url="/familysearch",
+                # 3. Submit Local/MCP Task 2 (FamilySearch), Task 3 (Second Local OCR), and Task 4 (to be cancelled)
+                t2_future = asyncio.create_task(
+                    task_queue.run_or_enqueue(
+                        _fake_fs_task,
+                        task_type="fs_rematch_all",
+                        category="familysearch",
+                        provider="local",
+                        title_sk="Párovanie s FamilySearch MCP (všetky osoby)",
+                        title_en="FamilySearch MCP Pairing (all persons)",
+                        initial_stage="mcp_match",
+                        active_model="familysearch-mcp",
+                        target_url="/familysearch",
+                    )
                 )
-            )
-            t3_future = asyncio.create_task(
-                task_queue.run_or_enqueue(
-                    _fake_second_ocr_task,
-                    task_type="census_sheet_ocr",
+                t3_future = asyncio.create_task(
+                    task_queue.run_or_enqueue(
+                        _fake_second_ocr_task,
+                        task_type="census_sheet_ocr",
+                        category="ocr",
+                        provider="local",
+                        title_sk="AI OCR sčítacieho hárku: cair-qtest02",
+                        title_en="Census sheet AI OCR: cair-qtest02",
+                        initial_stage="ocr",
+                        active_model="local:glm-ocr-g32-mixed_4_8-mlx",
+                        target_url="/scitacie-harky/cair-qtest02",
+                        metadata={"sheet_id": 102, "slovakiana_key": "cair-qtest02"},
+                    )
+                )
+                await asyncio.sleep(0)
+                t4_info = task_queue.enqueue_background(
+                    _fake_cancelled_task,
+                    task_type="matrika_scan_ocr",
                     category="ocr",
-                    title_sk="AI OCR sčítacieho hárku: cair-qtest02",
-                    title_en="Census sheet AI OCR: cair-qtest02",
-                    initial_stage="ocr",
-                    target_url="/scitacie-harky/cair-qtest02",
-                    metadata={"sheet_id": 102, "slovakiana_key": "cair-qtest02"},
+                    provider="local",
+                    title_sk="AI OCR skenu: zrušený_sken.jpg",
+                    title_en="Scan AI OCR: cancelled_scan.jpg",
                 )
-            )
-            await asyncio.sleep(0)
-            t4_info = task_queue.enqueue_background(
-                _fake_cancelled_task,
-                task_type="matrika_scan_ocr",
-                category="ocr",
-                title_sk="AI OCR skenu: zrušený_sken.jpg",
-                title_en="Scan AI OCR: cancelled_scan.jpg",
-            )
-            await asyncio.sleep(0.01)
+                await asyncio.sleep(0.01)
 
-            # Verify Task 1 is still running and NOT cancelled or overwritten by Task 2!
-            self.assertFalse(fs_started.is_set())
-            self.assertEqual(ws_manager.latest_state["active_stage"], "ocr")
-            self.assertEqual(ws_manager.latest_state["current_slovakiana_key"], "cair-qtest01")
-            self.assertEqual(ws_manager.latest_state["progress_pct"], 42)
-            self.assertEqual(ws_manager.latest_state["queued_count"], 3)
+                # Verify Task 1 is still running and NOT cancelled or overwritten!
+                self.assertFalse(fs_started.is_set())
+                self.assertEqual(ws_manager.latest_state["active_stage"], "ocr")
+                self.assertEqual(ws_manager.latest_state["current_slovakiana_key"], "cair-qtest01")
+                self.assertEqual(ws_manager.latest_state["progress_pct"], 42)
+                self.assertEqual(ws_manager.latest_state["queued_count"], 3)
 
-            # 3. Inspect queue via /api/debug/tasks
-            r_tasks = client.get("/api/debug/tasks")
-            self.assertEqual(r_tasks.status_code, 200)
-            q_data = r_tasks.json()
-            self.assertEqual(q_data["counts"]["running"], 1)
-            self.assertEqual(q_data["counts"]["queued"], 3)
-            self.assertEqual(q_data["active_task"]["task_type"], "census_sheet_ocr")
-            self.assertEqual(
-                [t["task_type"] for t in q_data["queued_tasks"]],
-                ["fs_rematch_all", "census_sheet_ocr", "matrika_scan_ocr"],
-            )
+                # 4. Inspect queue via /api/debug/tasks
+                r_tasks = client.get("/api/debug/tasks")
+                self.assertEqual(r_tasks.status_code, 200)
+                q_data = r_tasks.json()
+                self.assertEqual(q_data["counts"]["running"], 1)
+                self.assertEqual(q_data["counts"]["queued"], 3)
+                self.assertEqual(q_data["active_task"]["task_type"], "census_sheet_ocr")
+                self.assertEqual(
+                    [t["task_type"] for t in q_data["queued_tasks"]],
+                    ["fs_rematch_all", "census_sheet_ocr", "matrika_scan_ocr"],
+                )
 
-            # 4. Cancel Task 4 via /api/debug/tasks/{id}/cancel
-            r_cancel = client.post(f"/api/debug/tasks/{t4_info['task_id']}/cancel")
-            self.assertEqual(r_cancel.status_code, 200)
-            self.assertEqual(r_cancel.json()["task_queue"]["counts"]["queued"], 2)
+                # 5. Cancel Task 4 via /api/debug/tasks/{id}/cancel
+                r_cancel = client.post(f"/api/debug/tasks/{t4_info['task_id']}/cancel")
+                self.assertEqual(r_cancel.status_code, 200)
+                self.assertEqual(r_cancel.json()["task_queue"]["counts"]["queued"], 2)
 
-            # 5. Prioritize Task 3 (cair-qtest02) so it moves ahead of Task 2 (FamilySearch)
-            t3_id = q_data["queued_tasks"][1]["task_id"]
-            r_prio = client.post(f"/api/debug/tasks/{t3_id}/prioritize")
-            self.assertEqual(r_prio.status_code, 200)
-            queued_after_prio = r_prio.json()["task_queue"]["queued_tasks"]
-            self.assertEqual(queued_after_prio[0]["task_id"], t3_id)
-            self.assertEqual(queued_after_prio[0]["queue_position"], 1)
+                # 6. Prioritize Task 3 (cair-qtest02) so it moves ahead of Task 2 (FamilySearch)
+                t3_id = q_data["queued_tasks"][1]["task_id"]
+                r_prio = client.post(f"/api/debug/tasks/{t3_id}/prioritize")
+                self.assertEqual(r_prio.status_code, 200)
+                queued_after_prio = r_prio.json()["task_queue"]["queued_tasks"]
+                self.assertEqual(queued_after_prio[0]["task_id"], t3_id)
+                self.assertEqual(queued_after_prio[0]["queue_position"], 1)
 
-            # 6. Release Task 1 and let all remaining queued tasks finish in prioritized FIFO order
-            release_ocr.set()
-            res1, res2, res3 = await asyncio.gather(t1_future, t2_future, t3_future)
-            self.assertEqual(res1["rows_processed"], 5)
-            self.assertEqual(res2["matched_count"], 3)
-            self.assertEqual(res3["rows_processed"], 2)
+                # 7. Release Task 1 and let remaining queued tasks finish in prioritized FIFO order
+                release_ocr.set()
+                res1, res2, res3 = await asyncio.gather(t1_future, t2_future, t3_future)
+                self.assertEqual(res1["rows_processed"], 5)
+                self.assertEqual(res2["matched_count"], 3)
+                self.assertEqual(res3["rows_processed"], 2)
 
-            self.assertEqual(
-                execution_order,
-                ["ocr_start", "ocr_end", "ocr2_start", "ocr2_end", "fs_start", "fs_end"],
-            )
+                self.assertEqual(
+                    execution_order,
+                    [
+                        "ocr_start",
+                        "freellm_concurrent",
+                        "ocr_end",
+                        "ocr2_start",
+                        "ocr2_end",
+                        "fs_start",
+                        "fs_end",
+                    ],
+                )
 
-            # Verify final queue state and history
+            # Verify final queue state and default local_max_concurrent == 5
             r_final = client.get("/api/debug/tasks")
             self.assertEqual(r_final.status_code, 200)
             final_q = r_final.json()
             self.assertEqual(final_q["counts"]["running"], 0)
             self.assertEqual(final_q["counts"]["queued"], 0)
-            self.assertGreaterEqual(final_q["counts"]["completed"], 3)
+            self.assertEqual(final_q["counts"]["local_max_concurrent"], 5)
+            self.assertGreaterEqual(final_q["counts"]["completed"], 4)
             self.assertGreaterEqual(final_q["counts"]["cancelled"], 1)
 
-        asyncio.run(_scenario())
+        asyncio.run(_scenario_task_queue())
 
 
 

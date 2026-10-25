@@ -186,6 +186,8 @@ interface AIConfigState {
   freellm_base_url?: string;
   local_base_url?: string;
   base_url?: string;
+  local_max_concurrent?: number;
+  freellm_concurrent_unlimited?: boolean;
   online?: boolean;
   local_online?: boolean;
   freellm_online?: boolean;
@@ -500,6 +502,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
   // Task Queue State
   const [taskQueue, setTaskQueue] = useState<TaskQueueSnapshot>({
     active_task: null,
+    running_tasks: [],
     queued_tasks: [],
     history: [],
     counts: {
@@ -509,8 +512,13 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
       cancelled: 0,
       error: 0,
       total_active_and_queued: 0,
+      local_max_concurrent: 5,
+      active_local_requests: 0,
+      waiting_local_requests: 0,
+      active_freellm_requests: 0,
     },
   });
+  const [localMaxConcurrentInput, setLocalMaxConcurrentInput] = useState<number>(5);
   const [busyTaskActionId, setBusyTaskActionId] = useState<string | null>(null);
 
   const loadTaskQueue = async () => {
@@ -519,10 +527,29 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
       if (res.ok) {
         const data: TaskQueueSnapshot = await res.json();
         setTaskQueue(data);
+        const lim =
+          data.concurrency?.local_max_concurrent ??
+          data.counts?.local_max_concurrent;
+        if (typeof lim === "number" && lim >= 1) {
+          setLocalMaxConcurrentInput(lim);
+        }
       }
     } catch {
       // ignore transient errors
     }
+  };
+
+  const handleUpdateLocalMaxConcurrent = async (nextLimit: number) => {
+    const clamped = Math.max(1, Math.min(64, Math.round(nextLimit) || 5));
+    setLocalMaxConcurrentInput(clamped);
+    await postAiConfigUpdate(
+      { local_max_concurrent: clamped },
+      lang === "sk"
+        ? `Limit súbežných požiadaviek pre Local AI nastavený na ${clamped}`
+        : `Local AI concurrent request limit set to ${clamped}`,
+      "local_max_concurrent"
+    );
+    await loadTaskQueue();
   };
 
   const handleCancelQueuedOrActiveTask = async (taskId: string) => {
@@ -770,6 +797,9 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
 
   const applyLoadedAiConfig = (cfgData: AIConfigState) => {
     setAiConfig(cfgData);
+    if (typeof cfgData.local_max_concurrent === "number" && cfgData.local_max_concurrent >= 1) {
+      setLocalMaxConcurrentInput(cfgData.local_max_concurrent);
+    }
     const prov = cfgData.provider === "freellm" ? "freellm" : "local";
     setAiProvider(prov);
     const normalizedStages = normalizeStagesFromConfig(cfgData);
@@ -1617,15 +1647,83 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
                     </strong>
                   </span>
                 )}
+                <span
+                  data-testid="debug-queue-local-concurrency-badge"
+                  className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-900 border border-blue-200 inline-flex items-center gap-1"
+                >
+                  <span>
+                    {lang === "sk" ? "Local AI požiadavky:" : "Local AI requests:"}{" "}
+                    <strong>
+                      {taskQueue.concurrency?.active_local_requests ??
+                        taskQueue.counts.active_local_requests ??
+                        0}
+                      /
+                      {taskQueue.concurrency?.local_max_concurrent ??
+                        taskQueue.counts.local_max_concurrent ??
+                        localMaxConcurrentInput}
+                    </strong>
+                  </span>
+                </span>
+                <span
+                  data-testid="debug-queue-freellm-concurrency-badge"
+                  className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-900 border border-amber-200"
+                >
+                  {lang === "sk"
+                    ? `Cloud API (freellm): súbežne bez fronty (${
+                        taskQueue.concurrency?.active_freellm_requests ??
+                        taskQueue.counts.active_freellm_requests ??
+                        0
+                      } aktívnych)`
+                    : `Cloud API (freellm): concurrent, no queue (${
+                        taskQueue.concurrency?.active_freellm_requests ??
+                        taskQueue.counts.active_freellm_requests ??
+                        0
+                      } active)`}
+                </span>
               </div>
               <p className="text-xs text-stone-600">
                 {lang === "sk"
-                  ? "Nové úlohy (AI OCR hárkov a matrík, párovanie s FamilySearch MCP, sťahovanie zo Slovakiany) sa automaticky radia do fronty (FIFO) bez prerušenia prebiehajúcej úlohy."
-                  : "New tasks (Census & Matrika AI OCR, FamilySearch MCP pairing, Slovakiana downloads) are automatically queued (FIFO) without interrupting or cancelling the ongoing task."}
+                  ? "Požiadavky na Cloud API (freellm) sa neukladajú do fronty a odosielajú sa okamžite súbežne. Pre lokálny model (Local AI) platí limit súbežných požiadaviek (predvolene 5), pričom ďalšie čakajú vo fronte."
+                  : "Requests to Cloud API (freellm) are never queued and execute concurrently as they arrive. Local AI requests enforce a concurrent request limit (default 5), queuing additional requests."}
               </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <label
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-stone-100 border border-stone-300 text-xs font-semibold text-stone-800"
+                title={
+                  lang === "sk"
+                    ? "Maximálny počet súbežných požiadaviek na lokálny model (predvolene 5)"
+                    : "Maximum concurrent requests to the local model (default 5)"
+                }
+              >
+                <span>
+                  {lang === "sk" ? "Limit Local AI:" : "Local AI limit:"}
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  max={64}
+                  data-testid="debug-local-max-concurrent-input"
+                  value={localMaxConcurrentInput}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v) && v >= 1) {
+                      setLocalMaxConcurrentInput(v);
+                    }
+                  }}
+                  onBlur={() =>
+                    void handleUpdateLocalMaxConcurrent(localMaxConcurrentInput)
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void handleUpdateLocalMaxConcurrent(localMaxConcurrentInput);
+                    }
+                  }}
+                  className="w-12 px-1.5 py-0.5 rounded bg-white border border-stone-300 text-center font-bold text-stone-900 text-xs"
+                />
+              </label>
               {taskQueue.counts.queued > 0 && (
                 <button
                   type="button"
@@ -1690,96 +1788,118 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
                 )}
               </div>
 
-              {taskQueue.active_task ? (
-                (() => {
-                  const at: QueuedTaskItem = taskQueue.active_task;
-                  const catBadge = formatTaskCategoryBadge(at.category);
-                  const pct = Math.max(5, Math.min(99, at.progress_pct || 10));
-                  const durSec = at.duration_ms
-                    ? Math.max(1, Math.round(at.duration_ms / 1000))
-                    : 1;
+              {(() => {
+                const runningItems: QueuedTaskItem[] =
+                  taskQueue.running_tasks && taskQueue.running_tasks.length > 0
+                    ? taskQueue.running_tasks
+                    : taskQueue.active_task
+                    ? [taskQueue.active_task]
+                    : [];
+                if (runningItems.length === 0) {
                   return (
                     <div
-                      data-testid="debug-active-task-item"
-                      className="bg-amber-50/90 border border-amber-300 rounded-lg p-3 space-y-2"
+                      data-testid="debug-queue-idle-placeholder"
+                      className="bg-white border border-stone-200 rounded-lg p-4 text-center text-xs text-stone-600"
                     >
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="space-y-1 min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <RefreshCw className="w-3.5 h-3.5 text-amber-700 animate-spin shrink-0" />
-                            <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 font-mono text-[11px] font-bold">
-                              #{at.id}
-                            </span>
-                            <span
-                              className={`px-2 py-0.5 rounded border text-[11px] font-bold ${catBadge.cls}`}
-                            >
-                              {lang === "sk" ? catBadge.labelSk : catBadge.labelEn}
-                            </span>
-                            {at.active_stage && (
-                              <span className="px-2 py-0.5 rounded bg-amber-600 text-white font-mono text-[11px] font-bold">
-                                {at.active_stage}
-                              </span>
-                            )}
-                            {at.active_model && (
-                              <span className="px-2 py-0.5 rounded bg-white border border-stone-300 text-stone-800 font-mono text-[11px]">
-                                {at.active_model}
-                              </span>
-                            )}
-                          </div>
-                          <div className="font-bold text-sm text-stone-900">
-                            {lang === "sk" ? at.title_sk : at.title_en}
-                          </div>
-                          <div className="text-xs text-stone-700">
-                            {lang === "sk" ? at.message_sk : at.message_en}
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {at.target_url && (
-                            <Link
-                              to={at.target_url}
-                              className="px-2.5 py-1 rounded-md bg-white hover:bg-stone-100 border border-stone-300 text-stone-800 text-xs font-semibold"
-                            >
-                              {lang === "sk" ? "Otvoriť" : "Open"}
-                            </Link>
-                          )}
-                          <button
-                            type="button"
-                            data-testid={`debug-task-cancel-${at.id}`}
-                            disabled={busyTaskActionId === at.task_id}
-                            onClick={() => handleCancelQueuedOrActiveTask(at.task_id)}
-                            className="px-2.5 py-1 rounded-md bg-red-600 hover:bg-red-700 text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                            <span>{lang === "sk" ? "Zastaviť" : "Stop"}</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2 pt-1">
-                        <div className="flex-1 bg-amber-200/80 rounded-full h-2 overflow-hidden border border-amber-300">
-                          <div
-                            className="bg-amber-600 h-full transition-all duration-300"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                        <span className="text-xs font-bold text-amber-950 shrink-0">
-                          {pct}% · {durSec} s
-                        </span>
-                      </div>
+                      {lang === "sk"
+                        ? "Žiadna úloha momentálne neprebieha — fronta je voľná."
+                        : "No task is currently running — queue is idle."}
                     </div>
                   );
-                })()
-              ) : (
-                <div
-                  data-testid="debug-queue-idle-placeholder"
-                  className="bg-white border border-stone-200 rounded-lg p-4 text-center text-xs text-stone-600"
-                >
-                  {lang === "sk"
-                    ? "Žiadna úloha momentálne neprebieha — fronta je voľná."
-                    : "No task is currently running — queue is idle."}
-                </div>
-              )}
+                }
+                return (
+                  <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                    {runningItems.map((at, idx) => {
+                      const catBadge = formatTaskCategoryBadge(at.category);
+                      const pct = Math.max(5, Math.min(99, at.progress_pct || 10));
+                      const durSec = at.duration_ms
+                        ? Math.max(1, Math.round(at.duration_ms / 1000))
+                        : 1;
+                      return (
+                        <div
+                          key={at.id}
+                          data-testid={
+                            idx === 0
+                              ? "debug-active-task-item"
+                              : `debug-running-task-${at.id}`
+                          }
+                          className="bg-amber-50/90 border border-amber-300 rounded-lg p-3 space-y-2"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="space-y-1 min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <RefreshCw className="w-3.5 h-3.5 text-amber-700 animate-spin shrink-0" />
+                                <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 font-mono text-[11px] font-bold">
+                                  #{at.id}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded border text-[11px] font-bold ${catBadge.cls}`}
+                                >
+                                  {lang === "sk" ? catBadge.labelSk : catBadge.labelEn}
+                                </span>
+                                {at.provider && (
+                                  <span className="px-2 py-0.5 rounded bg-stone-200 text-stone-800 font-mono text-[11px] font-semibold">
+                                    {at.provider === "freellm" ? "freellm (concurrent)" : "local"}
+                                  </span>
+                                )}
+                                {at.active_stage && (
+                                  <span className="px-2 py-0.5 rounded bg-amber-600 text-white font-mono text-[11px] font-bold">
+                                    {at.active_stage}
+                                  </span>
+                                )}
+                                {at.active_model && (
+                                  <span className="px-2 py-0.5 rounded bg-white border border-stone-300 text-stone-800 font-mono text-[11px]">
+                                    {at.active_model}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="font-bold text-sm text-stone-900">
+                                {lang === "sk" ? at.title_sk : at.title_en}
+                              </div>
+                              <div className="text-xs text-stone-700">
+                                {lang === "sk" ? at.message_sk : at.message_en}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {at.target_url && (
+                                <Link
+                                  to={at.target_url}
+                                  className="px-2.5 py-1 rounded-md bg-white hover:bg-stone-100 border border-stone-300 text-stone-800 text-xs font-semibold"
+                                >
+                                  {lang === "sk" ? "Otvoriť" : "Open"}
+                                </Link>
+                              )}
+                              <button
+                                type="button"
+                                data-testid={`debug-task-cancel-${at.id}`}
+                                disabled={busyTaskActionId === at.task_id}
+                                onClick={() => handleCancelQueuedOrActiveTask(at.task_id)}
+                                className="px-2.5 py-1 rounded-md bg-red-600 hover:bg-red-700 text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                <span>{lang === "sk" ? "Zastaviť" : "Stop"}</span>
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 pt-1">
+                            <div className="flex-1 bg-amber-200/80 rounded-full h-2 overflow-hidden border border-amber-300">
+                              <div
+                                className="bg-amber-600 h-full transition-all duration-300"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <span className="text-xs font-bold text-amber-950 shrink-0">
+                              {pct}% · {durSec} s
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Queued Waiting Tasks */}

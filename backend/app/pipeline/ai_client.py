@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 from functools import lru_cache
 import io
 import json
 import re
 import time
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, AsyncIterator, TypeVar
 
 import httpx
 from PIL import Image
@@ -354,6 +355,11 @@ class LocalAIClient:
         self._cached_freellm_probe: tuple[bool, list[dict[str, Any]], str | None] | None = None
         self._http_client: httpx.AsyncClient | None = None
         self._http_client_loop: asyncio.AbstractEventLoop | None = None
+        self._req_seq: int = 0
+        self._active_local_requests: int = 0
+        self._active_freellm_requests: int = 0
+        self._in_flight: dict[int, dict[str, Any]] = {}
+        self._local_waiters: list[dict[str, Any]] = []
 
     def _get_http_client(self) -> httpx.AsyncClient:
         loop = asyncio.get_running_loop()
@@ -364,10 +370,178 @@ class LocalAIClient:
         ):
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(120.0, connect=5.0),
-                limits=httpx.Limits(max_keepalive_connections=16, max_connections=32),
+                limits=httpx.Limits(max_keepalive_connections=64, max_connections=256),
             )
             self._http_client_loop = loop
         return self._http_client
+
+    def _cleanup_stale_concurrency_state(self) -> None:
+        for req_id, info in list(self._in_flight.items()):
+            lp = info.get("loop")
+            if lp is not None and lp.is_closed():
+                self._in_flight.pop(req_id, None)
+                if info.get("provider") == "freellm":
+                    self._active_freellm_requests = max(0, self._active_freellm_requests - 1)
+                else:
+                    self._active_local_requests = max(0, self._active_local_requests - 1)
+        for waiter in list(self._local_waiters):
+            lp = waiter.get("loop")
+            if lp is not None and lp.is_closed():
+                self._local_waiters.remove(waiter)
+
+    def _wake_local_waiters(self) -> None:
+        self._cleanup_stale_concurrency_state()
+        limit = max(1, int(getattr(settings, "local_max_concurrent", 5) or 5))
+        while self._local_waiters and self._active_local_requests < limit:
+            waiter = self._local_waiters.pop(0)
+            ev = waiter.get("event")
+            if ev is not None and not ev.is_set():
+                self._active_local_requests += 1
+                waiter["granted"] = True
+                ev.set()
+
+    def notify_concurrency_limit_changed(self) -> None:
+        self._wake_local_waiters()
+        try:
+            from backend.app.pipeline.task_queue import task_queue
+
+            task_queue.on_concurrency_limit_changed()
+        except Exception:
+            pass
+
+    def get_concurrency_state(self) -> dict[str, Any]:
+        self._cleanup_stale_concurrency_state()
+        limit = max(1, int(getattr(settings, "local_max_concurrent", 5) or 5))
+        now = time.time()
+        in_flight_list = [
+            {
+                "id": info["id"],
+                "provider": info["provider"],
+                "stage": info["stage"],
+                "model": info["model"],
+                "scan_id": info.get("scan_id"),
+                "row_id": info.get("row_id"),
+                "elapsed_ms": max(0, int((now - info["started_at"]) * 1000)),
+            }
+            for info in self._in_flight.values()
+        ]
+        waiting_list = [
+            {
+                "id": w["id"],
+                "provider": "local",
+                "stage": w["stage"],
+                "model": w["model"],
+                "scan_id": w.get("scan_id"),
+                "row_id": w.get("row_id"),
+                "queue_position": idx,
+                "waiting_ms": max(0, int((now - w["created_at"]) * 1000)),
+            }
+            for idx, w in enumerate(self._local_waiters, start=1)
+        ]
+        return {
+            "local_max_concurrent": limit,
+            "active_local_requests": self._active_local_requests,
+            "waiting_local_requests": len(self._local_waiters),
+            "active_freellm_requests": self._active_freellm_requests,
+            "freellm_queued_requests": 0,
+            "freellm_concurrent_unlimited": True,
+            "in_flight": in_flight_list,
+            "waiting": waiting_list,
+        }
+
+    def _broadcast_concurrency_change(self) -> None:
+        try:
+            from backend.app.pipeline.task_queue import task_queue
+
+            task_queue._broadcast_queue_sync()
+        except Exception:
+            pass
+
+    @asynccontextmanager
+    async def _acquire_model_slot(
+        self,
+        *,
+        provider: str,
+        stage: str,
+        model: str,
+        scan_id: int | None = None,
+        row_id: int | None = None,
+    ) -> AsyncIterator[None]:
+        self._cleanup_stale_concurrency_state()
+        loop = asyncio.get_running_loop()
+        self._req_seq += 1
+        req_id = self._req_seq
+
+        if provider == "freellm":
+            # FreeLLM / Cloud API requests are never queued: send them immediately & concurrently!
+            self._active_freellm_requests += 1
+            self._in_flight[req_id] = {
+                "id": req_id,
+                "provider": "freellm",
+                "stage": stage,
+                "model": model,
+                "scan_id": scan_id,
+                "row_id": row_id,
+                "started_at": time.time(),
+                "loop": loop,
+            }
+            self._broadcast_concurrency_change()
+            try:
+                yield
+            finally:
+                self._in_flight.pop(req_id, None)
+                self._active_freellm_requests = max(0, self._active_freellm_requests - 1)
+                self._broadcast_concurrency_change()
+            return
+
+        # Local model requests: enforce concurrency limit (default 5)
+        limit = max(1, int(getattr(settings, "local_max_concurrent", 5) or 5))
+        if self._active_local_requests < limit and not self._local_waiters:
+            self._active_local_requests += 1
+        else:
+            ev = asyncio.Event()
+            waiter_entry: dict[str, Any] = {
+                "id": req_id,
+                "event": ev,
+                "loop": loop,
+                "stage": stage,
+                "model": model,
+                "scan_id": scan_id,
+                "row_id": row_id,
+                "created_at": time.time(),
+                "granted": False,
+            }
+            self._local_waiters.append(waiter_entry)
+            self._broadcast_concurrency_change()
+            try:
+                await ev.wait()
+            except BaseException:
+                if waiter_entry in self._local_waiters:
+                    self._local_waiters.remove(waiter_entry)
+                elif waiter_entry.get("granted"):
+                    self._active_local_requests = max(0, self._active_local_requests - 1)
+                    self._wake_local_waiters()
+                self._broadcast_concurrency_change()
+                raise
+
+        self._in_flight[req_id] = {
+            "id": req_id,
+            "provider": "local",
+            "stage": stage,
+            "model": model,
+            "scan_id": scan_id,
+            "row_id": row_id,
+            "started_at": time.time(),
+            "loop": loop,
+        }
+        self._broadcast_concurrency_change()
+        try:
+            yield
+        finally:
+            self._in_flight.pop(req_id, None)
+            self._active_local_requests = max(0, self._active_local_requests - 1)
+            self._wake_local_waiters()
+            self._broadcast_concurrency_change()
 
     def _resolve_endpoint(self) -> tuple[str, str, str, dict[str, str], str]:
         cfg = settings.get_ai_runtime_config()
@@ -494,6 +668,8 @@ class LocalAIClient:
             "stages": stages,
             "configured": configured,
             "models": active_models,
+            "local_max_concurrent": max(1, int(getattr(settings, "local_max_concurrent", 5) or 5)),
+            "concurrency": self.get_concurrency_state(),
         }
         if primary_err and not online:
             result["error"] = primary_err
@@ -590,131 +766,138 @@ class LocalAIClient:
         image_rejected_by_endpoint = False
 
         try:
-            client = self._get_http_client()
-            resp = await client.post(
-                f"{base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=timeout_sec,
-            )
-            if resp.status_code >= 400 and (
-                "reasoning_effort" in payload
-                or "response_format" in payload
-                or (messages and messages[-1].get("role") == "assistant")
+            async with self._acquire_model_slot(
+                provider=provider,
+                stage=stage,
+                model=active_model,
+                scan_id=scan_id,
+                row_id=row_id,
             ):
-                fallback_messages = [m for m in messages if m.get("role") != "assistant"]
-                fallback_payload = {
-                    k: v for k, v in payload.items() if k not in ("reasoning_effort", "response_format")
-                }
-                fallback_payload["messages"] = fallback_messages
+                client = self._get_http_client()
                 resp = await client.post(
                     f"{base_url}/chat/completions",
-                    json=fallback_payload,
+                    json=payload,
                     headers=headers,
                     timeout=timeout_sec,
                 )
-            if resp.status_code >= 400 and has_image:
-                # Graceful fallback to text-only prompt if a text-only LLM endpoint rejects image_url
-                image_rejected_by_endpoint = True
-                text_only_messages = [
-                    {"role": "user", "content": prompt}
-                    if m.get("role") == "user" and isinstance(m.get("content"), list)
-                    else m
-                    for m in messages
-                    if m.get("role") != "assistant"
-                ]
-                text_only_payload = {
-                    k: v
-                    for k, v in payload.items()
-                    if k not in ("reasoning_effort", "response_format")
-                }
-                text_only_payload["messages"] = text_only_messages
-                resp = await client.post(
-                    f"{base_url}/chat/completions",
-                    json=text_only_payload,
-                    headers=headers,
-                    timeout=timeout_sec,
-                )
-            resp.raise_for_status()
-            data = resp.json()
-
-            choice = (data.get("choices") or [{}])[0]
-            msg = choice.get("message") or {}
-            raw_content = msg.get("content") or ""
-            api_reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
-            content, reasoning = split_thinking_and_content(
-                raw_content,
-                api_reasoning,
-                expect_json=(response_model is not None),
-            )
-            usage = data.get("usage") or {}
-            prompt_tokens = int(usage.get("prompt_tokens") or 0)
-            completion_tokens = int(usage.get("completion_tokens") or 0)
-            details = usage.get("completion_tokens_details") or {}
-            reasoning_tokens = int(details.get("reasoning_tokens") or 0)
-
-            parsed = extract_json_object(content, response_model=response_model)
-
-            # Retry once with higher max_tokens & explicit JSON-only instruction if response_model is required
-            # and the model returned only thinking prose without a JSON object
-            if response_model is not None and not parsed:
-                retry_prompt_text = (
-                    f"{prompt}\n\n"
-                    "CRITICAL: Do NOT write any reasoning or explanation. "
-                    "Output ONLY the raw JSON object immediately."
-                )
-                retry_user_content: Any = (
-                    [
-                        {"type": "text", "text": retry_prompt_text},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}},
-                    ]
-                    if (has_image and b64_img and not image_rejected_by_endpoint)
-                    else retry_prompt_text
-                )
-                retry_messages = [
-                    {
-                        "role": "user",
-                        "content": retry_user_content,
+                if resp.status_code >= 400 and (
+                    "reasoning_effort" in payload
+                    or "response_format" in payload
+                    or (messages and messages[-1].get("role") == "assistant")
+                ):
+                    fallback_messages = [m for m in messages if m.get("role") != "assistant"]
+                    fallback_payload = {
+                        k: v for k, v in payload.items() if k not in ("reasoning_effort", "response_format")
                     }
-                    if m.get("role") == "user"
-                    else m
-                    for m in messages
-                    if m.get("role") != "assistant"
-                ]
-                retry_payload = {
-                    k: v
-                    for k, v in payload.items()
-                    if k not in ("reasoning_effort", "response_format")
-                }
-                retry_payload["messages"] = retry_messages
-                retry_payload["max_tokens"] = max(effective_max_tokens, 3500)
-                r_resp = await client.post(
-                    f"{base_url}/chat/completions",
-                    json=retry_payload,
-                    headers=headers,
-                    timeout=timeout_sec,
-                )
-                if r_resp.status_code == 200:
-                    r_data = r_resp.json()
-                    r_choice = (r_data.get("choices") or [{}])[0]
-                    r_msg = r_choice.get("message") or {}
-                    r_raw_content = r_msg.get("content") or ""
-                    r_api_reasoning = r_msg.get("reasoning_content") or r_msg.get("reasoning") or ""
-                    r_content, r_reasoning = split_thinking_and_content(
-                        r_raw_content,
-                        r_api_reasoning,
-                        expect_json=True,
+                    fallback_payload["messages"] = fallback_messages
+                    resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        json=fallback_payload,
+                        headers=headers,
+                        timeout=timeout_sec,
                     )
-                    r_parsed = extract_json_object(r_content, response_model=response_model)
-                    if r_parsed:
-                        content = r_content
-                        reasoning = "\n\n".join(p for p in (reasoning, r_reasoning) if p).strip()
-                        parsed = r_parsed
-                        r_usage = r_data.get("usage") or {}
-                        prompt_tokens += int(r_usage.get("prompt_tokens") or 0)
-                        completion_tokens += int(r_usage.get("completion_tokens") or 0)
-                        r_details = r_usage.get("completion_tokens_details") or {}
-                        reasoning_tokens += int(r_details.get("reasoning_tokens") or 0)
+                if resp.status_code >= 400 and has_image:
+                    # Graceful fallback to text-only prompt if a text-only LLM endpoint rejects image_url
+                    image_rejected_by_endpoint = True
+                    text_only_messages = [
+                        {"role": "user", "content": prompt}
+                        if m.get("role") == "user" and isinstance(m.get("content"), list)
+                        else m
+                        for m in messages
+                        if m.get("role") != "assistant"
+                    ]
+                    text_only_payload = {
+                        k: v
+                        for k, v in payload.items()
+                        if k not in ("reasoning_effort", "response_format")
+                    }
+                    text_only_payload["messages"] = text_only_messages
+                    resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        json=text_only_payload,
+                        headers=headers,
+                        timeout=timeout_sec,
+                    )
+                resp.raise_for_status()
+                data = resp.json()
+
+                choice = (data.get("choices") or [{}])[0]
+                msg = choice.get("message") or {}
+                raw_content = msg.get("content") or ""
+                api_reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+                content, reasoning = split_thinking_and_content(
+                    raw_content,
+                    api_reasoning,
+                    expect_json=(response_model is not None),
+                )
+                usage = data.get("usage") or {}
+                prompt_tokens = int(usage.get("prompt_tokens") or 0)
+                completion_tokens = int(usage.get("completion_tokens") or 0)
+                details = usage.get("completion_tokens_details") or {}
+                reasoning_tokens = int(details.get("reasoning_tokens") or 0)
+
+                parsed = extract_json_object(content, response_model=response_model)
+
+                # Retry once with higher max_tokens & explicit JSON-only instruction if response_model is required
+                # and the model returned only thinking prose without a JSON object
+                if response_model is not None and not parsed:
+                    retry_prompt_text = (
+                        f"{prompt}\n\n"
+                        "CRITICAL: Do NOT write any reasoning or explanation. "
+                        "Output ONLY the raw JSON object immediately."
+                    )
+                    retry_user_content: Any = (
+                        [
+                            {"type": "text", "text": retry_prompt_text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}},
+                        ]
+                        if (has_image and b64_img and not image_rejected_by_endpoint)
+                        else retry_prompt_text
+                    )
+                    retry_messages = [
+                        {
+                            "role": "user",
+                            "content": retry_user_content,
+                        }
+                        if m.get("role") == "user"
+                        else m
+                        for m in messages
+                        if m.get("role") != "assistant"
+                    ]
+                    retry_payload = {
+                        k: v
+                        for k, v in payload.items()
+                        if k not in ("reasoning_effort", "response_format")
+                    }
+                    retry_payload["messages"] = retry_messages
+                    retry_payload["max_tokens"] = max(effective_max_tokens, 3500)
+                    r_resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        json=retry_payload,
+                        headers=headers,
+                        timeout=timeout_sec,
+                    )
+                    if r_resp.status_code == 200:
+                        r_data = r_resp.json()
+                        r_choice = (r_data.get("choices") or [{}])[0]
+                        r_msg = r_choice.get("message") or {}
+                        r_raw_content = r_msg.get("content") or ""
+                        r_api_reasoning = r_msg.get("reasoning_content") or r_msg.get("reasoning") or ""
+                        r_content, r_reasoning = split_thinking_and_content(
+                            r_raw_content,
+                            r_api_reasoning,
+                            expect_json=True,
+                        )
+                        r_parsed = extract_json_object(r_content, response_model=response_model)
+                        if r_parsed:
+                            content = r_content
+                            reasoning = "\n\n".join(p for p in (reasoning, r_reasoning) if p).strip()
+                            parsed = r_parsed
+                            r_usage = r_data.get("usage") or {}
+                            prompt_tokens += int(r_usage.get("prompt_tokens") or 0)
+                            completion_tokens += int(r_usage.get("completion_tokens") or 0)
+                            r_details = r_usage.get("completion_tokens_details") or {}
+                            reasoning_tokens += int(r_details.get("reasoning_tokens") or 0)
 
             if response_model is not None:
                 if parsed:

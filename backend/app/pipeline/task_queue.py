@@ -5,7 +5,37 @@ from contextvars import ContextVar
 import time
 from typing import Any, Awaitable, Callable
 
+from backend.app.config import settings
+
 _ACTIVE_QUEUE_TASK_ID: ContextVar[int | None] = ContextVar("_ACTIVE_QUEUE_TASK_ID", default=None)
+
+
+def _resolve_task_provider(
+    *,
+    explicit_provider: str | None = None,
+    category: str = "ocr",
+    initial_stage: str = "ocr",
+    active_model: str | None = None,
+) -> str:
+    if explicit_provider in ("freellm", "local"):
+        return explicit_provider
+    mod_str = str(active_model or "").strip().lower()
+    if mod_str.startswith("freellm:"):
+        return "freellm"
+    if mod_str.startswith("local:"):
+        return "local"
+    if category in ("ocr", "debug"):
+        try:
+            if initial_stage in ("extract", "ocr", "decision"):
+                resolved = settings.resolve_stage_ai(initial_stage, requested_model=active_model)
+                return str(resolved.get("provider") or "local")
+            # Full scan/sheet/batch pipeline task: check extract stage (and overall provider)
+            ext_res = settings.resolve_stage_ai("extract")
+            if ext_res.get("provider") == "freellm":
+                return "freellm"
+        except Exception:
+            pass
+    return "local"
 
 
 class TaskQueueItem:
@@ -17,6 +47,7 @@ class TaskQueueItem:
         category: str,
         title_sk: str,
         title_en: str,
+        provider: str = "local",
         initial_stage: str = "queued",
         active_model: str | None = None,
         target_url: str | None = None,
@@ -27,6 +58,7 @@ class TaskQueueItem:
         self.task_id: str = f"task-{task_num}"
         self.task_type: str = task_type
         self.category: str = category
+        self.provider: str = provider
         self.title_sk: str = title_sk
         self.title_en: str = title_en
         self.status: str = "queued"  # queued, running, completed, cancelled, paused, error
@@ -35,8 +67,8 @@ class TaskQueueItem:
         self.progress_pct: int = 0
         self.active_stage: str = initial_stage
         self.active_model: str | None = active_model
-        self.message_sk: str = "Čaká vo fronte na dokončenie prebiehajúcej úlohy…"
-        self.message_en: str = "Waiting in queue for ongoing task to complete…"
+        self.message_sk: str = "Čaká vo fronte na uvoľnenie kapacity lokálneho modelu…"
+        self.message_en: str = "Waiting in queue for local model concurrency slot…"
         self.target_url: str | None = target_url
         self.metadata: dict[str, Any] = dict(metadata or {})
         self.created_at: float = time.time()
@@ -62,6 +94,7 @@ class TaskQueueItem:
             "task_id": self.task_id,
             "task_type": self.task_type,
             "category": self.category,
+            "provider": self.provider,
             "title_sk": self.title_sk,
             "title_en": self.title_en,
             "status": self.status,
@@ -84,34 +117,59 @@ class TaskQueueItem:
 
 class TaskQueueManager:
     """
-    Centralized FIFO / priority task queue for OCR pipelines, Slovakiana jobs,
-    and FamilySearch MCP pairing. Ensures tasks created while another is ongoing
-    are queued rather than cancelling or overwriting the active task.
+    Provider-aware task scheduler & queue:
+    - FreeLLM (`provider == "freellm"`) requests/tasks are NEVER queued: they start immediately
+      as they come and execute concurrently.
+    - Local model (`provider == "local"`) requests/tasks are bounded by `settings.local_max_concurrent`
+      (default 5 concurrent requests), queueing excess tasks in FIFO / priority order.
     """
 
     def __init__(self) -> None:
         self._seq: int = 0
-        self._running_task_id: int | None = None
-        self._running_loop: asyncio.AbstractEventLoop | None = None
+        self._running_ids: list[int] = []
         self._items_by_id: dict[int, TaskQueueItem] = {}
         self._waiting_ids: list[int] = []
         self._history: list[TaskQueueItem] = []
         self._max_history: int = 50
+
+    def _get_local_limit(self) -> int:
+        return max(1, int(getattr(settings, "local_max_concurrent", 5) or 5))
+
+    def _running_local_count(self) -> int:
+        cnt = 0
+        for tid in self._running_ids:
+            it = self._items_by_id.get(tid)
+            if it and it.provider != "freellm":
+                cnt += 1
+        return cnt
 
     def is_inside_active_task(self) -> bool:
         cur_id = _ACTIVE_QUEUE_TASK_ID.get()
         if cur_id is None:
             return False
         self._cleanup_stale_loop_state()
-        return cur_id == self._running_task_id
+        return cur_id in self._running_ids
 
     @property
     def running_task_id(self) -> int | None:
         self._cleanup_stale_loop_state()
-        return self._running_task_id
+        return self._running_ids[0] if self._running_ids else None
 
     def has_running_task(self) -> bool:
-        return self.running_task_id is not None
+        self._cleanup_stale_loop_state()
+        return len(self._running_ids) > 0
+
+    def get_other_running_task(self) -> TaskQueueItem | None:
+        """
+        Returns another currently running task (different from the calling task's ContextVar, if any),
+        so `ws_manager` does not flip to `idle` when one task finishes while another is still running.
+        """
+        self._cleanup_stale_loop_state()
+        cur_id = _ACTIVE_QUEUE_TASK_ID.get()
+        for tid in self._running_ids:
+            if tid != cur_id and tid in self._items_by_id:
+                return self._items_by_id[tid]
+        return None
 
     def is_current_task_cancelled(self) -> bool:
         cur_id = _ACTIVE_QUEUE_TASK_ID.get()
@@ -125,22 +183,26 @@ class TaskQueueManager:
         In unit tests that call `asyncio.run()` multiple times, a previous event loop
         may have closed. Clean up any orphaned state bound to a closed loop.
         """
-        if self._running_loop is not None and self._running_loop.is_closed():
-            if self._running_task_id is not None:
-                stale = self._items_by_id.pop(self._running_task_id, None)
-                if stale and stale.status == "running":
-                    stale.status = "cancelled"
-                    stale.finished_at = time.time()
-                    self._append_history(stale)
-            for wid in list(self._waiting_ids):
-                w_item = self._items_by_id.pop(wid, None)
-                if w_item and w_item._loop is not None and w_item._loop.is_closed():
-                    w_item.status = "cancelled"
-                    w_item.finished_at = time.time()
-                    self._append_history(w_item)
-                    self._waiting_ids.remove(wid)
-            self._running_task_id = None
-            self._running_loop = None
+        for r_id in list(self._running_ids):
+            r_item = self._items_by_id.get(r_id)
+            if r_item is None:
+                self._running_ids.remove(r_id)
+            elif r_item._loop is not None and r_item._loop.is_closed():
+                self._items_by_id.pop(r_id, None)
+                self._running_ids.remove(r_id)
+                r_item.status = "cancelled"
+                r_item.finished_at = time.time()
+                self._append_history(r_item)
+        for wid in list(self._waiting_ids):
+            w_item = self._items_by_id.get(wid)
+            if w_item is None:
+                self._waiting_ids.remove(wid)
+            elif w_item._loop is not None and w_item._loop.is_closed():
+                self._items_by_id.pop(wid, None)
+                self._waiting_ids.remove(wid)
+                w_item.status = "cancelled"
+                w_item.finished_at = time.time()
+                self._append_history(w_item)
 
     def _append_history(self, item: TaskQueueItem) -> None:
         item.queue_position = None
@@ -163,12 +225,18 @@ class TaskQueueManager:
         self._cleanup_stale_loop_state()
         return len(self._waiting_ids)
 
-    def get_active_task_summary(self) -> dict[str, Any] | None:
+    def get_running_tasks_list(self) -> list[dict[str, Any]]:
         self._cleanup_stale_loop_state()
-        if self._running_task_id is None:
-            return None
-        item = self._items_by_id.get(self._running_task_id)
-        return item.to_dict(queue_position=0) if item else None
+        out: list[dict[str, Any]] = []
+        for tid in self._running_ids:
+            it = self._items_by_id.get(tid)
+            if it:
+                out.append(it.to_dict(queue_position=0))
+        return out
+
+    def get_active_task_summary(self) -> dict[str, Any] | None:
+        running = self.get_running_tasks_list()
+        return running[0] if running else None
 
     def get_queued_tasks_list(self) -> list[dict[str, Any]]:
         self._cleanup_stale_loop_state()
@@ -182,7 +250,7 @@ class TaskQueueManager:
 
     def is_census_job_active_or_queued(self, job_id: int) -> bool:
         self._cleanup_stale_loop_state()
-        for tid, item in self._items_by_id.items():
+        for item in self._items_by_id.values():
             if item.metadata.get("job_id") == job_id and item.status in ("queued", "running"):
                 return True
         return False
@@ -207,12 +275,10 @@ class TaskQueueManager:
             for tid in self._waiting_ids
             if tid in self._items_by_id and self._items_by_id[tid].category == "familysearch"
         ]
-        running_fs = (
-            self._items_by_id.get(self._running_task_id)
-            if self._running_task_id is not None
-            else None
+        is_running_fs = any(
+            tid in self._items_by_id and self._items_by_id[tid].category == "familysearch"
+            for tid in self._running_ids
         )
-        is_running_fs = bool(running_fs and running_fs.category == "familysearch")
         return {
             "queued": len(queued_fs) > 0,
             "queued_count": len(queued_fs),
@@ -223,7 +289,8 @@ class TaskQueueManager:
     def get_snapshot(self) -> dict[str, Any]:
         self._cleanup_stale_loop_state()
         self._sort_waiting_ids()
-        active_dict = self.get_active_task_summary()
+        running_list = self.get_running_tasks_list()
+        active_dict = running_list[0] if running_list else None
         queued_list = self.get_queued_tasks_list()
         history_list = [h.to_dict(queue_position=None) for h in self._history]
 
@@ -231,28 +298,73 @@ class TaskQueueManager:
         cancelled_cnt = sum(1 for h in self._history if h.status in ("cancelled", "paused"))
         error_cnt = sum(1 for h in self._history if h.status == "error")
 
+        ai_conc: dict[str, Any] = {
+            "local_max_concurrent": self._get_local_limit(),
+            "active_local_requests": 0,
+            "waiting_local_requests": 0,
+            "active_freellm_requests": 0,
+            "freellm_queued_requests": 0,
+            "freellm_concurrent_unlimited": True,
+            "in_flight": [],
+            "waiting": [],
+        }
+        try:
+            from backend.app.pipeline.ai_client import ai_client
+
+            ai_conc = ai_client.get_concurrency_state()
+        except Exception:
+            pass
+
         return {
             "active_task": active_dict,
+            "running_tasks": running_list,
             "queued_tasks": queued_list,
             "history": history_list,
+            "concurrency": ai_conc,
             "counts": {
-                "running": 1 if active_dict is not None else 0,
+                "running": len(running_list),
                 "queued": len(queued_list),
                 "completed": completed_cnt,
                 "cancelled": cancelled_cnt,
                 "error": error_cnt,
-                "total_active_and_queued": (1 if active_dict is not None else 0) + len(queued_list),
+                "total_active_and_queued": len(running_list) + len(queued_list),
+                "local_max_concurrent": ai_conc["local_max_concurrent"],
+                "active_local_requests": ai_conc["active_local_requests"],
+                "waiting_local_requests": ai_conc["waiting_local_requests"],
+                "active_freellm_requests": ai_conc["active_freellm_requests"],
             },
         }
 
     def on_pipeline_state_update(self, payload: dict[str, Any]) -> None:
-        """Called by `ws_manager.broadcast('state', payload)` to keep the active task synced."""
+        """Called by `ws_manager.broadcast('state', payload)` to keep the running task synced."""
         self._cleanup_stale_loop_state()
-        if self._running_task_id is None:
+        if not self._running_ids:
             return
-        item = self._items_by_id.get(self._running_task_id)
+        cur_id = _ACTIVE_QUEUE_TASK_ID.get()
+        item: TaskQueueItem | None = None
+        if cur_id is not None and cur_id in self._items_by_id:
+            item = self._items_by_id[cur_id]
+        else:
+            # Match by sheet_id / scan_id / job_id if available, else primary running task
+            p_sheet = payload.get("current_sheet_id")
+            p_scan = payload.get("current_scan_id")
+            p_job = payload.get("job_id")
+            for tid in self._running_ids:
+                cand = self._items_by_id.get(tid)
+                if not cand:
+                    continue
+                if (
+                    (p_job is not None and cand.metadata.get("job_id") == p_job)
+                    or (p_sheet is not None and cand.metadata.get("sheet_id") == p_sheet)
+                    or (p_scan is not None and cand.metadata.get("scan_id") == p_scan)
+                ):
+                    item = cand
+                    break
+            if item is None:
+                item = self._items_by_id.get(self._running_ids[0])
         if not item:
             return
+
         stage = payload.get("active_stage")
         if stage and stage != "idle":
             item.active_stage = str(stage)
@@ -291,6 +403,7 @@ class TaskQueueManager:
             snap = self.get_snapshot()
             ws_manager.latest_state["queued_count"] = snap["counts"]["queued"]
             ws_manager.latest_state["active_task"] = snap["active_task"]
+            ws_manager.latest_state["running_tasks"] = snap["running_tasks"]
             ws_manager.latest_state["queued_tasks"] = snap["queued_tasks"]
             ws_manager.broadcast_sync("task_queue", snap)
         except Exception:
@@ -303,6 +416,7 @@ class TaskQueueManager:
         category: str,
         title_sk: str,
         title_en: str,
+        provider: str | None = None,
         initial_stage: str = "ocr",
         active_model: str | None = None,
         target_url: str | None = None,
@@ -310,6 +424,12 @@ class TaskQueueManager:
         priority: int = 10,
     ) -> TaskQueueItem:
         self._cleanup_stale_loop_state()
+        resolved_provider = _resolve_task_provider(
+            explicit_provider=provider,
+            category=category,
+            initial_stage=initial_stage,
+            active_model=active_model,
+        )
         self._seq += 1
         item = TaskQueueItem(
             task_num=self._seq,
@@ -317,6 +437,7 @@ class TaskQueueManager:
             category=category,
             title_sk=title_sk,
             title_en=title_en,
+            provider=resolved_provider,
             initial_stage=initial_stage,
             active_model=active_model,
             target_url=target_url,
@@ -331,9 +452,14 @@ class TaskQueueManager:
             loop = None
 
         self._items_by_id[item.id] = item
-        if self._running_task_id is None and not self._waiting_ids:
-            self._running_task_id = item.id
-            self._running_loop = loop
+        local_limit = self._get_local_limit()
+        can_start_immediately = (
+            resolved_provider == "freellm"
+            or (self._running_local_count() < local_limit and not self._waiting_ids)
+        )
+
+        if can_start_immediately:
+            self._running_ids.append(item.id)
             item.status = "running"
             item.queue_position = 0
             item.started_at = time.time()
@@ -350,8 +476,12 @@ class TaskQueueManager:
             self._waiting_ids.append(item.id)
             self._sort_waiting_ids()
             pos = item.queue_position or len(self._waiting_ids)
-            item.message_sk = f"Vo fronte (#{pos}) – čaká na dokončenie prebiehajúcej úlohy…"
-            item.message_en = f"Queued (#{pos}) – waiting for ongoing task to complete…"
+            item.message_sk = (
+                f"Vo fronte (#{pos}) – čaká na uvoľnenie slotu lokálneho modelu (limit {local_limit})…"
+            )
+            item.message_en = (
+                f"Queued (#{pos}) – waiting for local model concurrency slot (limit {local_limit})…"
+            )
 
         self._broadcast_queue_sync()
         if item.category == "familysearch" and item.status == "queued":
@@ -389,8 +519,8 @@ class TaskQueueManager:
                 raise asyncio.CancelledError(f"Task {item.task_id} was cancelled")
 
             # Transition from queued -> running
-            self._running_task_id = item.id
-            self._running_loop = loop
+            if item.id not in self._running_ids:
+                self._running_ids.append(item.id)
             item.status = "running"
             item.queue_position = 0
             if item.started_at is None:
@@ -401,33 +531,33 @@ class TaskQueueManager:
             item.message_en = f"Running: {item.title_en}…"
             self._broadcast_queue_sync()
 
-            # Reset task-specific context in ws_manager so fields from the previous task don't leak
-            try:
-                from backend.app.api.ws import ws_manager
+            if self._running_ids and self._running_ids[0] == item.id:
+                try:
+                    from backend.app.api.ws import ws_manager
 
-                await ws_manager.broadcast(
-                    "state",
-                    {
-                        "_from_task_queue": True,
-                        "active_stage": initial_stage,
-                        "active_model": item.active_model,
-                        "current_scan_id": item.metadata.get("scan_id"),
-                        "current_row_id": item.metadata.get("row_id"),
-                        "current_row_index": None,
-                        "total_rows": None,
-                        "current_sheet_id": item.metadata.get("sheet_id"),
-                        "current_slovakiana_key": item.metadata.get("slovakiana_key"),
-                        "current_sheet_label": item.metadata.get("sheet_label"),
-                        "job_id": item.metadata.get("job_id"),
-                        "job_sheet_index": None,
-                        "job_total_sheets": None,
-                        "progress_pct": item.progress_pct,
-                        "message_sk": item.message_sk,
-                        "message_en": item.message_en,
-                    },
-                )
-            except Exception:
-                pass
+                    await ws_manager.broadcast(
+                        "state",
+                        {
+                            "_from_task_queue": True,
+                            "active_stage": initial_stage,
+                            "active_model": item.active_model,
+                            "current_scan_id": item.metadata.get("scan_id"),
+                            "current_row_id": item.metadata.get("row_id"),
+                            "current_row_index": None,
+                            "total_rows": None,
+                            "current_sheet_id": item.metadata.get("sheet_id"),
+                            "current_slovakiana_key": item.metadata.get("slovakiana_key"),
+                            "current_sheet_label": item.metadata.get("sheet_label"),
+                            "job_id": item.metadata.get("job_id"),
+                            "job_sheet_index": None,
+                            "job_total_sheets": None,
+                            "progress_pct": item.progress_pct,
+                            "message_sk": item.message_sk,
+                            "message_en": item.message_en,
+                        },
+                    )
+                except Exception:
+                    pass
 
             token = _ACTIVE_QUEUE_TASK_ID.set(item.id)
             try:
@@ -493,19 +623,32 @@ class TaskQueueManager:
             self._items_by_id.pop(item.id, None)
             if item.id in self._waiting_ids:
                 self._waiting_ids.remove(item.id)
+            if item.id in self._running_ids:
+                self._running_ids.remove(item.id)
             self._append_history(item)
 
-            if self._running_task_id == item.id:
-                self._running_task_id = None
-                self._running_loop = None
-                self._advance_next_waiting_task()
-
+            self._advance_next_waiting_task()
             self._broadcast_queue_sync()
 
     def _advance_next_waiting_task(self) -> None:
         self._sort_waiting_ids()
+        local_limit = self._get_local_limit()
         while self._waiting_ids:
-            next_id = self._waiting_ids.pop(0)
+            # Find the first waiting task that can run (freellm tasks can always run; local tasks respect local_limit)
+            picked_idx: int | None = None
+            for idx, cand_id in enumerate(self._waiting_ids):
+                cand = self._items_by_id.get(cand_id)
+                if not cand or cand.cancel_requested or cand.status == "cancelled":
+                    picked_idx = idx
+                    break
+                if cand.provider == "freellm" or self._running_local_count() < local_limit:
+                    picked_idx = idx
+                    break
+
+            if picked_idx is None:
+                break
+
+            next_id = self._waiting_ids.pop(picked_idx)
             next_item = self._items_by_id.get(next_id)
             if not next_item or next_item.cancel_requested or next_item.status == "cancelled":
                 if next_item:
@@ -514,21 +657,46 @@ class TaskQueueManager:
                     self._items_by_id.pop(next_id, None)
                     self._append_history(next_item)
                 continue
-            self._running_task_id = next_item.id
-            self._running_loop = next_item._loop
+
+            if next_item.id not in self._running_ids:
+                self._running_ids.append(next_item.id)
             next_item.status = "running"
             next_item.queue_position = 0
             next_item.started_at = time.time()
             self._sort_waiting_ids()
             if next_item._turn_event is not None:
                 next_item._turn_event.set()
-            return
 
-        # No more waiting tasks -> ensure ws_manager state is idle if it was left non-idle
+        # If another task is still running, keep ws_manager reflecting it; otherwise mark idle
         try:
             from backend.app.api.ws import ws_manager
 
-            if ws_manager.latest_state.get("active_stage") not in (None, "idle"):
+            if self._running_ids:
+                rem = self._items_by_id.get(self._running_ids[0])
+                if rem:
+                    ws_manager.broadcast_sync(
+                        "state",
+                        {
+                            "_from_task_queue": True,
+                            "active_stage": rem.active_stage if rem.active_stage != "queued" else "ocr",
+                            "active_model": rem.active_model,
+                            "current_scan_id": rem.metadata.get("current_scan_id")
+                            or rem.metadata.get("scan_id"),
+                            "current_row_id": rem.metadata.get("current_row_id")
+                            or rem.metadata.get("row_id"),
+                            "current_sheet_id": rem.metadata.get("current_sheet_id")
+                            or rem.metadata.get("sheet_id"),
+                            "current_slovakiana_key": rem.metadata.get("current_slovakiana_key")
+                            or rem.metadata.get("slovakiana_key"),
+                            "current_sheet_label": rem.metadata.get("current_sheet_label")
+                            or rem.metadata.get("sheet_label"),
+                            "job_id": rem.metadata.get("job_id"),
+                            "progress_pct": max(5, rem.progress_pct),
+                            "message_sk": rem.message_sk,
+                            "message_en": rem.message_en,
+                        },
+                    )
+            elif not self._waiting_ids and ws_manager.latest_state.get("active_stage") not in (None, "idle"):
                 ws_manager.broadcast_sync(
                     "state",
                     {
@@ -543,6 +711,11 @@ class TaskQueueManager:
         except Exception:
             pass
 
+    def on_concurrency_limit_changed(self) -> None:
+        self._cleanup_stale_loop_state()
+        self._advance_next_waiting_task()
+        self._broadcast_queue_sync()
+
     async def run_or_enqueue(
         self,
         coro_fn: Callable[[], Awaitable[Any]],
@@ -551,6 +724,7 @@ class TaskQueueManager:
         category: str = "ocr",
         title_sk: str,
         title_en: str,
+        provider: str | None = None,
         initial_stage: str = "ocr",
         active_model: str | None = None,
         target_url: str | None = None,
@@ -559,8 +733,9 @@ class TaskQueueManager:
     ) -> Any:
         """
         If called from inside an already-running task on this async context, runs `coro_fn` inline.
-        Otherwise registers a new task in the queue, waits for its turn if another task is ongoing,
-        and executes it shielded from HTTP client disconnect.
+        Otherwise registers a new task:
+        - `freellm` tasks start immediately and concurrently without queueing.
+        - `local` tasks run concurrently up to `settings.local_max_concurrent` (default 5) and queue beyond that.
         """
         if self.is_inside_active_task():
             return await coro_fn()
@@ -570,6 +745,7 @@ class TaskQueueManager:
             category=category,
             title_sk=title_sk,
             title_en=title_en,
+            provider=provider,
             initial_stage=initial_stage,
             active_model=active_model,
             target_url=target_url,
@@ -591,6 +767,7 @@ class TaskQueueManager:
         category: str = "ocr",
         title_sk: str,
         title_en: str,
+        provider: str | None = None,
         initial_stage: str = "ocr",
         active_model: str | None = None,
         target_url: str | None = None,
@@ -598,7 +775,7 @@ class TaskQueueManager:
         priority: int = 10,
     ) -> dict[str, Any]:
         """
-        Synchronously registers a task in the queue (so it is immediately visible in `/api/debug/tasks`
+        Synchronously registers a task (so it is immediately visible in `/api/debug/tasks`
         and `/api/status`) and schedules its execution in the background event loop.
         """
         item = self._register_task_item(
@@ -606,6 +783,7 @@ class TaskQueueManager:
             category=category,
             title_sk=title_sk,
             title_en=title_en,
+            provider=provider,
             initial_stage=initial_stage,
             active_model=active_model,
             target_url=target_url,
@@ -722,13 +900,13 @@ class TaskQueueManager:
         item.priority = min_prio - 1
         self._sort_waiting_ids()
         pos = item.queue_position or 1
-        item.message_sk = f"Vo fronte (#{pos}, prednostne) – čaká na dokončenie prebiehajúcej úlohy…"
-        item.message_en = f"Queued (#{pos}, prioritized) – waiting for ongoing task to complete…"
+        item.message_sk = f"Vo fronte (#{pos}, prednostne) – čaká na uvoľnenie slotu…"
+        item.message_en = f"Queued (#{pos}, prioritized) – waiting for slot…"
         self._broadcast_queue_sync()
         return item.to_dict()
 
     def clear_queued_tasks(self) -> int:
-        """Cancels all waiting queued tasks without stopping the currently running task."""
+        """Cancels all waiting queued tasks without stopping currently running tasks."""
         self._cleanup_stale_loop_state()
         waiting_copy = list(self._waiting_ids)
         for tid in waiting_copy:

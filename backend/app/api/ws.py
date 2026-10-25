@@ -86,9 +86,41 @@ class ConnectionManager:
                 ):
                     return
                 task_queue.on_pipeline_state_update(payload)
+                if payload.get("active_stage") == "idle" and not from_queue:
+                    other_running = task_queue.get_other_running_task()
+                    if other_running is not None:
+                        payload.update(
+                            {
+                                "active_stage": (
+                                    other_running.active_stage
+                                    if other_running.active_stage not in ("queued", "idle")
+                                    else "ocr"
+                                ),
+                                "active_model": other_running.active_model,
+                                "current_scan_id": other_running.metadata.get("current_scan_id")
+                                or other_running.metadata.get("scan_id"),
+                                "current_row_id": other_running.metadata.get("current_row_id")
+                                or other_running.metadata.get("row_id"),
+                                "current_sheet_id": other_running.metadata.get("current_sheet_id")
+                                or other_running.metadata.get("sheet_id"),
+                                "current_slovakiana_key": other_running.metadata.get(
+                                    "current_slovakiana_key"
+                                )
+                                or other_running.metadata.get("slovakiana_key"),
+                                "current_sheet_label": other_running.metadata.get(
+                                    "current_sheet_label"
+                                )
+                                or other_running.metadata.get("sheet_label"),
+                                "job_id": other_running.metadata.get("job_id"),
+                                "progress_pct": max(5, other_running.progress_pct),
+                                "message_sk": other_running.message_sk,
+                                "message_en": other_running.message_en,
+                            }
+                        )
                 snap = task_queue.get_snapshot()
                 payload["queued_count"] = snap["counts"]["queued"]
                 payload["active_task"] = snap["active_task"]
+                payload["running_tasks"] = snap["running_tasks"]
                 payload["queued_tasks"] = snap["queued_tasks"]
             except Exception:
                 snap = None

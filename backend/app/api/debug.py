@@ -89,6 +89,7 @@ class AIConfigUpdateRequest(BaseModel):
     stage: str | None = None
     stages: dict[str, Any] | None = None
     preset: str | None = None
+    local_max_concurrent: int | None = None
 
 
 @router.get("/ai-config")
@@ -104,6 +105,7 @@ async def get_ai_config() -> dict[str, Any]:
         "freellm_models": models_info.get("freellm_models", []),
         "models": models_info.get("models", []),
         "stages": cfg.get("stages", models_info.get("stages", {})),
+        "concurrency": ai_client.get_concurrency_state(),
         "ai_server": models_info,
     }
 
@@ -118,7 +120,10 @@ async def update_ai_config(req: AIConfigUpdateRequest) -> dict[str, Any]:
         local_model=req.local_model,
         stages=req.stages,
         preset=req.preset,
+        local_max_concurrent=req.local_max_concurrent,
     )
+    if req.local_max_concurrent is not None:
+        ai_client.notify_concurrency_limit_changed()
     models_info = await ai_client.get_models_status()
     return {
         **cfg,
@@ -129,6 +134,7 @@ async def update_ai_config(req: AIConfigUpdateRequest) -> dict[str, Any]:
         "freellm_models": models_info.get("freellm_models", []),
         "models": models_info.get("models", []),
         "stages": cfg.get("stages", models_info.get("stages", {})),
+        "concurrency": ai_client.get_concurrency_state(),
         "ai_server": models_info,
     }
 

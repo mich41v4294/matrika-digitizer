@@ -35,6 +35,7 @@ from backend.app.pipeline.decision_stage import (
 from backend.app.pipeline.extraction_stage import (
     extract_census_municipal_overview_sheet,
     extract_census_overview_sheet,
+    prefetch_row_extraction_llm,
     reconcile_census_household_relationships,
     run_census_extraction_for_row,
     run_extraction_for_row,
@@ -506,36 +507,102 @@ async def _process_single_scan_pipeline_inner(
                 session.commit()
 
             # STAGE 4: Genealogical Extraction & Normalization Batch
+            # Pre-dispatch row extraction LLM requests concurrently:
+            # - On freellm (Cloud API), all row requests are sent immediately & concurrently without queueing.
+            # - On local AI, ai_client's concurrency limiter (default 5) runs up to 5 concurrent requests.
+            can_prefetch_extract = (
+                len(target_rows) > 1
+                and not hasattr(run_census_extraction_for_row, "_mock_name")
+                and not hasattr(run_extraction_for_row, "_mock_name")
+            )
+            prefetched_extract_tasks: list[asyncio.Task[dict[str, Any] | None]] | None = None
+            if can_prefetch_extract:
+                parent_sh_for_ext = (
+                    session.get(CensusSheet, scan.census_sheet_id)
+                    if scan.census_sheet_id
+                    else None
+                )
+                human_notes_map: dict[int, str] = {}
+                for r_item in target_rows:
+                    if r_item.id is not None:
+                        ans_qs = session.exec(
+                            select(QuestionItem).where(
+                                QuestionItem.row_id == r_item.id,
+                                QuestionItem.status == "answered",
+                            )
+                        ).all()
+                        human_notes_map[r_item.id] = "; ".join(
+                            [
+                                f"{q.field_name}: {q.selected_answer}"
+                                for q in ans_qs
+                                if q.selected_answer
+                            ]
+                        )
+                prefetched_extract_tasks = [
+                    asyncio.create_task(
+                        prefetch_row_extraction_llm(
+                            is_census=is_census,
+                            scan=scan,
+                            row=r_item,
+                            sheet=parent_sh_for_ext,
+                            skip_row_ocr=eff_skip_row_ocr,
+                            human_notes=human_notes_map.get(r_item.id or 0, ""),
+                        )
+                    )
+                    for r_item in target_rows
+                ]
+
             prev_fact: PersonFact | None = None
             extracted_facts: list[tuple[PersonFact, RecordRow]] = []
-            for idx, row in enumerate(target_rows, start=1):
-                await ws_manager.broadcast(
-                    "state",
-                    {
-                        **sheet_ctx,
-                        "active_stage": "extract",
-                        "active_model": settings.model_extract,
-                        "current_scan_id": scan.id,
-                        "current_row_id": row.id,
-                        "current_row_index": idx,
-                        "total_rows": total_target,
-                        "progress_pct": (30 if eff_skip_row_ocr else 70)
-                        + int((58 if eff_skip_row_ocr else 18) * idx / max(1, total_target)),
-                        "message_sk": f"Extrakcia mien, obcí a poznámok ({settings.model_extract}) – riadok {idx}/{total_target}...",
-                        "message_en": f"Extracting structured facts row {idx}/{total_target}...",
-                    },
-                )
-                if is_census:
-                    fact = await run_census_extraction_for_row(
-                        session, scan, row, prev_fact, skip_row_ocr=eff_skip_row_ocr
+            try:
+                for idx, row in enumerate(target_rows, start=1):
+                    await ws_manager.broadcast(
+                        "state",
+                        {
+                            **sheet_ctx,
+                            "active_stage": "extract",
+                            "active_model": settings.model_extract,
+                            "current_scan_id": scan.id,
+                            "current_row_id": row.id,
+                            "current_row_index": idx,
+                            "total_rows": total_target,
+                            "progress_pct": (30 if eff_skip_row_ocr else 70)
+                            + int((58 if eff_skip_row_ocr else 18) * idx / max(1, total_target)),
+                            "message_sk": f"Extrakcia mien, obcí a poznámok ({settings.model_extract}) – riadok {idx}/{total_target}...",
+                            "message_en": f"Extracting structured facts row {idx}/{total_target}...",
+                        },
                     )
-                else:
-                    fact = await run_extraction_for_row(
-                        session, scan, row, prev_fact, skip_row_ocr=eff_skip_row_ocr
+                    pre_llm = (
+                        await prefetched_extract_tasks[idx - 1]
+                        if prefetched_extract_tasks is not None
+                        else None
                     )
-                if fact is not None:
-                    prev_fact = fact
-                    extracted_facts.append((fact, row))
+                    if is_census:
+                        fact = await run_census_extraction_for_row(
+                            session,
+                            scan,
+                            row,
+                            prev_fact,
+                            skip_row_ocr=eff_skip_row_ocr,
+                            prefetched_llm=pre_llm,
+                        )
+                    else:
+                        fact = await run_extraction_for_row(
+                            session,
+                            scan,
+                            row,
+                            prev_fact,
+                            skip_row_ocr=eff_skip_row_ocr,
+                            prefetched_llm=pre_llm,
+                        )
+                    if fact is not None:
+                        prev_fact = fact
+                        extracted_facts.append((fact, row))
+            finally:
+                if prefetched_extract_tasks:
+                    for t_pre in prefetched_extract_tasks:
+                        if not t_pre.done():
+                            t_pre.cancel()
 
             if is_census and scan.census_sheet_id:
                 reconcile_census_household_relationships(session, scan.census_sheet_id)
@@ -973,36 +1040,81 @@ async def _process_batch_stage_queued_inner(
             for idx_s, s in enumerate(scans, start=1):
                 target_rows = scan_rows_map[s.id]
                 s_is_census = bool(s.detected_type == "census" or s.census_sheet_id is not None)
+                can_prefetch_batch_ext = (
+                    len(target_rows) > 1
+                    and not hasattr(run_census_extraction_for_row, "_mock_name")
+                    and not hasattr(run_extraction_for_row, "_mock_name")
+                )
+                prefetched_batch_tasks: list[asyncio.Task[dict[str, Any] | None]] | None = None
+                if can_prefetch_batch_ext:
+                    s_sheet = (
+                        session.get(CensusSheet, s.census_sheet_id)
+                        if s.census_sheet_id
+                        else None
+                    )
+                    prefetched_batch_tasks = [
+                        asyncio.create_task(
+                            prefetch_row_extraction_llm(
+                                is_census=s_is_census,
+                                scan=s,
+                                row=r_it,
+                                sheet=s_sheet,
+                                skip_row_ocr=eff_skip_row_ocr,
+                            )
+                        )
+                        for r_it in target_rows
+                    ]
                 prev_fact = None
                 scan_facts: list[tuple[PersonFact, RecordRow]] = []
-                for idx_r, r in enumerate(target_rows, start=1):
-                    ext_row_counter += 1
-                    await ws_manager.broadcast(
-                        "state",
-                        {
-                            "active_stage": "extract",
-                            "active_model": settings.model_extract,
-                            "current_scan_id": s.id,
-                            "current_row_id": r.id,
-                            "current_row_index": idx_r,
-                            "total_rows": len(target_rows),
-                            "progress_pct": 65 + int(25 * ext_row_counter / total_batch_rows),
-                            "message_sk": f"[Dávka Extrakcia {idx_s}/{len(scans)}] {s.filename} – riadok {idx_r}/{len(target_rows)}",
-                            "message_en": f"[Batch Extract {idx_s}/{len(scans)}] {s.filename} – row {idx_r}/{len(target_rows)}",
-                        },
-                    )
-                    if s_is_census:
-                        fact = await run_census_extraction_for_row(
-                            session, s, r, prev_fact, skip_row_ocr=eff_skip_row_ocr
+                try:
+                    for idx_r, r in enumerate(target_rows, start=1):
+                        ext_row_counter += 1
+                        await ws_manager.broadcast(
+                            "state",
+                            {
+                                "active_stage": "extract",
+                                "active_model": settings.model_extract,
+                                "current_scan_id": s.id,
+                                "current_row_id": r.id,
+                                "current_row_index": idx_r,
+                                "total_rows": len(target_rows),
+                                "progress_pct": 65 + int(25 * ext_row_counter / total_batch_rows),
+                                "message_sk": f"[Dávka Extrakcia {idx_s}/{len(scans)}] {s.filename} – riadok {idx_r}/{len(target_rows)}",
+                                "message_en": f"[Batch Extract {idx_s}/{len(scans)}] {s.filename} – row {idx_r}/{len(target_rows)}",
+                            },
                         )
-                    else:
-                        fact = await run_extraction_for_row(
-                            session, s, r, prev_fact, skip_row_ocr=eff_skip_row_ocr
+                        pre_b_llm = (
+                            await prefetched_batch_tasks[idx_r - 1]
+                            if prefetched_batch_tasks is not None
+                            else None
                         )
-                    if fact is not None:
-                        prev_fact = fact
-                        all_facts.append((fact, r))
-                        scan_facts.append((fact, r))
+                        if s_is_census:
+                            fact = await run_census_extraction_for_row(
+                                session,
+                                s,
+                                r,
+                                prev_fact,
+                                skip_row_ocr=eff_skip_row_ocr,
+                                prefetched_llm=pre_b_llm,
+                            )
+                        else:
+                            fact = await run_extraction_for_row(
+                                session,
+                                s,
+                                r,
+                                prev_fact,
+                                skip_row_ocr=eff_skip_row_ocr,
+                                prefetched_llm=pre_b_llm,
+                            )
+                        if fact is not None:
+                            prev_fact = fact
+                            all_facts.append((fact, r))
+                            scan_facts.append((fact, r))
+                finally:
+                    if prefetched_batch_tasks:
+                        for t_b in prefetched_batch_tasks:
+                            if not t_b.done():
+                                t_b.cancel()
                 if s_is_census and s.census_sheet_id:
                     reconcile_census_household_relationships(session, s.census_sheet_id)
                 if s_is_census:

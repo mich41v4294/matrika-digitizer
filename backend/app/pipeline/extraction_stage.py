@@ -489,6 +489,149 @@ def reconcile_extraction_with_type_safety(
     return validated_payload.model_dump()
 
 
+async def prefetch_row_extraction_llm(
+    *,
+    is_census: bool,
+    scan: ScanImage,
+    row: RecordRow,
+    sheet: CensusSheet | None = None,
+    skip_row_ocr: bool = True,
+    human_notes: str = "",
+) -> dict[str, Any] | None:
+    """
+    Executes the image-crop preparation and `ai_client.chat_completion` call for a row
+    without touching the SQLAlchemy `Session`, allowing multiple rows on a scan/sheet
+    to dispatch their LLM calls concurrently (unlimited on `freellm`, bounded by
+    `settings.local_max_concurrent` on `local`).
+    """
+    has_ocr_text = bool(
+        (row.raw_ocr_left or "").strip()
+        or (row.raw_ocr_right or "").strip()
+        or (row.raw_ocr_combined or "").strip()
+    )
+    use_direct_image_only = bool(skip_row_ocr or not has_ocr_text)
+
+    if is_census:
+        census_year = (
+            sheet.census_year
+            if sheet
+            else (
+                int(scan.detected_year)
+                if (scan.detected_year and str(scan.detected_year).isdigit())
+                else 1930
+            )
+        )
+        is_blackened = bool(sheet and sheet.is_blackened)
+        left_is_blank = (
+            False
+            if use_direct_image_only
+            else _is_effectively_blank_census_left_ocr(row.raw_ocr_left)
+        )
+        if left_is_blank and not human_notes:
+            return None
+        if not (
+            use_direct_image_only
+            or not is_blackened
+            or (row.raw_ocr_left and len(row.raw_ocr_left.strip()) > 5)
+        ):
+            return None
+        nearby_villages = get_regional_municipality_gazetteer(
+            sheet.municipality if sheet else None,
+            sheet.district if sheet else None,
+        )[:25]
+        if use_direct_image_only:
+            user_prompt = (
+                f"Transcribe this {census_year} Slovak Census row directly from the attached column crops image "
+                f"(Row #{row.row_index}, Municipality: {sheet.municipality if sheet else 'Unknown'}, "
+                f"District: {sheet.district if sheet else 'Unknown'}, "
+                f"House: {sheet.house_number if sheet else 'Unknown'}).\n"
+                f"Regional ~100km villages in vicinity: {', '.join(nearby_villages)}"
+            )
+            if is_blackened:
+                user_prompt += "\nNote: This is a 1940 partially redacted census sheet (right-side columns 11-24 are blackened; transcribe columns 1-10)."
+        else:
+            user_prompt = (
+                f"Transcribe this {census_year} Slovak Census row (Municipality: {sheet.municipality if sheet else 'Unknown'}, "
+                f"District: {sheet.district if sheet else 'Unknown'}, "
+                f"House: {sheet.house_number if sheet else 'Unknown'}).\n"
+                f"Regional ~100km villages in vicinity: {', '.join(nearby_villages)}\n"
+                f"OCR text:\n{row.raw_ocr_combined or ''}"
+            )
+        if human_notes:
+            user_prompt += f"\nVerified human correction: {human_notes}"
+
+        extract_image_path, extract_image_rel = await asyncio.to_thread(
+            resolve_row_extraction_crop, row
+        )
+        res = await ai_client.chat_completion(
+            stage="extract",
+            model=settings.model_extract,
+            system_prompt=CENSUS_EXTRACTION_SYSTEM_PROMPT,
+            prompt=user_prompt,
+            image_path=extract_image_path,
+            image_rel_url=extract_image_rel,
+            scan_id=scan.id,
+            row_id=row.id,
+            max_tokens=360,
+            temperature=0.0,
+            timeout_sec=45.0,
+            skip_thinking=True,
+            response_model=LLMCensusExtractionSchema,
+        )
+        return {
+            "res": res,
+            "extract_image_path": extract_image_path,
+            "extract_image_rel": extract_image_rel,
+        }
+
+    if use_direct_image_only:
+        user_prompt = (
+            f"IMPORTANT: NEVER translate or modernize personal names or surnames. Keep exact historical variants (e.g. keep Andreas as Andreas, Stephanus as Stephanus).\n"
+            f"TYPE SAFETY: Dates must ONLY contain day (1..31) and month (e.g. '18. Augustus', 'Julius 28'). NEVER put personal names (e.g. 'Paulus') in dates, and NEVER put month names (e.g. 'Augustus') or punctuation ('.', '/') in person/parent names!\n"
+            f"Transcribe this {scan.detected_type} matrika row (Row #{row.row_index}, Year {scan.detected_year or '1884'}) directly from the attached column crop image.\n"
+            f"Return ONLY raw JSON (no markdown, no explanation) with keys: entry_number, event_year, birth_or_event_date, baptism_or_burial_date, "
+            f"given_name_raw, surname_raw, sex, father_name, mother_name, "
+            f"mother_maiden_surname, village_raw, house_number, godparents_or_witnesses, "
+            f"officiant, observationes_raw."
+        )
+    else:
+        user_prompt = (
+            f"IMPORTANT: NEVER translate or modernize personal names or surnames. Keep exact historical variants (e.g. keep Andreas as Andreas, Stephanus as Stephanus).\n"
+            f"TYPE SAFETY: Dates must ONLY contain day (1..31) and month (e.g. '18. Augustus', 'Julius 28'). NEVER put personal names (e.g. 'Paulus') in dates, and NEVER put month names (e.g. 'Augustus') or punctuation ('.', '/') in person/parent names!\n"
+            f"Return ONLY raw JSON (no markdown, no explanation) with keys: entry_number, event_year, birth_or_event_date, baptism_or_burial_date, "
+            f"given_name_raw, surname_raw, sex, father_name, mother_name, "
+            f"mother_maiden_surname, village_raw, house_number, godparents_or_witnesses, "
+            f"officiant, observationes_raw from this {scan.detected_type} matrika row (Year {scan.detected_year or '1884'}):\n"
+            f"{row.raw_ocr_combined or ''}"
+        )
+    if human_notes:
+        user_prompt += f"\nVerified human correction: {human_notes}"
+
+    extract_image_path, extract_image_rel = await asyncio.to_thread(
+        resolve_row_extraction_crop, row
+    )
+    res = await ai_client.chat_completion(
+        stage="extract",
+        model=settings.model_extract,
+        system_prompt=EXTRACTION_SYSTEM_PROMPT,
+        prompt=user_prompt,
+        image_path=extract_image_path,
+        image_rel_url=extract_image_rel,
+        scan_id=scan.id,
+        row_id=row.id,
+        max_tokens=260,
+        temperature=0.0,
+        timeout_sec=45.0,
+        skip_thinking=True,
+        response_model=LLMExtractionSchema,
+    )
+    return {
+        "res": res,
+        "extract_image_path": extract_image_path,
+        "extract_image_rel": extract_image_rel,
+    }
+
+
 async def run_extraction_for_row(
     session: Session,
     scan: ScanImage,
@@ -496,6 +639,7 @@ async def run_extraction_for_row(
     prev_fact: PersonFact | None = None,
     *,
     skip_row_ocr: bool | None = None,
+    prefetched_llm: dict[str, Any] | None = None,
 ) -> PersonFact:
     eff_skip_row_ocr = (
         bool(settings.get_feature_flags().get("skip_row_ocr", True))
@@ -550,25 +694,30 @@ async def run_extraction_for_row(
     if human_notes:
         user_prompt += f"\nVerified human correction: {human_notes}"
 
-    extract_image_path, extract_image_rel = await asyncio.to_thread(
-        resolve_row_extraction_crop, row
-    )
+    if prefetched_llm is not None:
+        extract_image_path = prefetched_llm.get("extract_image_path")
+        extract_image_rel = prefetched_llm.get("extract_image_rel")
+        res = prefetched_llm["res"]
+    else:
+        extract_image_path, extract_image_rel = await asyncio.to_thread(
+            resolve_row_extraction_crop, row
+        )
 
-    res = await ai_client.chat_completion(
-        stage="extract",
-        model=settings.model_extract,
-        system_prompt=EXTRACTION_SYSTEM_PROMPT,
-        prompt=user_prompt,
-        image_path=extract_image_path,
-        image_rel_url=extract_image_rel,
-        scan_id=scan.id,
-        row_id=row.id,
-        max_tokens=260,
-        temperature=0.0,
-        timeout_sec=45.0,
-        skip_thinking=True,
-        response_model=LLMExtractionSchema,
-    )
+        res = await ai_client.chat_completion(
+            stage="extract",
+            model=settings.model_extract,
+            system_prompt=EXTRACTION_SYSTEM_PROMPT,
+            prompt=user_prompt,
+            image_path=extract_image_path,
+            image_rel_url=extract_image_rel,
+            scan_id=scan.id,
+            row_id=row.id,
+            max_tokens=260,
+            temperature=0.0,
+            timeout_sec=45.0,
+            skip_thinking=True,
+            response_model=LLMExtractionSchema,
+        )
 
     data = res.get("parsed") or {}
     if (
@@ -1497,6 +1646,7 @@ async def run_census_extraction_for_row(
     prev_fact: PersonFact | None = None,
     *,
     skip_row_ocr: bool | None = None,
+    prefetched_llm: dict[str, Any] | None = None,
 ) -> PersonFact | None:
     """
     Extracts a single census household row (1930 full or 1940 partially redacted) into a PersonFact.
@@ -1613,25 +1763,30 @@ async def run_census_extraction_for_row(
         if human_notes:
             user_prompt += f"\nVerified human correction: {human_notes}"
 
-        extract_image_path, extract_image_rel = await asyncio.to_thread(
-            resolve_row_extraction_crop, row
-        )
+        if prefetched_llm is not None:
+            extract_image_path = prefetched_llm.get("extract_image_path")
+            extract_image_rel = prefetched_llm.get("extract_image_rel")
+            res = prefetched_llm["res"]
+        else:
+            extract_image_path, extract_image_rel = await asyncio.to_thread(
+                resolve_row_extraction_crop, row
+            )
 
-        res = await ai_client.chat_completion(
-            stage="extract",
-            model=settings.model_extract,
-            system_prompt=CENSUS_EXTRACTION_SYSTEM_PROMPT,
-            prompt=user_prompt,
-            image_path=extract_image_path,
-            image_rel_url=extract_image_rel,
-            scan_id=scan.id,
-            row_id=row.id,
-            max_tokens=360,
-            temperature=0.0,
-            timeout_sec=45.0,
-            skip_thinking=True,
-            response_model=LLMCensusExtractionSchema,
-        )
+            res = await ai_client.chat_completion(
+                stage="extract",
+                model=settings.model_extract,
+                system_prompt=CENSUS_EXTRACTION_SYSTEM_PROMPT,
+                prompt=user_prompt,
+                image_path=extract_image_path,
+                image_rel_url=extract_image_rel,
+                scan_id=scan.id,
+                row_id=row.id,
+                max_tokens=360,
+                temperature=0.0,
+                timeout_sec=45.0,
+                skip_thinking=True,
+                response_model=LLMCensusExtractionSchema,
+            )
         data = res.get("parsed") or {}
 
         # If direct image-only extraction was attempted with a text-only LLM or returned no name on a row with real crops,

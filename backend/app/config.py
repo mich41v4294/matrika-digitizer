@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     freellm_api_key: str = FREELLM_DEFAULT_API_KEY
     ai_provider: str = "local"
     freellm_model: str = "gpt-4o-mini"
+    local_max_concurrent: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "LOCAL_MAX_CONCURRENT",
+            "LOCAL_AI_MAX_CONCURRENT",
+            "local_max_concurrent",
+            "local_ai_max_concurrent",
+        ),
+    )
     ai_stages: dict[str, dict[str, str]] = Field(default_factory=dict)
 
     data_dir: Path = _DEFAULT_DATA_DIR
@@ -331,6 +340,13 @@ class Settings(BaseSettings):
                     if model_val:
                         self.freellm_model = model_val
 
+                    raw_conc = raw.get("local_max_concurrent")
+                    if raw_conc is not None:
+                        try:
+                            self.local_max_concurrent = max(1, min(64, int(raw_conc)))
+                        except (TypeError, ValueError):
+                            pass
+
                     raw_stages = raw.get("stages")
                     if isinstance(raw_stages, dict) and raw_stages:
                         next_stages = self._default_stages("local")
@@ -440,6 +456,8 @@ class Settings(BaseSettings):
             "freellm_api_key_configured": bool(self.freellm_api_key),
             "local_base_url": self.ai_base_url.rstrip("/"),
             "base_url": active_base,
+            "local_max_concurrent": max(1, int(self.local_max_concurrent or 5)),
+            "freellm_concurrent_unlimited": True,
             "stages": stages_copy,
             "configured": {
                 "ocr": self.model_ocr,
@@ -471,8 +489,15 @@ class Settings(BaseSettings):
         local_model: str | None = None,
         stages: dict[str, Any] | None = None,
         preset: str | None = None,
+        local_max_concurrent: int | None = None,
     ) -> dict[str, Any]:
         self._load_ai_runtime_config()
+
+        if local_max_concurrent is not None:
+            try:
+                self.local_max_concurrent = max(1, min(64, int(local_max_concurrent)))
+            except (TypeError, ValueError):
+                pass
 
         if freellm_model is not None and str(freellm_model).strip():
             self.freellm_model = str(freellm_model).strip()
@@ -561,7 +586,7 @@ class Settings(BaseSettings):
                 "freellm_model"
             ):
                 self.freellm_model = self.ai_stages[sk]["freellm_model"]
-        else:
+        elif provider is not None or freellm_model is not None or model is not None:
             norm_provider = (
                 "freellm"
                 if str(provider or self.ai_provider).strip().lower() == "freellm"
@@ -589,6 +614,7 @@ class Settings(BaseSettings):
                     {
                         "provider": self.ai_provider,
                         "freellm_model": self.freellm_model,
+                        "local_max_concurrent": max(1, int(self.local_max_concurrent or 5)),
                         "stages": self.ai_stages,
                     },
                     ensure_ascii=False,
@@ -633,6 +659,7 @@ def set_ai_runtime_config(
     local_model: str | None = None,
     stages: dict[str, Any] | None = None,
     preset: str | None = None,
+    local_max_concurrent: int | None = None,
 ) -> dict[str, Any]:
     return settings.set_ai_runtime_config(
         provider=provider,
@@ -642,4 +669,5 @@ def set_ai_runtime_config(
         local_model=local_model,
         stages=stages,
         preset=preset,
+        local_max_concurrent=local_max_concurrent,
     )

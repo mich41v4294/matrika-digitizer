@@ -69,6 +69,7 @@ from backend.app.pipeline.extraction_stage import (
     _reconcile_municipal_overview_rows,
     extract_census_municipal_overview_sheet,
     extract_census_overview_sheet,
+    is_overview_summary_or_footer_row,
     reconcile_census_household_relationships,
     reconstruct_municipal_overview_districts_from_existing_ocr,
     reconstruct_overview_houses_from_existing_ocr,
@@ -2424,6 +2425,13 @@ def _deduplicate_and_repair_overview_houses(
     for ovh in ov_rows:
         r_idx = int(ovh.row_index or 0)
         crop_p = (ovh.stitched_crop_path or "").strip()
+        if is_overview_summary_or_footer_row(ovh.raw_ocr_text) or (
+            ovh.owner_name and is_overview_summary_or_footer_row(ovh.owner_name)
+        ):
+            reset_ocr_feedback(session, overview_house_id=ovh.id, commit=False)
+            session.delete(ovh)
+            dirty = True
+            continue
         if (r_idx > 0 and r_idx in seen_row_indices) or (crop_p and crop_p in seen_crops):
             reset_ocr_feedback(session, overview_house_id=ovh.id, commit=False)
             session.delete(ovh)
@@ -2451,18 +2459,10 @@ def _deduplicate_and_repair_overview_houses(
             if r.stitched_crop_path
             and (r.raw_ocr_combined or r.raw_ocr_left)
             and any(ch.isalpha() for ch in (r.raw_ocr_combined or r.raw_ocr_left or ""))
+            and not is_overview_summary_or_footer_row(r.raw_ocr_combined or r.raw_ocr_left)
             and not any(
                 tok in (r.raw_ocr_combined or r.raw_ocr_left or "").lower()
                 for tok in (
-                    "úhrn",
-                    "uhrn",
-                    "súhrn",
-                    "suhrn",
-                    "spolu",
-                    "celkom",
-                    "i. strana",
-                    "ii. strana",
-                    "iii. strana",
                     "radové číslo",
                     "meno majiteľa",
                 )
@@ -2524,6 +2524,29 @@ def _deduplicate_and_repair_overview_houses(
             cur.house_number = str(prev_h.house_number_int + 1)
             cur.house_number_int = prev_h.house_number_int + 1
             session.add(cur)
+            dirty = True
+
+    for idx in range(len(stage1) - 3):
+        h_a, h_m1, h_m2, h_b = (
+            stage1[idx],
+            stage1[idx + 1],
+            stage1[idx + 2],
+            stage1[idx + 3],
+        )
+        if (
+            h_a.house_number_int is not None
+            and h_b.house_number_int is not None
+            and h_b.house_number_int - h_a.house_number_int == 3
+            and str(h_m1.house_number or "").isdigit()
+            and str(h_m2.house_number or "").isdigit()
+            and (h_m1.house_number_int != h_a.house_number_int + 1 or h_m2.house_number_int != h_a.house_number_int + 2)
+        ):
+            h_m1.house_number = str(h_a.house_number_int + 1)
+            h_m1.house_number_int = h_a.house_number_int + 1
+            h_m2.house_number = str(h_a.house_number_int + 2)
+            h_m2.house_number_int = h_a.house_number_int + 2
+            session.add(h_m1)
+            session.add(h_m2)
             dirty = True
 
     # Pass 3: Deduplicate by normalized house_number within the same overview sheet ONLY when rows represent the same house/owner

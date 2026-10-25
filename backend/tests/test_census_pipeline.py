@@ -2951,6 +2951,261 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                     self.assertFalse(is_census_sheet_done(unnum_hh, run_ocr=True, overview_only=False))
                     self.assertTrue(is_census_sheet_done(ov1, run_ocr=True, overview_only=False))
 
+    def test_horne_dubove_cair_ko29x4e_overview_and_dolne_dubove_muni(self) -> None:
+        import asyncio
+        import json
+        from backend.app.api.census import get_census_sheet_detail, get_municipality_overview
+        from backend.app.db.models import RecordRow, ScanImage
+        from backend.app.pipeline.census_layout import (
+            extract_municipal_overview_header_metadata,
+            extract_overview_header_metadata,
+        )
+        from backend.app.pipeline.extraction_stage import (
+            _heuristic_parse_municipal_overview_row,
+            is_overview_summary_or_footer_row,
+        )
+        from backend.app.pipeline.lexicon import (
+            canonical_municipality_display,
+            canonical_municipality_key,
+            is_compatible_settlement,
+        )
+
+        # 1. Verify inverted village names ('Dubové Horné' / 'Dubové Dolné' / 'Obec Dubové Dolné') normalize to canonical keys
+        self.assertEqual(canonical_municipality_key("Dubové Horné"), "horne dubove")
+        self.assertEqual(canonical_municipality_key("Horné Dubové"), "horne dubove")
+        self.assertEqual(canonical_municipality_display("Dubové Horné"), "Horné Dubové")
+        self.assertTrue(is_compatible_settlement("Dubové Horné", "Horné Dubové", "Horné Dubové"))
+        self.assertEqual(canonical_municipality_key("Obec Dubové Dolné"), "dolne dubove")
+        self.assertEqual(canonical_municipality_display("Obec Dubové Dolné"), "Dolné Dubové")
+
+        # 2. Verify Horné Dubové & Dolné Dubové header metadata extraction
+        hd_hdr = (
+            "6-3\nČeskoslovenská republika.\nSčítanie ludu 1930.\nPolitický okres Timary\n"
+            "Číslo sčítacieho obvodu 1.\nObec Lormie Gubrové\nMeno sčítacieho komisára Margit Puehlový\n"
+            "Prehlad sčítacieho obvodu"
+        )
+        hd_meta = extract_overview_header_metadata(hd_hdr, municipality="Horné Dubové", district="Trnava")
+        self.assertEqual(hd_meta["obvod_number"], "I")
+        self.assertEqual(hd_meta["commissioner_name"], "Margita Puchlová")
+
+        dd_ov2_hdr = (
+            "Sčítanie l'udu 1930.\nPolitický okres Imava\nČíslo sčítacieho obvodu II.\n"
+            "Obec Dubové Dolní\nMeno sčítacieho komisára Autonia Martišovičora\nPrehl'ad sčítacieho obvodu"
+        )
+        dd_ov2_meta = extract_overview_header_metadata(dd_ov2_hdr, municipality="Dolné Dubové", district="Trnava")
+        self.assertEqual(dd_ov2_meta["obvod_number"], "II")
+        self.assertEqual(dd_ov2_meta["commissioner_name"], "Antónia Martišovičová")
+
+        dd_mov_hdr = (
+            "Sčitanie l'udu 1930\nPolitický okres Nivava.\nObec Dubově Dolníc.\n"
+            "Meno sčitacieho revízora Mwich Baron,\nObecný prehl'ad"
+        )
+        dd_mov_meta = extract_municipal_overview_header_metadata(dd_mov_hdr, municipality="Dolné Dubové", district="Trnava")
+        self.assertEqual(dd_mov_meta["revisor_name"], "Imrich Baron")
+
+        # 3. Verify Dolné Dubové Obecný prehľad row parsing (including '-16' dash-ditto artifact on Spolu row)
+        dd_r1 = _heuristic_parse_municipal_overview_row(
+            "Vicee | I. | 2dn Habara | 72 | 71 | i | 74 | 381",
+            seq_district_idx=1,
+            default_settlement="Dolné Dubové",
+            revisor_name="Imrich Baron",
+        )
+        self.assertEqual(dd_r1["obvod_number"], "I")
+        self.assertEqual(dd_r1["commissioner_name"], "Ján Habara")
+        self.assertEqual((dd_r1["houses_total"], dd_r1["houses_inhabited"], dd_r1["houses_uninhabited"], dd_r1["household_count"], dd_r1["present_persons_count"]), (72, 71, 1, 74, 381))
+
+        dd_r2 = _heuristic_parse_municipal_overview_row(
+            "Dubové Dolnie. | II | Autoría Martisovića | 75 | 71 | 4 | 76 | 350.",
+            seq_district_idx=2,
+            default_settlement="Dolné Dubové",
+            revisor_name="Imrich Baron",
+        )
+        self.assertEqual(dd_r2["obvod_number"], "II")
+        self.assertEqual(dd_r2["commissioner_name"], "Antónia Martišovičová")
+        self.assertEqual((dd_r2["houses_total"], dd_r2["houses_inhabited"], dd_r2["houses_uninhabited"], dd_r2["household_count"], dd_r2["present_persons_count"]), (75, 71, 4, 76, 350))
+
+        dd_sum = _heuristic_parse_municipal_overview_row(
+            "Spolu: | - | -16 | 147 | 142 | 5 | 150 | 731",
+            seq_district_idx=3,
+            default_settlement="Dolné Dubové",
+            revisor_name="Imrich Baron",
+        )
+        self.assertTrue(dd_sum["is_summary_row"])
+        self.assertEqual((dd_sum["houses_total"], dd_sum["houses_inhabited"], dd_sum["houses_uninhabited"], dd_sum["household_count"], dd_sum["present_persons_count"]), (147, 142, 5, 150, 731))
+
+        # 4. Verify Horné Dubové (cair-ko29x4e) 4-page bifolio reconstruction, uninhabited Dom č. 7,
+        # parallel table_ocr + right_ocr reconciliation, 2-row sandwiched house number repair (20, 23, 20, 23 -> 20, 21, 22, 23),
+        # and summary/footer suppression ('Sport: | 12 | 81...', 'v. Trmare di mag. | 10. rw | 1930.')
+        self.assertTrue(is_overview_summary_or_footer_row("Sport: | 12 | 81 | 1 |  | 32 | 512 | 92 512"))
+        self.assertTrue(is_overview_summary_or_footer_row("v. Trmare di mag. | 10. rw | 1930."))
+        self.assertTrue(is_overview_summary_or_footer_row("scitaci komisari."))
+
+        test_engine = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(test_engine)
+        ensure_fts_schema(test_engine)
+
+        with Session(test_engine) as session:
+            sheet = CensusSheet(
+                slovakiana_key="cair-ko29x4e",
+                census_year=1930,
+                district="Trnava",
+                municipality="Horné Dubové",
+                municipality_folded="horne dubove",
+                sheet_type="overview",
+                obvod_number="I",
+                commissioner_name="Margita Puchlová",
+                download_status="extracted",
+            )
+            h1_sheet = CensusSheet(
+                slovakiana_key="cair-ko26r7v",
+                census_year=1930,
+                district="Trnava",
+                municipality="Horné Dubové",
+                municipality_folded="horne dubove",
+                house_number="1",
+                house_number_int=1,
+                sheet_type="household",
+                download_status="cataloged",
+            )
+            h7_sheet = CensusSheet(
+                slovakiana_key="cair-ko1g2g0",
+                census_year=1930,
+                district="Trnava",
+                municipality="Horné Dubové",
+                municipality_folded="horne dubove",
+                house_number="7",
+                house_number_int=7,
+                sheet_type="household",
+                download_status="cataloged",
+            )
+            session.add_all([sheet, h1_sheet, h7_sheet])
+            session.commit()
+            session.refresh(sheet)
+
+            front_sc = ScanImage(
+                census_sheet_id=sheet.id,
+                page_side="front",
+                filename="cair-ko29x4e_front.jpg",
+                original_path="/nonexistent/cair-ko29x4e_front.jpg",
+                detected_year="1930",
+                detected_type="census",
+                status="extracted",
+            )
+            back_sc = ScanImage(
+                census_sheet_id=sheet.id,
+                page_side="back",
+                filename="cair-ko29x4e_back.jpg",
+                original_path="/nonexistent/cair-ko29x4e_back.jpg",
+                detected_year="1930",
+                detected_type="census",
+                status="extracted",
+            )
+            session.add_all([front_sc, back_sc])
+            session.commit()
+            session.refresh(front_sc)
+            session.refresh(back_sc)
+            sheet.front_scan_id = front_sc.id
+            sheet.back_scan_id = back_sc.id
+            session.add(sheet)
+
+            # Seed representative rows across Booklet Pages 1, 2, 3, and 4 (plus trailing summary/signature rows on Page 4)
+            front_rows_spec = [
+                (1, 1, False, "Dubore Harne | 1 | 1 |  | Rosalig Lihutov&#x27; | 1 | 6 | Roxaliq Léhutovq 1 6"),
+                (2, 1, False, "20 | 1 |  | yerolim Whitk | 1 | 6 | Yecolim Ouhlih 1 6"),
+                (3, 1, False, "3 | 1 |  | Ludovitch Siring April. | 3 | 17 | Ludovit Siring spol. 3 17"),
+                (4, 1, False, "4 | 1 | Youref White | 1 | 6 | You of White 1 6"),
+                (5, 1, False, "5 | 1 |  | Stefan Uhlhig | 1 | 4 | Stefan Uhlik 1 4"),
+                (6, 1, False, "6 | 1 |  | Pavel White | 1 | 4 | Pavel Uhlik 1 4"),
+                (7, 1, True, "7 | 1 | Cláring Boledorrió | Marius Boledovich"),
+                (8, 1, False, "8 | 1 |  | 1 | 4 | Máring Boledo viétró 1 4"),
+                (9, 4, False, "68 | 661 |  | Fishing Station | 1/4 | 5 | Filomeing Stalyvoyi 1 5"),
+                (10, 4, False, "82 | 1 | Frontier Athlete | 1 | 6 | Frontier Militia 1 6"),
+                (11, 4, False, "Sport: | 12 | 81 | 1 |  | 32 | 512 | 92 512"),
+                (12, 4, False, "v. Trmare di mag. | 10. rw | 1930. | 1930."),
+                (13, 4, False, "scitaci komisari."),
+            ]
+            back_rows_spec = [
+                (1, 2, False, "20 | 1 |  | Dommik levcőrak | 1 | 9. | Domnik leveomak i 9."),
+                (2, 2, False, "23 | 1 |  | A. mary Wristart | 4 | 8 | Amuch Whiting 1 8"),
+                (3, 2, False, "20 |  |  | Stefan Writh | 1 | 4 | Stefan Whrik 1 4"),
+                (4, 2, False, "23 |  |  | Chaing Hrehmarsv | 1 | 4 | Charles Murchison 1 4"),
+                (5, 3, False, "51 |  | Anton Brochdinkey | 2 | 3 | obsc. Shorty | ton Prochidzky 2 3 obc."),
+                (6, 3, False, "58 | Ludrit Ahlike Q 14"),
+            ]
+            for r_idx, bp, col5_u, txt in front_rows_spec:
+                session.add(
+                    RecordRow(
+                        scan_id=front_sc.id or 0,
+                        row_index=r_idx,
+                        stitched_crop_path=f"/media/crops/scan_hd_f/row_{r_idx:02d}_stitched.jpg",
+                        cell_crops_json=json.dumps([{"key": "overview_page", "booklet_page": bp, "col5_uninhabited": col5_u}]),
+                        raw_ocr_left=txt,
+                        raw_ocr_combined=txt,
+                        status="ocr_done",
+                    )
+                )
+            for r_idx, bp, col5_u, txt in back_rows_spec:
+                session.add(
+                    RecordRow(
+                        scan_id=back_sc.id or 0,
+                        row_index=r_idx,
+                        stitched_crop_path=f"/media/crops/scan_hd_b/row_{r_idx:02d}_stitched.jpg",
+                        cell_crops_json=json.dumps([{"key": "overview_page", "booklet_page": bp, "col5_uninhabited": col5_u}]),
+                        raw_ocr_left=txt,
+                        raw_ocr_combined=txt,
+                        status="ocr_done",
+                    )
+                )
+            session.commit()
+
+            det = asyncio.run(get_census_sheet_detail("cair-ko29x4e", session))
+            ov_houses = det["overview_houses"]
+            # Trailing summary/footer rows (11, 12, 13 on front) must be suppressed -> 16 valid house rows
+            self.assertEqual(len(ov_houses), 16)
+            by_hn = {h["house_number"]: h for h in ov_houses}
+
+            # Verify Dom č. 1 (Rozália Lehutová, settlement 'Horné Dubové', no leaked remarks, matched to cair-ko26r7v)
+            self.assertEqual(by_hn["1"]["owner_name"], "Rozália Lehutová")
+            self.assertEqual(by_hn["1"]["settlement_name"], "Horné Dubové")
+            self.assertEqual(by_hn["1"]["household_count"], 1)
+            self.assertEqual(by_hn["1"]["present_persons_count"], 6)
+            self.assertIsNone(by_hn["1"]["remarks"])
+            self.assertEqual(by_hn["1"]["matched_slovakiana_key"], "cair-ko26r7v")
+
+            # Verify Dom č. 2 (house number 2 preserved despite '20 | 1' in table_ocr)
+            self.assertEqual(by_hn["2"]["owner_name"], "Jerolím Uhlík")
+            self.assertEqual((by_hn["2"]["household_count"], by_hn["2"]["present_persons_count"]), (1, 6))
+
+            # Verify Dom č. 6 ('Pavel Uhlik' from right_ocr wins over 'Pavel White' without leaking into remarks)
+            self.assertEqual(by_hn["6"]["owner_name"], "Pavel Uhlík")
+            self.assertIsNone(by_hn["6"]["remarks"])
+
+            # Verify Dom č. 7 (uninhabited: is_inhabited=False, hh=0, pp=0, matched to cair-ko1g2g0)
+            self.assertEqual(by_hn["7"]["owner_name"], "Mária Boledovičová")
+            self.assertFalse(by_hn["7"]["is_inhabited"])
+            self.assertEqual((by_hn["7"]["household_count"], by_hn["7"]["present_persons_count"]), (0, 0))
+            self.assertEqual(by_hn["7"]["matched_slovakiana_key"], "cair-ko1g2g0")
+
+            # Verify Dom č. 8 (owner recovered from right_ocr with exact counts 1, 4)
+            self.assertEqual(by_hn["8"]["owner_name"], "Mária Boledovičová")
+            self.assertEqual((by_hn["8"]["household_count"], by_hn["8"]["present_persons_count"]), (1, 4))
+
+            # Verify Booklet Page 3 remarks & counts (Anton Prochádzka with 'obec. chudobinec' and Ľudovít Uhlík with 2, 14)
+            proch = next(h for h in ov_houses if h["owner_name"] == "Anton Prochádzka")
+            self.assertEqual((proch["household_count"], proch["present_persons_count"], proch["remarks"]), (2, 3, "obec. chudobinec"))
+            lud_u = next(h for h in ov_houses if h["owner_name"] == "Ľudovít Uhlík")
+            self.assertEqual((lud_u["household_count"], lud_u["present_persons_count"]), (2, 14))
+
+            # Verify Booklet Page 4 houses (Filoména Slabáková 1, 5 and František Mihálik 1, 6)
+            fil = next(h for h in ov_houses if h["owner_name"] == "Filoména Slabáková")
+            self.assertEqual((fil["household_count"], fil["present_persons_count"]), (1, 5))
+            mih = next(h for h in ov_houses if h["owner_name"] == "František Mihálik")
+            self.assertEqual((mih["household_count"], mih["present_persons_count"]), (1, 6))
+
+            muni_ov = get_municipality_overview(session, municipality="Horné Dubové", census_year=1930)
+            self.assertEqual(len(muni_ov["overview_sheets"]), 1)
+            self.assertEqual(muni_ov["overview_sheets"][0]["commissioner_name"], "Margita Puchlová")
+
 
 if __name__ == "__main__":
     unittest.main()

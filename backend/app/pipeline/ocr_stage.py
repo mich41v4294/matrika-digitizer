@@ -24,26 +24,28 @@ from backend.app.pipeline.census_layout import (
 def html_table_to_pipe_text(raw_html_or_text: str) -> str:
     if not raw_html_or_text:
         return ""
+    import html as _html
+
     if "<table" not in raw_html_or_text.lower() and "<td" not in raw_html_or_text.lower():
-        return raw_html_or_text.strip()
+        return _html.unescape(raw_html_or_text).strip()
     try:
         from backend.app.pipeline.lexicon import _rust_lex
 
         if _rust_lex is not None and hasattr(_rust_lex, "html_table_to_pipe_text_rs"):
-            return str(_rust_lex.html_table_to_pipe_text_rs(raw_html_or_text))
+            return _html.unescape(str(_rust_lex.html_table_to_pipe_text_rs(raw_html_or_text)))
     except Exception:
         pass
     soup = BeautifulSoup(raw_html_or_text, "html.parser")
     rows_out: list[str] = []
     for tr in soup.find_all("tr"):
         cells = [
-            re.sub(r"\s+", " ", cell.get_text(separator=" ", strip=True))
+            re.sub(r"\s+", " ", _html.unescape(cell.get_text(separator=" ", strip=True)))
             for cell in tr.find_all(["td", "th"])
         ]
         non_empty = [c for c in cells if c]
         if non_empty:
             rows_out.append(" | ".join(cells))
-    return "\n".join(rows_out) if rows_out else soup.get_text(separator=" | ", strip=True)
+    return "\n".join(rows_out) if rows_out else _html.unescape(soup.get_text(separator=" | ", strip=True))
 
 
 def detect_header_metadata(raw_header_ocr: str, filename: str = "") -> tuple[str | None, str]:

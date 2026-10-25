@@ -322,11 +322,6 @@ pub fn html_table_to_pipe_text_internal(raw_html_or_text: &str) -> String {
     if raw_html_or_text.is_empty() {
         return String::new();
     }
-    let low = raw_html_or_text.to_ascii_lowercase();
-    if !low.contains("<table") && !low.contains("<td") && !low.contains("<th") {
-        return raw_html_or_text.trim().to_string();
-    }
-
     let decode_entities = |s: &str| -> String {
         if !s.contains('&') {
             return s.to_string();
@@ -338,8 +333,14 @@ pub fn html_table_to_pipe_text_internal(raw_html_or_text: &str) -> String {
             .replace("&gt;", ">")
             .replace("&quot;", "\"")
             .replace("&#39;", "'")
+            .replace("&#x27;", "'")
+            .replace("&#X27;", "'")
             .replace("&apos;", "'")
     };
+    let low = raw_html_or_text.to_ascii_lowercase();
+    if !low.contains("<table") && !low.contains("<td") && !low.contains("<th") {
+        return decode_entities(raw_html_or_text.trim());
+    }
 
     let collapse_ws = |s: &str| -> String {
         let decoded = decode_entities(s);

@@ -2706,6 +2706,30 @@ _CANONICAL_MUNICIPALITY_SYNONYMS: dict[str, str] = {
     "velke topolcany": "velke topolcany",
     "topolcany velke": "velke topolcany",
     "vel topolcany": "velke topolcany",
+    "horne dubove": "horne dubove",
+    "dubove horne": "horne dubove",
+    "hornie dubove": "horne dubove",
+    "dubove hornie": "horne dubove",
+    "hor dubove": "horne dubove",
+    "dubore harne": "horne dubove",
+    "horne dubore": "horne dubove",
+    "lormie gubrove": "horne dubove",
+    "dolne dubove": "dolne dubove",
+    "dubove dolne": "dolne dubove",
+    "dolnie dubove": "dolne dubove",
+    "dubove dolnie": "dolne dubove",
+    "dol dubove": "dolne dubove",
+    "dubove dalmie": "dolne dubove",
+    "dubove dolni": "dolne dubove",
+    "dubove dolnic": "dolne dubove",
+    "horne dubovany": "horne dubovany",
+    "dubovany horne": "horne dubovany",
+    "dolne dubovany": "dolne dubovany",
+    "dubovany dolne": "dolne dubovany",
+    "horna krupa": "horna krupa",
+    "krupa horna": "horna krupa",
+    "dolna krupa": "dolna krupa",
+    "krupa dolna": "dolna krupa",
 }
 
 _CANONICAL_MUNICIPALITY_DISPLAY: dict[str, str] = {
@@ -2719,7 +2743,24 @@ _CANONICAL_MUNICIPALITY_DISPLAY: dict[str, str] = {
     "velke ripnany": "Veľké Ripňany",
     "male ripnany": "Malé Ripňany",
     "velke topolcany": "Veľké Topoľčany",
+    "horne dubove": "Horné Dubové",
+    "dolne dubove": "Dolné Dubové",
+    "horne dubovany": "Horné Dubovany",
+    "dolne dubovany": "Dolné Dubovany",
+    "horna krupa": "Horná Krupá",
+    "dolna krupa": "Dolná Krupá",
+    "jaslovce": "Jáslovce",
+    "katlovce": "Kátlovce",
+    "boleraz": "Boleráz",
 }
+
+_MUNICIPALITY_PREFIX_ADJS: frozenset[str] = frozenset(
+    {
+        "horne", "horny", "horna", "horni", "dolne", "dolny", "dolna", "dolni",
+        "velke", "velky", "velka", "male", "maly", "mala", "stredne", "stredny", "stredna",
+        "nove", "novy", "nova", "stare", "stary", "stara", "zemianske", "zemiansky", "zemianska",
+    }
+)
 
 
 @lru_cache(maxsize=16384)
@@ -2727,7 +2768,8 @@ def canonical_municipality_key(municipality: str | None) -> str:
     """
     Deterministic canonical municipality key for strict village-level matching.
     Strips diacritics, lowercases, normalizes punctuation/hyphens, and resolves only
-    exact spelling variants of the same village (e.g. 'Horný Čepen' == 'Horný Čepeň').
+    exact spelling variants of the same village (e.g. 'Horný Čepen' == 'Horný Čepeň',
+    'Dubové Horné' == 'Horné Dubové').
     NEVER matches distinct villages like 'Horný Čepeň' and 'Horné Zelenice'.
     """
     if not municipality:
@@ -2740,6 +2782,12 @@ def canonical_municipality_key(municipality: str | None) -> str:
         return ""
     cleaned = re.sub(r"\bhornie\b", "horne", cleaned)
     cleaned = re.sub(r"\bdolnie\b", "dolne", cleaned)
+    words = cleaned.split()
+    if len(words) >= 2 and words[0] == "obec":
+        words = words[1:]
+    if len(words) == 2 and words[1] in _MUNICIPALITY_PREFIX_ADJS and words[0] not in _MUNICIPALITY_PREFIX_ADJS:
+        words = [words[1], words[0]]
+    cleaned = " ".join(words)
     return _CANONICAL_MUNICIPALITY_SYNONYMS.get(cleaned, cleaned)
 
 

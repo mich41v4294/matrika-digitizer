@@ -480,6 +480,12 @@ def _clean_revisor_name(raw_rev: str) -> str:
     raw_rev = re.sub(r"\bLottick[yý]\b|\bLollick[yý]\b", "Zoltický", raw_rev, flags=re.IGNORECASE)
     raw_rev = re.sub(r"\bRafajdu\w*\b|\bRafajid\w*\b", "Rafajdus", raw_rev, flags=re.IGNORECASE)
     raw_rev = re.sub(r"\bR[aá]no[sš]k[yý]\b|\bP[aá]no[sš]k[yý]\b", "Pánovský", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bMargit\b|\bMargita\b", "Margita", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bPuehlov\w*\b|\bPruchlov\w*\b|\bPuchlov\w*\b|\bPuhlov\w*\b", "Puchlová", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bAutonia\b|\bAutor[ií]a\b|\bAntonia\b", "Antónia", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bMarti[sš]ovi[cćč]ora\b|\bMarti[sš]ovi[cćč]a\b", "Martišovičová", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bY[aá]n\b|\b2dn\b", "Ján", raw_rev, flags=re.IGNORECASE)
+    raw_rev = re.sub(r"\bMwich\b", "Imrich", raw_rev, flags=re.IGNORECASE)
     toks = raw_rev.split()
     if toks:
         g_norm, _ = normalize_given_name(toks[0])
@@ -662,8 +668,12 @@ def extract_overview_header_metadata(
     )
     if m_obv:
         cand = m_obv.group(1).strip(" .,;:-")
-        if cand.upper() == "T":
+        if cand.upper() in ("T", "1"):
             cand = "I"
+        elif cand == "2":
+            cand = "II"
+        elif cand == "3":
+            cand = "III"
         if cand.lower() not in {"od", "do", "v", "z"}:
             obvod_number = cand
 
@@ -1033,7 +1043,80 @@ def _row_has_handwriting(row_strip: np.ndarray) -> bool:
     return bool(name_ink_ratio >= 0.008 and valid_stroke_blobs >= 2)
 
 
-def _overview_row_has_handwriting(row_strip: np.ndarray) -> bool:
+def _detect_overview_subpage_col_bounds(
+    gray: np.ndarray,
+    page_x0: int,
+    page_x1: int,
+    y_top: int,
+    y_bot: int,
+    page_half: str,
+) -> tuple[int, int, int, int, int]:
+    """
+    Dynamically locates the vertical column boundary x-offsets (relative to `page_x0`)
+    for a 9-column 'Prehľad sčítacieho obvodu' subpage:
+      `(col4_x0, col5_x0, col6_x0, col6_x1, col8_x1)`
+    Accounts for the ~5% horizontal offset between 'right' subpages (Pages 1 & 3, where the
+    spine fold is on the left) and 'left' subpages (Pages 2 & 4, where the outer paper margin
+    is on the left).
+    """
+    pw = max(1, page_x1 - page_x0)
+    is_r = page_half == "right"
+    def_c4_0 = int(pw * (0.352 if is_r else 0.405))
+    def_c5_0 = int(pw * (0.412 if is_r else 0.466))
+    def_c6_0 = int(pw * (0.472 if is_r else 0.528))
+    def_c6_1 = int(pw * (0.656 if is_r else 0.710))
+    def_c8_1 = int(pw * (0.784 if is_r else 0.835))
+    if page_half not in ("left", "right") or pw < 1000:
+        return (
+            int(pw * 0.352),
+            int(pw * 0.412),
+            int(pw * (0.470 if is_r else 0.505)),
+            int(pw * (0.672 if is_r else 0.708)),
+            int(pw * (0.825 if is_r else 0.855)),
+        )
+
+    sub = gray[max(0, y_top) : min(gray.shape[0], y_bot), page_x0:page_x1]
+    if sub.size == 0 or sub.shape[0] < 80:
+        return def_c4_0, def_c5_0, def_c6_0, def_c6_1, def_c8_1
+
+    bg = float(np.percentile(sub[::4, ::4], 78)) if sub.size >= 64 else float(np.percentile(sub, 78))
+    inv = np.clip(bg - sub.astype(np.float32), 0.0, 255.0).astype(np.uint8)
+    vert_h = max(40, min(140, sub.shape[0] // 6))
+    vert = cv2.morphologyEx(inv, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, vert_h)))
+    vproj = np.mean(vert, axis=0)
+    vs = np.convolve(vproj, np.ones(5) / 5.0, mode="same")
+
+    def _find_peak(f_lo: float, f_hi: float, default_px: int) -> int:
+        lo = max(0, int(pw * f_lo))
+        hi = min(pw, int(pw * f_hi))
+        if hi <= lo:
+            return default_px
+        sl = vs[lo:hi]
+        if float(np.max(sl)) < 4.0:
+            return default_px
+        return lo + int(np.argmax(sl))
+
+    if is_r:
+        c4_0 = _find_peak(0.325, 0.380, def_c4_0)
+        c5_0 = _find_peak(0.385, 0.440, def_c5_0)
+        c6_0 = _find_peak(0.445, 0.500, def_c6_0)
+        c6_1 = _find_peak(0.625, 0.680, def_c6_1)
+        c8_1 = _find_peak(0.755, 0.810, def_c8_1)
+    else:
+        c4_0 = _find_peak(0.380, 0.435, def_c4_0)
+        c5_0 = _find_peak(0.440, 0.495, def_c5_0)
+        c6_0 = _find_peak(0.505, 0.560, def_c6_0)
+        c6_1 = _find_peak(0.685, 0.740, def_c6_1)
+        c8_1 = _find_peak(0.805, 0.865, def_c8_1)
+    return c4_0, c5_0, c6_0, c6_1, c8_1
+
+
+def _overview_row_has_handwriting(
+    row_strip: np.ndarray,
+    *,
+    page_half: str = "full",
+    col6_bounds: tuple[int, int] | None = None,
+) -> bool:
     """
     Checks whether a sliced row on a 'Prehľad sčítacieho obvodu' (District Overview Sheet)
     contains handwritten/typed entries in the House Number / Settlement / Owner Name columns.
@@ -1050,45 +1133,61 @@ def _overview_row_has_handwriting(row_strip: np.ndarray) -> bool:
     roi_u8 = gray[:, int(rw * 0.04) : int(rw * 0.86)]
     if roi_u8.size == 0:
         return False
-    c6_u8 = gray[:, int(rw * 0.35) : int(rw * 0.67)]
 
-    try:
-        from backend.app.pipeline.lexicon import _rust_lex
+    is_highres_bifolio_half = page_half in ("left", "right") and rw >= 1800
+    if is_highres_bifolio_half:
+        if col6_bounds is not None:
+            c6_x0 = max(0, min(rw - 10, col6_bounds[0] + 4))
+            c6_x1 = max(c6_x0 + 10, min(rw, col6_bounds[1] - 4))
+        else:
+            is_r = page_half == "right"
+            c6_x0 = int(rw * (0.475 if is_r else 0.525))
+            c6_x1 = int(rw * (0.655 if is_r else 0.710))
+        c6_u8 = gray[:, c6_x0:c6_x1]
+        c345_u8 = gray[:, int(rw * 0.21) : int(rw * 0.48)]
+    else:
+        c6_u8 = gray[:, int(rw * 0.35) : int(rw * 0.67)]
+        c345_u8 = None
 
-        if _rust_lex is not None and hasattr(_rust_lex, "row_ink_metrics_gray_u8_rs"):
-            c_roi = np.ascontiguousarray(roi_u8, dtype=np.uint8)
-            ink_ratio, horiz_transitions = _rust_lex.row_ink_metrics_gray_u8_rs(
-                c_roi.tobytes(), int(c_roi.shape[0]), int(c_roi.shape[1])
-            )
-            if float(ink_ratio) < 0.008 or int(horiz_transitions) < max(10, int((y1 - y0) * 0.35)):
-                return False
-            if c6_u8.size > 0:
-                c6_contig = np.ascontiguousarray(c6_u8, dtype=np.uint8)
-                c6_ratio, c6_trans = _rust_lex.row_ink_metrics_gray_u8_rs(
-                    c6_contig.tobytes(), int(c6_contig.shape[0]), int(c6_contig.shape[1])
+    def _metrics_for(u8_slice: np.ndarray) -> tuple[float, int]:
+        if u8_slice.size == 0:
+            return 0.0, 0
+        try:
+            from backend.app.pipeline.lexicon import _rust_lex
+
+            if _rust_lex is not None and hasattr(_rust_lex, "row_ink_metrics_gray_u8_rs"):
+                contig = np.ascontiguousarray(u8_slice, dtype=np.uint8)
+                rat, tr = _rust_lex.row_ink_metrics_gray_u8_rs(
+                    contig.tobytes(), int(contig.shape[0]), int(contig.shape[1])
                 )
-                if float(c6_ratio) < 0.016 or int(c6_trans) < max(6, int((y1 - y0) * 0.16)):
-                    return False
-            return True
-    except Exception:
-        pass
+                return float(rat), int(tr)
+        except Exception:
+            pass
+        f_arr = u8_slice.astype(np.float32)
+        col_bg = np.median(f_arr, axis=0, keepdims=True)
+        ink_m = ((col_bg - f_arr) > 24.0).astype(np.uint8)
+        return float(np.mean(ink_m > 0)), int(np.sum(np.abs(np.diff(ink_m, axis=1)) > 0))
 
-    roi = roi_u8.astype(np.float32)
-    col_bg = np.median(roi, axis=0, keepdims=True)
-    residual = col_bg - roi
-    ink_mask = (residual > 24.0).astype(np.uint8)
-    ink_ratio = float(np.mean(ink_mask > 0))
-    horiz_transitions = int(np.sum(np.abs(np.diff(ink_mask, axis=1)) > 0))
+    ink_ratio, horiz_transitions = _metrics_for(roi_u8)
     if ink_ratio < 0.008 or horiz_transitions < max(10, int((y1 - y0) * 0.35)):
         return False
 
+    if is_highres_bifolio_half:
+        # Require handwriting strokes in BOTH Column 6 (Owner Name) and Columns 3-5 (House Number / Occupancy)
+        # so 'Spolu:' total rows (empty Col 6) and bottom-right commissioner signatures (empty Cols 3-5) are suppressed
+        c6_ratio, c6_trans = _metrics_for(c6_u8)
+        if c6_ratio < 0.022 or c6_trans < max(10, int((y1 - y0) * 0.45)):
+            return False
+        if c345_u8 is not None and c345_u8.size > 0:
+            c345_ratio, c345_trans = _metrics_for(c345_u8)
+            if c345_ratio < 0.004 or c345_trans < max(6, int((y1 - y0) * 0.16)):
+                return False
+        return True
+
     # Also require handwriting strokes in the Owner Name / middle columns (0.35w .. 0.67w)
     # so blank 'Súhrn' / 'Spolu' summary rows with empty owner columns are suppressed
-    c6_roi = c6_u8.astype(np.float32)
-    if c6_roi.size > 0:
-        c6_ink = ((np.median(c6_roi, axis=0, keepdims=True) - c6_roi) > 24.0).astype(np.uint8)
-        c6_ratio = float(np.mean(c6_ink > 0))
-        c6_trans = int(np.sum(np.abs(np.diff(c6_ink, axis=1)) > 0))
+    if c6_u8.size > 0:
+        c6_ratio, c6_trans = _metrics_for(c6_u8)
         if c6_ratio < 0.016 or c6_trans < max(6, int((y1 - y0) * 0.16)):
             return False
     return True
@@ -1132,7 +1231,7 @@ def _detect_overview_subpage_lines(
     raw_peaks = [
         y
         for y in range(y_min_search, y_max_search)
-        if smooth[y] > 8.5 and smooth[y] == np.max(smooth[max(0, y - 20) : min(h, y + 21)])
+        if smooth[y] > 6.5 and smooth[y] == np.max(smooth[max(0, y - 20) : min(h, y + 21)])
     ]
     diffs = [float(d) for d in np.diff(raw_peaks) if h * 0.025 <= d <= h * 0.048] if len(raw_peaks) >= 2 else []
     med_step = float(np.median(diffs)) if diffs else float(h * 0.032)
@@ -1163,11 +1262,21 @@ def _detect_overview_subpage_lines(
         if lo >= y_max_search:
             break
         sub = smooth[lo : min(y_max_search, hi + 1)]
-        if sub.size == 0 or float(np.max(sub)) < 6.5:
+        if sub.size == 0 or float(np.max(sub)) < 6.0:
             break
         best_y = lo + int(np.argmax(sub))
+        # Once past Row 1's taller Prenos band, prefer a clear grid line peak inside the tight
+        # [0.91 * med_step, 1.09 * med_step] band so a handwritten underline in a 'Spolu:' cell does not pull best_y down
+        if len(selected) > 1:
+            t_lo = max(lo, int(round(cur + 0.91 * med_step)))
+            t_hi = min(min(y_max_search, hi + 1), int(round(cur + 1.09 * med_step)) + 1)
+            if t_hi > t_lo and float(np.max(smooth[t_lo:t_hi])) >= 8.0:
+                best_y = t_lo + int(np.argmax(smooth[t_lo:t_hi]))
         selected.append(best_y)
         cur = best_y
+        # Cover page (Page 1) of a 4-page bifolio has 17 house rows (18 boundary lines), followed by the bottom subtotal band
+        if is_cover_page and page_w >= 1800 and len(selected) >= 18 and (float(smooth[best_y]) >= 25.0 or best_y >= int(h * 0.89)):
+            break
         # Stop at the thick double border above 'Súhrn' on continuation pages
         if not is_cover_page and len(selected) >= 16 and float(smooth[best_y]) >= 55.0:
             break
@@ -1252,7 +1361,16 @@ def slice_census_overview_sheet(
             if not line_models:
                 continue
             first_line = line_models[0]
+            last_line = line_models[-1]
             split_x = page_x0 + int(page_w * 0.56)
+            c4_x0, c5_x0, c6_x0, c6_x1, c8_x1 = _detect_overview_subpage_col_bounds(
+                gray,
+                page_x0,
+                page_x1,
+                int(round(first_line.y_center)),
+                int(round(last_line.y_center)),
+                page_half,
+            )
 
             header_top = _AngledLineModel(
                 y_center=max(16.0, first_line.y_center - max(h * (0.36 if is_cover_page else 0.14), 380.0)),
@@ -1273,7 +1391,7 @@ def slice_census_overview_sheet(
             cv2.imwrite(str(header_file), suppress_auditor_crayon(header_crop), [int(cv2.IMWRITE_JPEG_QUALITY), 88])
             sub_header_rel = f"/media/crops/scan_{scan_id}/{header_fname}"
 
-            candidate_strips: list[tuple[int, _AngledLineModel, _AngledLineModel, np.ndarray, np.ndarray, np.ndarray, bool]] = []
+            candidate_strips: list[tuple[int, _AngledLineModel, _AngledLineModel, np.ndarray, np.ndarray, np.ndarray, bool, bool]] = []
             consec_empty = 0
             any_kept_on_subpage = False
             for idx in range(1, len(line_models)):
@@ -1289,17 +1407,21 @@ def slice_census_overview_sheet(
                         img, page_x0, page_x1, top_m, bot_m, pad_y=pad_y, out_h=row_out_h
                     )
 
-                has_ink = _overview_row_has_handwriting(stitched_strip)
+                has_ink = _overview_row_has_handwriting(
+                    stitched_strip,
+                    page_half=page_half,
+                    col6_bounds=(c6_x0, c6_x1),
+                )
                 if booklet_page in (3, 4) or page_half == "full":
                     if has_ink:
-                        # Stop before the 'Súhrn' settlement summary table or revisor signature block
-                        if any_kept_on_subpage and consec_empty >= 2:
+                        # Stop before the 'Súhrn'/'Spolu' summary table or closing date/signature block
+                        if any_kept_on_subpage and (consec_empty >= 2 or (booklet_page == 4 and consec_empty >= 1)):
                             break
                         consec_empty = 0
                         any_kept_on_subpage = True
                     else:
                         consec_empty += 1
-                        if not any_kept_on_subpage and booklet_page == 4 and consec_empty >= 2:
+                        if booklet_page == 4 and (any_kept_on_subpage or consec_empty >= 2):
                             break
                         continue
                 else:
@@ -1309,22 +1431,49 @@ def slice_census_overview_sheet(
                 # Full active-page width strip for single-pass Table Recognition OCR, plus focused Owner+Counts right crop
                 left_strip = stitched_strip.copy()
                 # On continuation pages (Pages 2, 3, 4), Row 1 has a narrow 'Prenos' carry-over band
-                # at the top of Columns 7-8 (0.68w..0.94w). Mask that top-right carry-over band on OCR strips
-                # so carry-over totals do not overwrite Row 1's household/person counts.
+                # at the top of Columns 4-5 (c4_x0..c6_x0) and Columns 7-8 (c6_x1..). Mask that top carry-over band
+                # on OCR strips without touching Column 6 (Owner Name, c6_x0..c6_x1).
                 if not is_cover_page and idx == 1 and (bot_m.y_center - top_m.y_center) >= 1.20 * med_step:
                     rh_s, rw_s = left_strip.shape[:2]
                     paper_bgr = np.percentile(left_strip.reshape(-1, 3), 78, axis=0).astype(np.uint8)
-                    left_strip[: int(rh_s * 0.36), int(rw_s * 0.68) : int(rw_s * 0.94)] = paper_bgr
+                    m45_0 = max(0, c4_x0) if page_half in ("left", "right") else int(rw_s * 0.34)
+                    m45_1 = max(m45_0, c6_x0 - 4) if page_half in ("left", "right") else int(rw_s * 0.49)
+                    m78_0 = min(rw_s, c6_x1 + 4) if page_half in ("left", "right") else int(rw_s * 0.68)
+                    m78_1 = min(rw_s, int(rw_s * 0.94))
+                    left_strip[: int(rh_s * 0.36), m45_0:m45_1] = paper_bgr
+                    left_strip[: int(rh_s * 0.36), m78_0:m78_1] = paper_bgr
+
+                # Detect whether Column 4 (obývaný) is blank while Column 5 (neobývaný) has '1' and Columns 7-8 are blank
+                col5_uninhabited = False
+                if page_half in ("left", "right") and page_w >= 1800:
+                    rh_st = stitched_strip.shape[0]
+                    sub_st = stitched_strip[max(2, int(rh_st * 0.18)) : max(6, int(rh_st * 0.82)), :]
+                    if sub_st.size > 0:
+                        clean_st = suppress_auditor_crayon(sub_st) if sub_st.ndim == 3 else sub_st
+                        g_st = (
+                            cv2.cvtColor(clean_st, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                            if clean_st.ndim == 3
+                            else clean_st.astype(np.float32)
+                        )
+                        c4_slice = g_st[:, max(0, c4_x0 + 4) : max(c4_x0 + 8, c5_x0 - 4)]
+                        c5_slice = g_st[:, max(0, c5_x0 + 4) : max(c5_x0 + 8, c6_x0 - 4)]
+                        c78_slice = g_st[:, max(0, c6_x1 + 4) : max(c6_x1 + 8, c8_x1 - 4)]
+                        if c4_slice.size > 0 and c5_slice.size > 0 and c78_slice.size > 0:
+                            c4_rat = float(np.mean((np.median(c4_slice, axis=0, keepdims=True) - c4_slice) > 26.0))
+                            c5_rat = float(np.mean((np.median(c5_slice, axis=0, keepdims=True) - c5_slice) > 26.0))
+                            c78_rat = float(np.mean((np.median(c78_slice, axis=0, keepdims=True) - c78_slice) > 26.0))
+                            if c4_rat < 0.005 and c5_rat >= 0.012 and c78_rat < 0.022:
+                                col5_uninhabited = True
 
                 # Focused Columns 6..8 (Owner Name + Household Count + Present Persons Count) crop at ~5.2:1 aspect ratio.
                 # Keep natural ink on right_strip (without crayon suppression) so red apartment counts in Col 7
                 # and black person counts crossed by red checkmarks in Col 8 remain completely intact.
-                r_x0 = max(0, int(page_w * (0.470 if is_cover_page else 0.505)))
-                r_x1 = min(page_w, int(page_w * (0.825 if is_cover_page else 0.855)))
+                r_x0 = max(0, c6_x0 + 2) if page_half in ("left", "right") else max(0, int(page_w * (0.470 if is_cover_page else 0.505)))
+                r_x1 = min(page_w, c8_x1 + 10) if page_half in ("left", "right") else min(page_w, int(page_w * (0.825 if is_cover_page else 0.855)))
                 right_raw = left_strip[:, r_x0:r_x1]
                 r_bg = np.median(right_raw, axis=(0, 1)).astype(np.uint8).tolist() if right_raw.size else [235, 235, 235]
                 right_strip = cv2.copyMakeBorder(right_raw, 16, 16, 12, 12, cv2.BORDER_CONSTANT, value=r_bg)
-                candidate_strips.append((idx, top_m, bot_m, left_strip, right_strip, stitched_strip, has_ink))
+                candidate_strips.append((idx, top_m, bot_m, left_strip, right_strip, stitched_strip, has_ink, col5_uninhabited))
 
             any_ink = any(item[6] for item in candidate_strips)
             if not any_ink and not (is_cover_page and sp_idx == 0 and len(subpage_specs) == 1):
@@ -1336,7 +1485,7 @@ def slice_census_overview_sheet(
             )
             cv2.polylines(overlay, [hdr_pts], isClosed=False, color=(255, 90, 30), thickness=4)
 
-            for orig_idx, top_m, bot_m, left_strip, right_strip, stitched_strip, has_ink in candidate_strips:
+            for orig_idx, top_m, bot_m, left_strip, right_strip, stitched_strip, has_ink, col5_uninhabited in candidate_strips:
                 if any_ink and not has_ink:
                     continue
                 if not any_ink and orig_idx > 10:
@@ -1353,8 +1502,8 @@ def slice_census_overview_sheet(
                 right_ocr_img = right_strip
 
                 # Dedicated Column 6 (Meno majiteľa domu) crop at ~3.2:1 aspect ratio with vertical padding
-                o_x0 = max(0, int(page_w * (0.475 if is_cover_page else 0.512)))
-                o_x1 = min(page_w, int(page_w * (0.672 if is_cover_page else 0.708)))
+                o_x0 = max(0, c6_x0 + 3) if page_half in ("left", "right") else max(0, int(page_w * (0.475 if is_cover_page else 0.512)))
+                o_x1 = min(page_w, c6_x1 - 3) if page_half in ("left", "right") else min(page_w, int(page_w * (0.672 if is_cover_page else 0.708)))
                 owner_raw = left_strip[:, o_x0:o_x1]
                 o_bg = np.median(owner_raw, axis=(0, 1)).astype(np.uint8).tolist() if owner_raw.size else [235, 235, 235]
                 owner_ocr_img = cv2.copyMakeBorder(owner_raw, 20, 20, 16, 16, cv2.BORDER_CONSTANT, value=o_bg)
@@ -1413,6 +1562,7 @@ def slice_census_overview_sheet(
                                 "page_x1": page_x1,
                                 "header_crop_url": sub_header_rel,
                                 "owner_crop_url": f"/media/crops/scan_{scan_id}/row_{out_row_idx:02d}_owner.jpg",
+                                "col5_uninhabited": col5_uninhabited,
                             }
                         ],
                         angle_left_deg=round(top_m.angle_deg, 2),

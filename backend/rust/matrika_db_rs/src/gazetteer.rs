@@ -51,6 +51,30 @@ static CANONICAL_MUNI_SYNONYMS: Lazy<HashMap<&'static str, &'static str>> = Lazy
         ("velke topolcany", "velke topolcany"),
         ("topolcany velke", "velke topolcany"),
         ("vel topolcany", "velke topolcany"),
+        ("horne dubove", "horne dubove"),
+        ("dubove horne", "horne dubove"),
+        ("hornie dubove", "horne dubove"),
+        ("dubove hornie", "horne dubove"),
+        ("hor dubove", "horne dubove"),
+        ("dubore harne", "horne dubove"),
+        ("horne dubore", "horne dubove"),
+        ("lormie gubrove", "horne dubove"),
+        ("dolne dubove", "dolne dubove"),
+        ("dubove dolne", "dolne dubove"),
+        ("dolnie dubove", "dolne dubove"),
+        ("dubove dolnie", "dolne dubove"),
+        ("dol dubove", "dolne dubove"),
+        ("dubove dalmie", "dolne dubove"),
+        ("dubove dolni", "dolne dubove"),
+        ("dubove dolnic", "dolne dubove"),
+        ("horne dubovany", "horne dubovany"),
+        ("dubovany horne", "horne dubovany"),
+        ("dolne dubovany", "dolne dubovany"),
+        ("dubovany dolne", "dolne dubovany"),
+        ("horna krupa", "horna krupa"),
+        ("krupa horna", "horna krupa"),
+        ("dolna krupa", "dolna krupa"),
+        ("krupa dolna", "dolna krupa"),
     ] {
         m.insert(k, v);
     }
@@ -70,6 +94,15 @@ static CANONICAL_MUNI_DISPLAY: Lazy<HashMap<&'static str, &'static str>> = Lazy:
         ("velke ripnany", "Veľké Ripňany"),
         ("male ripnany", "Malé Ripňany"),
         ("velke topolcany", "Veľké Topoľčany"),
+        ("horne dubove", "Horné Dubové"),
+        ("dolne dubove", "Dolné Dubové"),
+        ("horne dubovany", "Horné Dubovany"),
+        ("dolne dubovany", "Dolné Dubovany"),
+        ("horna krupa", "Horná Krupá"),
+        ("dolna krupa", "Dolná Krupá"),
+        ("jaslovce", "Jáslovce"),
+        ("katlovce", "Kátlovce"),
+        ("boleraz", "Boleráz"),
     ] {
         m.insert(k, v);
     }
@@ -169,6 +202,17 @@ pub fn canonical_municipality_key_internal(municipality: Option<&str>) -> String
     }
     if words.is_empty() {
         return String::new();
+    }
+    if words.len() >= 2 && words[0] == "obec" {
+        words.remove(0);
+    }
+    const PREFIX_ADJS: &[&str] = &[
+        "horne", "horny", "horna", "horni", "dolne", "dolny", "dolna", "dolni",
+        "velke", "velky", "velka", "male", "maly", "mala", "stredne", "stredny", "stredna",
+        "nove", "novy", "nova", "stare", "stary", "stara", "zemianske", "zemiansky", "zemianska",
+    ];
+    if words.len() == 2 && PREFIX_ADJS.contains(&words[1]) && !PREFIX_ADJS.contains(&words[0]) {
+        words.swap(0, 1);
     }
     let cleaned = words.join(" ");
     if let Some(&syn) = CANONICAL_MUNI_SYNONYMS.get(cleaned.as_str()) {

@@ -639,14 +639,18 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
       "cair-test001"
     );
 
-    // G. In CensusHub (/scitacie-harky), clicking OCR on a sheet attaches progress directly to that sheet card
+    // G. In CensusHub (/scitacie-harky), clicking OCR on a sheet attaches compact stage progress (1/5) + hover details while keeping Otvoriť/OCR clickable
     await page.goto("/scitacie-harky?obec=Obec+Testov%C3%A1", { waitUntil: "networkidle" });
     const hubOcrBtn = page.getByRole("button", { name: /^OCR$/ }).first();
     await hubOcrBtn.click();
-    await expect(page.getByTestId("attached-sheet-progress-cair-test001")).toBeVisible();
-    await expect(page.getByTestId("attached-sheet-progress-cair-test001")).toContainText(
-      "AI OCR dokončené"
-    );
+    const progressEl = page.getByTestId("attached-sheet-progress-cair-test001");
+    await expect(progressEl).toBeVisible();
+    await expect(progressEl).toContainText("/5");
+    await progressEl.hover();
+    await expect(page.getByTestId("attached-sheet-progress-details-cair-test001")).toBeVisible();
+    await expect(progressEl).toContainText("AI OCR dokončené");
+    await expect(page.getByRole("link", { name: "Otvoriť" }).first()).toBeVisible();
+    await expect(hubOcrBtn).toBeVisible();
     await page.unroute("**/api/census/sheets/*/download-and-process*");
 
     await page.goto("/hladanie", { waitUntil: "networkidle" });

@@ -32,6 +32,14 @@ def _session_file_db_path(session: Session) -> str | None:
     try:
         if session.new or session.dirty or session.deleted:
             return None
+        if session.in_transaction():
+            raw_conn = getattr(
+                getattr(session.connection(), "connection", None),
+                "dbapi_connection",
+                None,
+            )
+            if raw_conn is not None and getattr(raw_conn, "in_transaction", False):
+                return None
         bind = session.get_bind()
         db_name = getattr(getattr(bind, "url", None), "database", None)
         if not db_name or db_name == ":memory:" or str(db_name).startswith("file::memory:"):
@@ -743,38 +751,6 @@ def submit_ocr_feedback_fast(
     municipal_district_id: int | None = None,
     light: bool = False,
 ) -> dict[str, Any]:
-    db_p = _session_file_db_path(session)
-    if db_p and _rust_db is not None:
-        try:
-            d_ocr, d_dec, d_ext, d_lay, known = _rust_model_defaults_args()
-            raw = _rust_db.upsert_ocr_feedback_rs(
-                db_p,
-                str(settings.data_dir),
-                datetime.now(timezone.utc).isoformat(),
-                json.dumps(settings.get_ai_runtime_config(), ensure_ascii=False),
-                d_ocr,
-                d_dec,
-                d_ext,
-                d_lay,
-                known,
-                verdict,
-                comment=comment,
-                expected_correction=expected_correction,
-                target_type=target_type,
-                row_id=row_id,
-                scan_id=scan_id,
-                census_sheet_id=census_sheet_id,
-                person_fact_id=person_fact_id,
-                overview_house_id=overview_house_id,
-                municipal_district_id=municipal_district_id,
-            )
-            res = json.loads(raw)
-            if light:
-                res.pop("report_markdown", None)
-            return res
-        except Exception:
-            pass
-
     fb = upsert_ocr_feedback(
         session,
         verdict=verdict,
@@ -807,31 +783,6 @@ def delete_ocr_feedback_fast(
     *,
     light: bool = False,
 ) -> dict[str, Any] | None:
-    db_p = _session_file_db_path(session)
-    if db_p and _rust_db is not None:
-        try:
-            d_ocr, d_dec, d_ext, d_lay, known = _rust_model_defaults_args()
-            raw_opt = _rust_db.delete_ocr_feedback_rs(
-                db_p,
-                str(settings.data_dir),
-                datetime.now(timezone.utc).isoformat(),
-                json.dumps(settings.get_ai_runtime_config(), ensure_ascii=False),
-                d_ocr,
-                d_dec,
-                d_ext,
-                d_lay,
-                known,
-                feedback_id,
-            )
-            if raw_opt is None:
-                return None
-            res = json.loads(raw_opt)
-            if light:
-                res.pop("report_markdown", None)
-            return res
-        except Exception:
-            pass
-
     fb = session.get(OCRFeedback, feedback_id)
     if not fb:
         return None
@@ -956,36 +907,6 @@ def reset_ocr_feedback(
     sheet, scan(s), row(s), person fact, overview house, or municipal overview district,
     and refreshes the workspace LLM debug report files.
     """
-    if commit:
-        db_p = _session_file_db_path(session)
-        if db_p and _rust_db is not None:
-            try:
-                eff_scan_ids = list(set(scan_ids or []) | ({scan_id} if scan_id else set()))
-                eff_row_ids = list(set(row_ids or []) | ({row_id} if row_id else set()))
-                d_ocr, d_dec, d_ext, d_lay, known = _rust_model_defaults_args()
-                return int(
-                    _rust_db.reset_ocr_feedback_rs(
-                        db_p,
-                        str(settings.data_dir),
-                        datetime.now(timezone.utc).isoformat(),
-                        json.dumps(settings.get_ai_runtime_config(), ensure_ascii=False),
-                        d_ocr,
-                        d_dec,
-                        d_ext,
-                        d_lay,
-                        known,
-                        census_sheet_id=census_sheet_id,
-                        scan_ids=eff_scan_ids if eff_scan_ids else None,
-                        row_ids=eff_row_ids if eff_row_ids else None,
-                        person_fact_id=person_fact_id,
-                        overview_house_id=overview_house_id,
-                        municipal_district_id=municipal_district_id,
-                        persist_files=persist_report,
-                    )
-                )
-            except Exception:
-                pass
-
     fb_candidates = list(
         session.exec(
             select(

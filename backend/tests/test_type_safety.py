@@ -840,6 +840,80 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
             self.assertAlmostEqual(_rust_db.sequence_ratio_rs("slovenska", "slovensko"), 16.0 / 18.0)
             _rust_db.clear_db_pool_rs(db_p)
 
+    def test_corrupted_sqlite_db_automatic_salvage_recovery(self) -> None:
+        from sqlmodel import Session, SQLModel, create_engine, select
+        from backend.app.db.models import CensusSheet, OCRFeedback, PersonFact
+        from backend.app.db.session import (
+            _is_sqlite_db_healthy,
+            _salvage_corrupted_sqlite_db,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            corrupt_db = Path(tmpdir) / "corrupt_test.db"
+            c_engine = create_engine(f"sqlite:///{corrupt_db}")
+            SQLModel.metadata.create_all(c_engine)
+
+            with Session(c_engine) as session:
+                for i in range(1, 15):
+                    session.add(
+                        CensusSheet(
+                            slovakiana_key=f"cair-salvage{i:03d}",
+                            census_year=1930,
+                            district="Trnava",
+                            municipality="Horný Čepeň",
+                            house_number=str(i),
+                            house_number_int=i,
+                            commissioner_name="Rudolf Pánovský",
+                            download_status="extracted",
+                        )
+                    )
+                session.add(
+                    PersonFact(
+                        row_id=1,
+                        scan_id=1,
+                        census_sheet_id=1,
+                        record_type="census",
+                        given_name_raw="Ján",
+                        surname_raw="Kováč",
+                    )
+                )
+                # Insert a large overflow row in ocrfeedback and then corrupt its page on disk
+                session.add(
+                    OCRFeedback(
+                        target_type="row",
+                        row_id=1,
+                        verdict="incorrect",
+                        extracted_snapshot_json='{"padding":"' + ("X" * 16000) + '"}',
+                    )
+                )
+                session.commit()
+            c_engine.dispose()
+
+            self.assertTrue(_is_sqlite_db_healthy(corrupt_db))
+
+            # Corrupt the last page of the SQLite file on disk so PRAGMA integrity_check fails with malformed disk image
+            raw_bytes = bytearray(corrupt_db.read_bytes())
+            self.assertGreater(len(raw_bytes), 8192)
+            for idx in range(len(raw_bytes) - 4096, len(raw_bytes) - 3900):
+                raw_bytes[idx] = 0xFF
+            corrupt_db.write_bytes(bytes(raw_bytes))
+
+            self.assertFalse(_is_sqlite_db_healthy(corrupt_db))
+
+            # Run automatic salvage recovery
+            ok = _salvage_corrupted_sqlite_db(corrupt_db)
+            self.assertTrue(ok)
+            self.assertTrue(_is_sqlite_db_healthy(corrupt_db))
+
+            repaired_engine = create_engine(f"sqlite:///{corrupt_db}")
+            with Session(repaired_engine) as session:
+                sheets = list(session.exec(select(CensusSheet)).all())
+                facts = list(session.exec(select(PersonFact)).all())
+                self.assertEqual(len(sheets), 14)
+                self.assertEqual(len(facts), 1)
+                self.assertEqual(facts[0].surname_raw, "Kováč")
+            repaired_engine.dispose()
+
 
 
 if __name__ == "__main__":

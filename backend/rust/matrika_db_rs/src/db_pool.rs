@@ -60,30 +60,12 @@ impl Drop for PooledConnection {
 fn configure_new_connection(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.busy_timeout(Duration::from_secs(30))?;
     conn.set_prepared_statement_cache_capacity(128);
-    let requested_mode = std::env::var("SQLITE_JOURNAL_MODE")
-        .unwrap_or_else(|_| "WAL".to_string())
-        .trim()
-        .to_ascii_uppercase();
-    let mode = match requested_mode.as_str() {
-        "WAL" | "DELETE" | "TRUNCATE" | "PERSIST" | "MEMORY" | "OFF" => requested_mode.as_str(),
-        _ => "WAL",
-    };
-    let pragma_sql = format!(
-        "PRAGMA journal_mode={};
-         PRAGMA synchronous=NORMAL;
+    let _ = conn.execute_batch(
+        "PRAGMA synchronous=NORMAL;
          PRAGMA temp_store=MEMORY;
          PRAGMA cache_size=-64000;
          PRAGMA mmap_size=0;",
-        mode
     );
-    if conn.execute_batch(&pragma_sql).is_err() {
-        let _ = conn.execute_batch(
-            "PRAGMA journal_mode=DELETE;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA temp_store=MEMORY;
-             PRAGMA cache_size=-64000;",
-        );
-    }
     Ok(())
 }
 

@@ -236,17 +236,6 @@ def bulk_index_census_sheets(session: Session, sheets: list[CensusSheet]) -> Non
     valid_sheets = [s for s in sheets if s.id is not None]
     if not valid_sheets:
         return
-    try:
-        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
-
-        db_p = _session_file_db_path(session)
-        if db_p and _rust_db is not None and hasattr(_rust_db, "bulk_index_census_sheets_rs"):
-            _rust_db.bulk_index_census_sheets_rs(
-                db_p, [int(s.id) for s in valid_sheets if s.id is not None]
-            )
-            return
-    except Exception:
-        pass
     ids = [str(s.id) for s in valid_sheets]
     for start in range(0, len(ids), 450):
         chunk_ids = ids[start : start + 450]
@@ -281,24 +270,6 @@ def bulk_index_person_facts(
     valid_facts = [f for f in facts if f.id is not None]
     if not valid_facts:
         return
-    try:
-        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
-
-        db_p = _session_file_db_path(session)
-        if (
-            db_p
-            and ocr_by_row_id is None
-            and _rust_db is not None
-            and hasattr(_rust_db, "bulk_index_person_facts_rs")
-        ):
-            for fact in valid_facts:
-                apply_person_fact_search_fields(fact)
-            _rust_db.bulk_index_person_facts_rs(
-                db_p, [int(f.id) for f in valid_facts if f.id is not None]
-            )
-            return
-    except Exception:
-        pass
     ids = [str(f.id) for f in valid_facts]
     for start in range(0, len(ids), 450):
         chunk_ids = ids[start : start + 450]
@@ -331,21 +302,6 @@ def bulk_index_person_facts(
 
 def rebuild_all_fts(session: Session) -> dict[str, int]:
     """Rebuilds the entire FTS5 search index from PersonFact and CensusSheet tables."""
-    try:
-        from backend.app.pipeline.feedback import _rust_db, _session_file_db_path
-
-        db_p = _session_file_db_path(session)
-        if (
-            db_p
-            and _rust_db is not None
-            and hasattr(_rust_db, "bulk_index_person_facts_rs")
-            and hasattr(_rust_db, "bulk_index_census_sheets_rs")
-        ):
-            n_facts = int(_rust_db.bulk_index_person_facts_rs(db_p, None))
-            n_sheets = int(_rust_db.bulk_index_census_sheets_rs(db_p, None))
-            return {"indexed_person_facts": n_facts, "indexed_census_sheets": n_sheets}
-    except Exception:
-        pass
     session.exec(text("DELETE FROM search_index_fts"))
     facts = list(session.exec(select(PersonFact)).all())
     ocr_by_row_id = {

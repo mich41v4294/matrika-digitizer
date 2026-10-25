@@ -2641,7 +2641,9 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 patch.object(ai_client, "chat_completion", side_effect=fake_chat_completion),
             ):
                 res = asyncio.run(run_download_and_pipeline_job(job_id))
-                self.assertEqual(res["processed"], 3)
+                # Only the 2 potential overview sheets (unnum_hh and ov1) are downloaded & processed;
+                # known household sheet h15 (with house_number='15') is skipped without downloading IIIF scans!
+                self.assertEqual(res["processed"], 2)
                 self.assertEqual(res["failed"], 0)
 
                 with Session(test_engine) as session:
@@ -2649,10 +2651,10 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                     unnum_hh = session.exec(select(CensusSheet).where(CensusSheet.slovakiana_key == "cair-ovonly-unnumhh")).one()
                     ov1 = session.exec(select(CensusSheet).where(CensusSheet.slovakiana_key == "cair-ovonly-ov1")).one()
 
-                    # 1. Known household sheet (with house_number='15'): downloaded, NO OCR run on it!
-                    self.assertEqual(h15.download_status, "downloaded")
+                    # 1. Known household sheet (with house_number='15'): skipped completely in overview_only mode!
+                    self.assertEqual(h15.download_status, "cataloged")
                     self.assertEqual(h15.sheet_type, "household")
-                    self.assertIsNotNone(h15.front_scan_id)
+                    self.assertIsNone(h15.front_scan_id)
 
                     # 2. Unnumbered household sheet: downloaded, header OCR ran type detection, stopped at 'sliced' before row OCR!
                     self.assertEqual(unnum_hh.download_status, "sliced")

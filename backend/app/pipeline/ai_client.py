@@ -526,6 +526,7 @@ class LocalAIClient:
             messages.append({"role": "user", "content": prompt})
 
         is_saluki = "saluki" in active_model.lower()
+        is_glm_ocr = "glm-ocr" in active_model.lower()
         if provider == "freellm":
             if is_saluki:
                 messages.append({"role": "assistant", "content": "<think>\n</think>\n"})
@@ -533,9 +534,9 @@ class LocalAIClient:
             messages.append({"role": "assistant", "content": "<think>\n</think>\n"})
 
         effective_max_tokens = max_tokens
-        if provider == "freellm" and not is_saluki:
+        if provider == "freellm" and not is_saluki and not is_glm_ocr:
             effective_max_tokens = max(max_tokens, 2500)
-        elif not is_saluki and not skip_thinking:
+        elif not is_saluki and not is_glm_ocr and not skip_thinking:
             effective_max_tokens = max(max_tokens, 2500)
 
         payload: dict[str, Any] = {

@@ -844,12 +844,21 @@ def list_census_jobs(session: SessionDep) -> dict[str, Any]:
             if (j.job_type == "full_pipeline" and rt)
             else (j.completed_items if j.job_type == "full_pipeline" else 0)
         )
+        cat_sheets = (
+            j.completed_items
+            if j.job_type == "catalog_harvest"
+            else max(j.total_items, int((rt or {}).get("cataloged_sheets") or 0))
+        )
+        tot_sheets = max(
+            j.total_items,
+            int((rt or {}).get("total_sheets") or 0),
+        )
         out.append(
             {
                 **j.model_dump(),
                 "name": flt.get("name") or f"{j.job_type} #{j.id}",
-                "total_sheets": j.total_items,
-                "cataloged_sheets": j.completed_items if j.job_type == "catalog_harvest" else j.total_items,
+                "total_sheets": tot_sheets,
+                "cataloged_sheets": cat_sheets,
                 "downloaded_sheets": dl_sheets,
                 "processed_sheets": proc_sheets,
                 "failed_sheets": j.failed_items,

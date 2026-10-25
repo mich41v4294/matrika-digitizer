@@ -220,11 +220,10 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
         from backend.app.db.models import CensusSheet
 
         sheet = session.get(CensusSheet, scan.census_sheet_id)
-    hdr_prompt = (
-        "Text Recognition:"
-        if (sheet and (sheet.sheet_type in ("overview", "municipal_overview") or not sheet.house_number))
-        else "Table Recognition:"
+    is_overview_or_unnumbered = bool(
+        sheet and (sheet.sheet_type in ("overview", "municipal_overview") or not sheet.house_number)
     )
+    hdr_prompt = "Text Recognition:" if is_overview_or_unnumbered else "Table Recognition:"
     res = await ai_client.chat_completion(
         stage="ocr_header",
         model=settings.model_ocr,
@@ -232,7 +231,7 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
         image_path=header_path,
         image_rel_url=scan.header_crop_path,
         scan_id=scan.id,
-        max_tokens=600,
+        max_tokens=200 if is_overview_or_unnumbered else 400,
     )
     raw_text = html_table_to_pipe_text(res["content"])
     year, rec_type = detect_header_metadata(raw_text, scan.filename)

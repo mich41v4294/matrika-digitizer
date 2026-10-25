@@ -763,6 +763,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
               }));
             }
             void loadWorkspaceData(true);
+          } else if (msg.type === "completion") {
+            void loadWorkspaceData(true);
           }
         } catch {
           // ignore
@@ -1324,6 +1326,30 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     };
   };
 
+  // Poll faster (every 3.5s) while a census job is actively running, or every 18s when idle
+  const hasRunningJob = useMemo(
+    () => jobs.some((j) => j.status === "running"),
+    [jobs]
+  );
+  useEffect(() => {
+    if (!hasRunningJob) return;
+    const fastTimer = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadWorkspaceData(true);
+    }, 3500);
+    return () => window.clearInterval(fastTimer);
+  }, [
+    hasRunningJob,
+    workspaceSearch,
+    selectedDistrictName,
+    selectedMunicipality,
+    selectedYearFilter,
+    streetFilter,
+    personNameFilter,
+    birthYearFilter,
+    birthPlaceFilter,
+  ]);
+
   const handleHarvestMunicipality = async (
     muniName?: string,
     muniTagKey?: string | null
@@ -1332,23 +1358,6 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       resolveMunicipalityAndDistrictTags(muniName, muniTagKey);
     setBusyAction(`harvest_${targetName || "all"}`);
     try {
-      // First index immediate hits via remote-search so user sees sheets right away
-      await fetch("/api/census/sheets/remote-search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query_text: resolvedMuniTag
-            ? workspaceSearch.trim() || null
-            : targetName || workspaceSearch.trim() || null,
-          year_tag: selectedYearTag || null,
-          district_tag: resolvedDistTag || null,
-          municipality_tag: resolvedMuniTag || null,
-          page: 1,
-          page_size: Math.min(50, maxSheetsInput || 40),
-          save_to_catalog: true,
-        }),
-      });
-      // Also kick off background catalog harvest job if batch > 20
       await fetch("/api/census/jobs/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1403,21 +1412,6 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     );
     setBusyAction(`overview_ocr_${targetName || "all"}`);
     try {
-      await fetch("/api/census/sheets/remote-search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query_text: resolvedMuniTag
-            ? workspaceSearch.trim() || null
-            : targetName || workspaceSearch.trim() || null,
-          year_tag: selectedYearTag || null,
-          district_tag: resolvedDistTag || null,
-          municipality_tag: resolvedMuniTag || null,
-          page: 1,
-          page_size: 50,
-          save_to_catalog: true,
-        }),
-      });
       await fetch("/api/census/jobs/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2919,14 +2913,25 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   />
                 </div>
                 <span className="text-stone-700 truncate">
-                  Katalóg: <strong>{activeRunningJob.cataloged_sheets}</strong> · Stiahnuté:{" "}
-                  <strong>
-                    {activeRunningJob.downloaded_sheets}
-                    {activeRunningJob.total_sheets
-                      ? `/${activeRunningJob.total_sheets}`
-                      : ""}
-                  </strong>{" "}
-                  · Prečítané: <strong>{activeRunningJob.processed_sheets}</strong>
+                  {livePipelineState?.active_stage === "census_harvest" &&
+                  livePipelineState?.message_sk ? (
+                    <span>
+                      {lang === "sk"
+                        ? livePipelineState.message_sk
+                        : livePipelineState.message_en || livePipelineState.message_sk}
+                    </span>
+                  ) : (
+                    <>
+                      Katalóg: <strong>{activeRunningJob.cataloged_sheets}</strong> · Stiahnuté:{" "}
+                      <strong>
+                        {activeRunningJob.downloaded_sheets}
+                        {activeRunningJob.total_sheets
+                          ? `/${activeRunningJob.total_sheets}`
+                          : ""}
+                      </strong>{" "}
+                      · Prečítané: <strong>{activeRunningJob.processed_sheets}</strong>
+                    </>
+                  )}
                 </span>
               </div>
               <div className="flex items-center gap-1.5 shrink-0">

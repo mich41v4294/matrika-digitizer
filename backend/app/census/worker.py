@@ -64,7 +64,7 @@ def is_census_sheet_done(
             or not (sheet.house_number and str(sheet.house_number).strip())
         )
         if not is_potential_ov:
-            return status in DONE_DOWNLOAD_ONLY_STATUSES
+            return True
         if status in DONE_PIPELINE_STATUSES:
             return True
         if status == "sliced" and sheet.sheet_type == "household" and sheet.front_scan_id:
@@ -145,8 +145,15 @@ def _find_matching_census_sheets(
     dist_folded = fold_text_diacritics(district) if district else ""
 
     for s in all_rows:
-        if only_undone and overview_only and is_census_sheet_done(s, run_ocr=run_ocr, overview_only=True):
-            continue
+        if overview_only:
+            is_potential_ov = bool(
+                s.sheet_type in ("municipal_overview", "overview")
+                or not (s.house_number and str(s.house_number).strip())
+            )
+            if not is_potential_ov:
+                continue
+            if only_undone and is_census_sheet_done(s, run_ocr=run_ocr, overview_only=True):
+                continue
         if muni_keys or municipality:
             key_ok = bool(muni_keys and s.municipality_key in muni_keys)
             name_ok = bool(eff_muni_name and _sheet_matches_muni_filter(s, eff_muni_name))
@@ -330,7 +337,16 @@ async def run_catalog_harvest_job(
             items = res.get("items") or []
             total_remote = int(res.get("total") or 0)
             last_total_remote = total_remote
-            await slovakiana_client.download_thumbnails_batch(items)
+            if finalize_job or len(items) <= 40:
+                await slovakiana_client.download_thumbnails_batch(items)
+            else:
+                priority_items = [
+                    it
+                    for it in items
+                    if not (it.get("house_number") and str(it.get("house_number")).strip())
+                ][:40]
+                if priority_items:
+                    await slovakiana_client.download_thumbnails_batch(priority_items)
 
             with Session(engine) as session:
                 job = session.get(CensusDownloadJob, job_id)
@@ -366,6 +382,11 @@ async def run_catalog_harvest_job(
 
                 if finalize_job:
                     job.completed_items += len(items)
+                elif job.id in _ACTIVE_JOB_RUNTIME:
+                    _ACTIVE_JOB_RUNTIME[job.id]["cataloged_sheets"] = (
+                        int(_ACTIVE_JOB_RUNTIME[job.id].get("cataloged_sheets") or 0) + len(items)
+                    )
+                    _ACTIVE_JOB_RUNTIME[job.id]["remote_total"] = total_remote
                 job.cursor_page = page + 1
                 job.updated_at = utcnow()
                 session.add(job)

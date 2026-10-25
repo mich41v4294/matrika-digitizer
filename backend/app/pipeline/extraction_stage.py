@@ -4993,7 +4993,9 @@ async def _extract_census_overview_sheet_locked(
         # Header OCR on front page using Text Recognition to capture obvod_number & commissioner_name
         if page_side == "front" and layout_res.header_crop_rel:
             h_path = media_rel_to_path(layout_res.header_crop_rel)
-            cached_h = trace_by_img.get(layout_res.header_crop_rel) if can_reuse_scan_cache else None
+            cached_h = (
+                trace_by_img.get(layout_res.header_crop_rel) if can_reuse_scan_cache else None
+            ) or (scan_obj.header_raw_ocr if scan_obj.header_raw_ocr else None)
             if cached_h and ("prehľad" in cached_h.lower() or "prehlad" in cached_h.lower() or "komisár" in cached_h.lower() or "komisar" in cached_h.lower()):
                 h_text = html_table_to_pipe_text(cached_h)
             elif h_path and h_path.exists():
@@ -5004,7 +5006,7 @@ async def _extract_census_overview_sheet_locked(
                     image_path=h_path,
                     image_rel_url=layout_res.header_crop_rel,
                     scan_id=scan_obj.id,
-                    max_tokens=500,
+                    max_tokens=200,
                 )
                 h_text = html_table_to_pipe_text(res_h["content"])
             else:
@@ -6201,7 +6203,9 @@ async def _extract_census_municipal_overview_sheet_locked(
 
         if page_side == "front" and layout_res.header_crop_rel:
             h_path = media_rel_to_path(layout_res.header_crop_rel)
-            cached_h = trace_by_img.get(layout_res.header_crop_rel) if can_reuse_scan_cache else None
+            cached_h = (
+                trace_by_img.get(layout_res.header_crop_rel) if can_reuse_scan_cache else None
+            ) or (scan_obj.header_raw_ocr if scan_obj.header_raw_ocr else None)
             h_text = ""
             if cached_h and ("revízor" in cached_h.lower() or "revizor" in cached_h.lower() or "obecný" in cached_h.lower() or "obecny" in cached_h.lower()):
                 h_text = html_table_to_pipe_text(cached_h)
@@ -6220,7 +6224,7 @@ async def _extract_census_municipal_overview_sheet_locked(
                     image_path=h_path,
                     image_rel_url=layout_res.header_crop_rel,
                     scan_id=scan_obj.id,
-                    max_tokens=500,
+                    max_tokens=200,
                 )
                 h_text = html_table_to_pipe_text(res_h["content"])
                 meta = extract_municipal_overview_header_metadata(

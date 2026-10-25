@@ -299,8 +299,26 @@ def list_fs_matches(session: SessionDep, scan_id: int | None = None) -> dict[str
     return {"counts": counts, "matches": items, "progress": progress}
 
 
+async def _require_valid_fs_token() -> dict[str, Any]:
+    token_valid, auth_status = await fs_mcp_manager.ensure_valid_token()
+    if not token_valid:
+        has_token = bool(auth_status.get("has_token_configured"))
+        problem = auth_status.get("token_problem")
+        if has_token:
+            detail = (
+                f"FamilySearch OAuth token je neplatný alebo exspirovaný ({problem})."
+                if problem
+                else "FamilySearch OAuth token je neplatný alebo exspirovaný. Zadajte platný token."
+            )
+        else:
+            detail = "FamilySearch OAuth token nie je vložený. Vyhľadávanie a párovanie osôb cez FamilySearch MCP vyžaduje platný token."
+        raise HTTPException(status_code=400, detail=detail)
+    return auth_status
+
+
 @router.post("/matches/{fact_id}/refresh")
 async def refresh_fs_match(fact_id: int, session: SessionDep) -> dict[str, Any]:
+    await _require_valid_fs_token()
     fact = session.get(PersonFact, fact_id)
     if not fact:
         raise HTTPException(status_code=404, detail="Fact not found")
@@ -433,6 +451,7 @@ async def sync_all_fs_matches(
     session: SessionDep,
     background: bool = False,
 ) -> dict[str, Any]:
+    await _require_valid_fs_token()
     bind = session.get_bind() or engine
 
     async def _run_sync_all() -> dict[str, Any]:

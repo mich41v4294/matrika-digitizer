@@ -225,6 +225,13 @@ interface DebugOverviewState {
     freellm_models?: Array<{ id?: string } | string>;
   };
   task_queue?: TaskQueueSnapshot;
+  familysearch_mcp?: {
+    connected?: boolean;
+    authenticated?: boolean;
+    token_valid?: boolean;
+    has_token_configured?: boolean;
+    token_problem?: string | null;
+  };
 }
 
 interface Props {
@@ -3489,12 +3496,26 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
                       ).map((st) => {
                         const isRunningThis =
                           rerunningRowId === row.id && rerunningStageName === st;
+                        const fsTokenValid = Boolean(
+                          overview?.familysearch_mcp &&
+                            (typeof overview.familysearch_mcp.token_valid === "boolean"
+                              ? overview.familysearch_mcp.token_valid
+                              : overview.familysearch_mcp.authenticated)
+                        );
+                        const isMcpDisabled = st === "mcp" && !fsTokenValid;
                         return (
                           <button
                             key={st}
-                            disabled={rerunningRowId === row.id}
+                            disabled={rerunningRowId === row.id || isMcpDisabled}
                             onClick={() => handleRerunRow(row.id, st)}
-                            className={`px-2.5 py-1 min-h-[28px] rounded-md text-white text-xs font-mono flex items-center gap-1 cursor-pointer disabled:opacity-50 ${
+                            title={
+                              isMcpDisabled
+                                ? lang === "sk"
+                                  ? "Vyhľadávanie osôb cez FamilySearch MCP vyžaduje platný OAuth token"
+                                  : "Searching people via FamilySearch MCP requires a valid OAuth token"
+                                : undefined
+                            }
+                            className={`px-2.5 py-1 min-h-[28px] rounded-md text-white text-xs font-mono flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
                               st === "all"
                                 ? "bg-amber-600 hover:bg-amber-700"
                                 : "bg-stone-800 hover:bg-stone-700"

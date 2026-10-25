@@ -417,6 +417,16 @@ async def system_status() -> dict[str, Any]:
         "ai_server": ai_info,
         "familysearch": {
             "has_token": bool(fs_env.get("FS_ACCESS_TOKEN")),
+            "token_valid": bool(
+                fs_env.get("FS_ACCESS_TOKEN")
+                and fs_mcp_manager._cached_auth_status
+                and fs_mcp_manager._cached_auth_status.get("token_valid")
+            ),
+            "sync_enabled": bool(
+                fs_env.get("FS_ACCESS_TOKEN")
+                and fs_mcp_manager._cached_auth_status
+                and fs_mcp_manager._cached_auth_status.get("token_valid")
+            ),
             "environment": fs_env.get("FS_ENVIRONMENT", "production"),
         },
         "counts": counts_payload,

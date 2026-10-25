@@ -53,6 +53,12 @@ def _sanitize_env_val(val: Any) -> str:
     return re.sub(r"[\r\n\x00]+", "", str(val or "")).strip()
 
 
+def _sanitize_fs_token(val: Any) -> str:
+    cleaned = _sanitize_env_val(val)
+    cleaned = re.sub(r"^Bearer\s+", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
+
+
 def read_fs_env() -> dict[str, str]:
     settings.ensure_dirs()
     env_map: dict[str, str] = {
@@ -68,7 +74,7 @@ def read_fs_env() -> dict[str, str]:
             k, v = line.split("=", 1)
             key = k.strip()
             if key in ALLOWED_FS_ENV_KEYS:
-                env_map[key] = _sanitize_env_val(v)
+                env_map[key] = _sanitize_fs_token(v) if key == "FS_ACCESS_TOKEN" else _sanitize_env_val(v)
     return env_map
 
 
@@ -76,11 +82,12 @@ def write_fs_env(updates: dict[str, str]) -> dict[str, str]:
     current = read_fs_env()
     for k, v in updates.items():
         if k in ALLOWED_FS_ENV_KEYS and v is not None:
-            current[k] = _sanitize_env_val(v)
+            current[k] = _sanitize_fs_token(v) if k == "FS_ACCESS_TOKEN" else _sanitize_env_val(v)
     lines = [f"{k}={_sanitize_env_val(v)}" for k, v in current.items() if k in ALLOWED_FS_ENV_KEYS]
     settings.fs_env_file.parent.mkdir(parents=True, exist_ok=True)
     settings.fs_env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if "fs_mcp_manager" in globals():
+        fs_mcp_manager._cached_auth_status = None
         fs_mcp_manager._cached_auth_ts = 0.0
         fs_mcp_manager._mcp_env_sig = None
     return current
@@ -853,27 +860,57 @@ class FamilySearchMcpManager:
 
     async def get_auth_status(self, *, force: bool = False) -> dict[str, Any]:
         fs_env = read_fs_env()
-        has_token = bool(fs_env.get("FS_ACCESS_TOKEN"))
+        raw_token = _sanitize_fs_token(fs_env.get("FS_ACCESS_TOKEN") or os.environ.get("FS_ACCESS_TOKEN"))
+        has_token = bool(raw_token)
+        is_mocked = self._is_call_tool_mocked()
         now = time.time()
-        if not force and not self._is_call_tool_mocked():
+
+        if not has_token and not is_mocked:
+            connected = self.mcp_bin.exists()
+            res = {
+                "connected": connected,
+                "authenticated": False,
+                "token_valid": False,
+                "token_accepted": False,
+                "token_problem": None,
+                "sync_enabled": False,
+                "mode": "public_places_and_action_packets",
+                "tools_count": 29,
+                "has_token_configured": False,
+                "env_file": str(settings.fs_env_file),
+                "environment": fs_env.get("FS_ENVIRONMENT", "production"),
+                "mcp_response": {"authenticated": False, "token_accepted": False},
+                "status": "ok" if connected else "error",
+            }
+            self._cached_auth_status = dict(res)
+            self._cached_auth_ts = now
+            return res
+
+        if not force and not is_mocked:
             if self._cached_auth_status is not None and (
                 now - self._cached_auth_ts < 60.0
                 or self._lock.locked()
                 or bool(self.progress_state.get("running"))
             ):
                 cached = dict(self._cached_auth_status)
-                authenticated = bool(cached.get("authenticated") or has_token)
-                cached["authenticated"] = authenticated
+                token_valid = bool(has_token and cached.get("token_valid"))
+                cached["authenticated"] = token_valid
+                cached["token_valid"] = token_valid
+                cached["sync_enabled"] = token_valid
                 cached["has_token_configured"] = has_token
-                cached["mode"] = "live_tree" if authenticated else "public_places_and_action_packets"
+                cached["mode"] = "live_tree" if token_valid else "public_places_and_action_packets"
                 cached["environment"] = fs_env.get("FS_ENVIRONMENT", "production")
                 return cached
             if self._lock.locked() or bool(self.progress_state.get("running")):
                 connected = self.mcp_bin.exists()
                 return {
                     "connected": connected,
-                    "authenticated": has_token,
-                    "mode": "live_tree" if has_token else "public_places_and_action_packets",
+                    "authenticated": False,
+                    "token_valid": False,
+                    "token_accepted": None,
+                    "token_problem": None,
+                    "sync_enabled": False,
+                    "mode": "public_places_and_action_packets",
                     "tools_count": 29,
                     "has_token_configured": has_token,
                     "env_file": str(settings.fs_env_file),
@@ -883,14 +920,38 @@ class FamilySearchMcpManager:
                 }
 
         mcp_res = await self.call_tool("auth_status", {}, stage="mcp_auth")
-        connected = "error" not in mcp_res
-        authenticated = bool(mcp_res.get("authenticated") or has_token)
+        connected = isinstance(mcp_res, dict) and "error" not in mcp_res
+        if isinstance(mcp_res, dict) and "token_accepted" in mcp_res:
+            token_accepted = mcp_res.get("token_accepted")
+            token_valid = bool(token_accepted is True and (has_token or is_mocked))
+        elif is_mocked and isinstance(mcp_res, dict):
+            token_valid = bool(mcp_res.get("authenticated"))
+            token_accepted = True if token_valid else False
+        else:
+            token_accepted = False
+            token_valid = False
+
+        eff_has_token = bool(has_token or (is_mocked and isinstance(mcp_res, dict) and mcp_res.get("authenticated")))
+        token_problem = (
+            None
+            if token_valid
+            else (
+                (mcp_res.get("token_problem") or mcp_res.get("message") or mcp_res.get("error"))
+                if isinstance(mcp_res, dict)
+                else None
+            )
+            or ("FamilySearch token could not be validated." if eff_has_token else None)
+        )
         res = {
             "connected": connected,
-            "authenticated": authenticated,
-            "mode": "live_tree" if authenticated else "public_places_and_action_packets",
+            "authenticated": token_valid,
+            "token_valid": token_valid,
+            "token_accepted": token_accepted,
+            "token_problem": token_problem,
+            "sync_enabled": token_valid,
+            "mode": "live_tree" if token_valid else "public_places_and_action_packets",
             "tools_count": 29,
-            "has_token_configured": has_token,
+            "has_token_configured": eff_has_token,
             "env_file": str(settings.fs_env_file),
             "environment": fs_env.get("FS_ENVIRONMENT", "production"),
             "mcp_response": mcp_res,
@@ -899,6 +960,33 @@ class FamilySearchMcpManager:
         self._cached_auth_status = dict(res)
         self._cached_auth_ts = now
         return res
+
+    async def ensure_valid_token(self, *, force: bool = False) -> tuple[bool, dict[str, Any]]:
+        """Return `(token_valid, auth_status)` verifying that a valid FamilySearch token is configured."""
+        if self._is_call_tool_mocked():
+            if self._cached_auth_status is not None and "token_valid" in self._cached_auth_status:
+                return bool(self._cached_auth_status["token_valid"]), dict(self._cached_auth_status)
+            return True, {
+                "connected": True,
+                "authenticated": True,
+                "token_valid": True,
+                "token_accepted": True,
+                "token_problem": None,
+                "sync_enabled": True,
+                "has_token_configured": True,
+            }
+        status = await self.get_auth_status(force=force)
+        return bool(status.get("token_valid")), status
+
+    def _mark_token_rejected(self, message: str | None = None) -> None:
+        if self._cached_auth_status is not None:
+            self._cached_auth_status["authenticated"] = False
+            self._cached_auth_status["token_valid"] = False
+            self._cached_auth_status["token_accepted"] = False
+            self._cached_auth_status["sync_enabled"] = False
+            self._cached_auth_status["mode"] = "public_places_and_action_packets"
+            if message:
+                self._cached_auth_status["token_problem"] = message
 
     async def check_status(self) -> dict[str, Any]:
         return await self.get_auth_status()
@@ -962,13 +1050,19 @@ class FamilySearchMcpManager:
 
     def _should_query_mcp_records(self, fs_env: dict[str, str] | None = None) -> bool:
         env_map = fs_env if fs_env is not None else read_fs_env()
-        has_token = bool(env_map.get("FS_ACCESS_TOKEN") or os.environ.get("FS_ACCESS_TOKEN"))
-        is_mocked = (
-            hasattr(self.call_tool, "_mock_name")
-            or hasattr(self.call_tool, "assert_called")
-            or not hasattr(self.call_tool, "__func__")
+        has_token = bool(
+            _sanitize_fs_token(env_map.get("FS_ACCESS_TOKEN") or os.environ.get("FS_ACCESS_TOKEN"))
         )
-        return has_token or is_mocked
+        is_mocked = self._is_call_tool_mocked()
+        if is_mocked:
+            if self._cached_auth_status is not None and not self._cached_auth_status.get("token_valid", True):
+                return False
+            return True
+        if not has_token:
+            return False
+        if self._cached_auth_status is not None and "token_valid" in self._cached_auth_status:
+            return bool(self._cached_auth_status.get("token_valid"))
+        return has_token
 
     async def match_person_fact(
         self,
@@ -1137,8 +1231,10 @@ class FamilySearchMcpManager:
         search_res: dict[str, Any] | None = None
         harvest_res: dict[str, Any] | None = None
         best: dict[str, Any] | None = None
-        fs_env = read_fs_env()
-        if self._should_query_mcp_records(fs_env) and (given or surname):
+        token_valid, _ = await self.ensure_valid_token()
+        should_query_records = token_valid and self._should_query_mcp_records()
+        search_had_auth_error = False
+        if should_query_records and (given or surname):
             search_args: dict[str, Any] = {
                 "given": given,
                 "surname": surname,
@@ -1169,6 +1265,13 @@ class FamilySearchMcpManager:
                 scan_id=fact.scan_id,
                 row_id=eff_row_id or None,
             )
+            if isinstance(search_res, dict) and search_res.get("error") in (
+                "token_rejected",
+                "auth_required",
+                "not_configured",
+            ):
+                search_had_auth_error = True
+                self._mark_token_rejected(search_res.get("message") or str(search_res.get("error")))
             results = (
                 (
                     search_res.get("results")
@@ -1176,13 +1279,13 @@ class FamilySearchMcpManager:
                     or search_res.get("persons")
                     or search_res.get("records")
                 )
-                if isinstance(search_res, dict)
+                if isinstance(search_res, dict) and not search_had_auth_error
                 else None
             )
             harvested_surnames, harvested_given = extract_names_from_fs_hits(
                 results if isinstance(results, list) else None
             )
-            if not is_census and fs_name_cache_size(area_key, year_int) < 15:
+            if not is_census and not search_had_auth_error and fs_name_cache_size(area_key, year_int) < 15:
                 harvest_res = await self.call_tool(
                     "search_records",
                     {
@@ -1217,12 +1320,14 @@ class FamilySearchMcpManager:
             else ""
         )
         if not best or not fs_person_id:
-            if not self._should_query_mcp_records(fs_env) and fact.id is not None:
+            if (not should_query_records or search_had_auth_error) and fact.id is not None:
+                session.commit()
                 existing_match = session.exec(
                     select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == fact.id)
                 ).first()
                 if existing_match and existing_match.fs_person_id and str(existing_match.fs_person_id).strip():
                     return existing_match
+                return None
             if fact.id is not None:
                 stale = session.exec(
                     select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == fact.id)
@@ -1319,8 +1424,16 @@ class FamilySearchMcpManager:
             return 0
 
         valid_sheet_facts = [f for f in facts if not _is_nameless_fact(f)]
+        token_valid, _ = await self.ensure_valid_token()
+        should_query_records = token_valid and self._should_query_mcp_records()
+
         started_progress_here = False
-        if manage_progress and not self.progress_state.get("running") and valid_sheet_facts:
+        if (
+            should_query_records
+            and manage_progress
+            and not self.progress_state.get("running")
+            and valid_sheet_facts
+        ):
             started_progress_here = True
             await self.start_progress(
                 mode="auto",
@@ -1382,9 +1495,6 @@ class FamilySearchMcpManager:
             except Exception:
                 pass
 
-            fs_env = read_fs_env()
-            should_query_records = self._should_query_mcp_records(fs_env)
-
             matched_count = 0
             valid_idx = 0
             total_valid = max(1, len(valid_sheet_facts))
@@ -1402,17 +1512,26 @@ class FamilySearchMcpManager:
 
                 valid_idx += 1
                 person_label = _format_fact_person_label(fact)
-                await self.step_progress(current_person=person_label)
+                if should_query_records:
+                    await self.step_progress(current_person=person_label)
                 await ws_manager.broadcast(
                     "state",
                     {
                         "active_stage": "mcp_match",
-                        "active_model": "familysearch-mcp",
+                        "active_model": "familysearch-mcp" if should_query_records else None,
                         "current_scan_id": fact.scan_id or sheet.front_scan_id,
                         "current_row_id": fact.row_id,
                         "progress_pct": 88 + int(11 * valid_idx / total_valid),
-                        "message_sk": f"Párujem s matrikou a FamilySearch ({valid_idx}/{total_valid}): {person_label}...",
-                        "message_en": f"Matching with parish records & FamilySearch ({valid_idx}/{total_valid}): {person_label}...",
+                        "message_sk": (
+                            f"Párujem s matrikou a FamilySearch ({valid_idx}/{total_valid}): {person_label}..."
+                            if should_query_records
+                            else f"Párujem s lokálnou matrikou ({valid_idx}/{total_valid}): {person_label}..."
+                        ),
+                        "message_en": (
+                            f"Matching with parish records & FamilySearch ({valid_idx}/{total_valid}): {person_label}..."
+                            if should_query_records
+                            else f"Matching with local parish records ({valid_idx}/{total_valid}): {person_label}..."
+                        ),
                     },
                 )
 
@@ -1420,6 +1539,8 @@ class FamilySearchMcpManager:
                 session.add(fact)
 
                 local_matches = match_census_to_local_matrika(session, fact)
+                if not should_query_records:
+                    continue
 
                 given = fact.given_name_sk or fact.given_name_raw or ""
                 surname = fact.surname_normalized or fact.surname_raw or ""
@@ -1434,6 +1555,7 @@ class FamilySearchMcpManager:
 
                 search_res: dict[str, Any] | None = None
                 best: dict[str, Any] | None = None
+                search_had_auth_error = False
                 if should_query_records and (given or surname):
                     search_args: dict[str, Any] = {
                         "given": given,
@@ -1455,6 +1577,14 @@ class FamilySearchMcpManager:
                         scan_id=fact.scan_id or sheet.front_scan_id,
                         row_id=fact.row_id,
                     )
+                    if isinstance(search_res, dict) and search_res.get("error") in (
+                        "token_rejected",
+                        "auth_required",
+                        "not_configured",
+                    ):
+                        search_had_auth_error = True
+                        should_query_records = False
+                        self._mark_token_rejected(search_res.get("message") or str(search_res.get("error")))
                     results = (
                         (
                             search_res.get("results")
@@ -1462,7 +1592,7 @@ class FamilySearchMcpManager:
                             or search_res.get("persons")
                             or search_res.get("records")
                         )
-                        if isinstance(search_res, dict)
+                        if isinstance(search_res, dict) and not search_had_auth_error
                         else None
                     )
                     if isinstance(results, list) and results and isinstance(results[0], dict):
@@ -1474,7 +1604,7 @@ class FamilySearchMcpManager:
                     else ""
                 )
                 if not best or not fs_person_id:
-                    if fact.id is not None:
+                    if not search_had_auth_error and fact.id is not None:
                         stale_matches = session.exec(
                             select(FamilySearchMatch).where(FamilySearchMatch.person_fact_id == fact.id)
                         ).all()
@@ -2010,7 +2140,12 @@ async def trigger_auto_fs_match_for_fact(fact_id: int) -> FamilySearchMatch | No
     """
     Background task helper that automatically runs FamilySearch MCP matching whenever
     a PersonFact is created or updated, and broadcasts live progress + WebSocket updates.
+    Skipped when FamilySearch OAuth token is not configured or not valid.
     """
+    token_valid, _ = await fs_mcp_manager.ensure_valid_token()
+    if not token_valid:
+        return None
+
     from backend.app.db.session import engine
     from backend.app.pipeline.task_queue import task_queue
 

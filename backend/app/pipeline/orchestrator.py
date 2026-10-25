@@ -551,6 +551,7 @@ async def _process_single_scan_pipeline_inner(
             # STAGE 5: FamilySearch MCP Matching
             matched_count = 0
             if run_mcp:
+                fs_token_valid, _ = await fs_mcp_manager.ensure_valid_token()
                 if scan.detected_type == "census" and scan.census_sheet_id:
                     sheet = session.get(CensusSheet, scan.census_sheet_id)
                     if sheet:
@@ -559,18 +560,26 @@ async def _process_single_scan_pipeline_inner(
                             {
                                 **sheet_ctx,
                                 "active_stage": "mcp_match",
-                                "active_model": "familysearch-mcp",
+                                "active_model": "familysearch-mcp" if fs_token_valid else None,
                                 "current_scan_id": scan.id,
                                 "current_row_id": None,
                                 "current_row_index": None,
                                 "total_rows": len(extracted_facts),
                                 "progress_pct": 88,
-                                "message_sk": f"Párujem osoby z hárku s matrikou a FamilySearch ({sheet.municipality or scan.filename})...",
-                                "message_en": f"Matching sheet persons with parish records & FamilySearch ({sheet.municipality or scan.filename})...",
+                                "message_sk": (
+                                    f"Párujem osoby z hárku s matrikou a FamilySearch ({sheet.municipality or scan.filename})..."
+                                    if fs_token_valid
+                                    else f"Párujem osoby z hárku s lokálnou matrikou ({sheet.municipality or scan.filename})..."
+                                ),
+                                "message_en": (
+                                    f"Matching sheet persons with parish records & FamilySearch ({sheet.municipality or scan.filename})..."
+                                    if fs_token_valid
+                                    else f"Matching sheet persons with local parish records ({sheet.municipality or scan.filename})..."
+                                ),
                             },
                         )
                         matched_count = await fs_mcp_manager.match_census_sheet(session, sheet)
-                else:
+                elif fs_token_valid:
                     for idx, (fact, row) in enumerate(extracted_facts, start=1):
                         if not _matches_watchlist(fact, watchlist_filter):
                             continue
@@ -1012,7 +1021,8 @@ async def _process_batch_stage_queued_inner(
                 session.commit()
 
             # Phase 5: FamilySearch MCP matching
-            if run_mcp:
+            fs_token_valid, _ = await fs_mcp_manager.ensure_valid_token() if run_mcp else (False, {})
+            if run_mcp and fs_token_valid:
                 batch.status = "matching"
                 session.add(batch)
                 session.commit()
@@ -1697,17 +1707,26 @@ async def _process_census_sheet_pipeline_inner(
             household = reconcile_census_household_relationships(session, sheet.id)
             matched_count = 0
             if run_mcp:
+                fs_token_valid, _ = await fs_mcp_manager.ensure_valid_token()
                 await ws_manager.broadcast(
                     "state",
                     {
                         **sheet_ctx,
                         "active_stage": "mcp_match",
-                        "active_model": "familysearch-mcp",
+                        "active_model": "familysearch-mcp" if fs_token_valid else None,
                         "current_scan_id": sheet.front_scan_id,
                         "current_row_id": None,
                         "progress_pct": 90,
-                        "message_sk": f"Párujem osoby z hárku s matrikou a FamilySearch ({sheet_ctx['current_sheet_label']})...",
-                        "message_en": f"Matching sheet persons with parish records & FamilySearch ({sheet_ctx['current_sheet_label']})...",
+                        "message_sk": (
+                            f"Párujem osoby z hárku s matrikou a FamilySearch ({sheet_ctx['current_sheet_label']})..."
+                            if fs_token_valid
+                            else f"Párujem osoby z hárku s lokálnou matrikou ({sheet_ctx['current_sheet_label']})..."
+                        ),
+                        "message_en": (
+                            f"Matching sheet persons with parish records & FamilySearch ({sheet_ctx['current_sheet_label']})..."
+                            if fs_token_valid
+                            else f"Matching sheet persons with local parish records ({sheet_ctx['current_sheet_label']})..."
+                        ),
                     },
                 )
                 matched_count = await fs_mcp_manager.match_census_sheet(session, sheet)

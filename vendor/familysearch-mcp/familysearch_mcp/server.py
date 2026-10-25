@@ -3257,6 +3257,14 @@ async def auth_status() -> dict:
     """
     try:
         config = state.config or load_config()
+        if config.env_file:
+            from .config import token_from_env_file
+
+            fresh_tok = token_from_env_file(config.env_file)
+            if fresh_tok is not None and fresh_tok != config.access_token:
+                config.access_token = fresh_tok
+            elif fresh_tok is None and not os.environ.get("FS_ACCESS_TOKEN"):
+                config.access_token = None
         state.config = config
         missing = [
             name

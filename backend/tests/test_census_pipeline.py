@@ -930,6 +930,95 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 self.assertEqual(r_fs_prog.status_code, 200)
                 self.assertGreaterEqual(r_fs_prog.json()["total_facts_in_db"], 4)
                 self.assertGreaterEqual(r_fs_prog.json()["total_matched_in_db"], 1)
+
+            # 5. Verify FamilySearch sync endpoints are disabled when token is missing or invalid
+            with patch(
+                "backend.app.mcp.familysearch_client.read_fs_env",
+                return_value={"FS_ACCESS_TOKEN": "", "FS_ENVIRONMENT": "production"},
+            ):
+                from backend.app.mcp.familysearch_client import fs_mcp_manager
+
+                fs_mcp_manager._cached_auth_status = None
+                fs_mcp_manager._cached_auth_ts = 0.0
+                r_no_tok = client.get("/api/familysearch/status")
+                self.assertEqual(r_no_tok.status_code, 200)
+                no_tok_json = r_no_tok.json()
+                self.assertFalse(no_tok_json["authenticated"])
+                self.assertFalse(no_tok_json["token_valid"])
+                self.assertFalse(no_tok_json["sync_enabled"])
+                self.assertFalse(no_tok_json["has_token_configured"])
+
+                r_rematch_no_tok = client.post("/api/familysearch/rematch")
+                self.assertEqual(r_rematch_no_tok.status_code, 400)
+                self.assertIn("token", r_rematch_no_tok.json()["detail"].lower())
+
+                r_refresh_no_tok = client.post(f"/api/familysearch/matches/{f_matched_id}/refresh")
+                self.assertEqual(r_refresh_no_tok.status_code, 400)
+                self.assertIn("token", r_refresh_no_tok.json()["detail"].lower())
+
+            # 6. Verify FamilySearch sync endpoints are disabled when token is inserted but rejected (invalid/expired)
+            with (
+                patch(
+                    "backend.app.mcp.familysearch_client.read_fs_env",
+                    return_value={"FS_ACCESS_TOKEN": "expired-token-123", "FS_ENVIRONMENT": "production"},
+                ),
+                patch(
+                    "backend.app.mcp.familysearch_client.fs_mcp_manager.call_tool",
+                    new=AsyncMock(
+                        return_value={
+                            "authenticated": True,
+                            "token_accepted": False,
+                            "token_problem": "FamilySearch rejected the access token (401).",
+                        }
+                    ),
+                ),
+            ):
+                from backend.app.mcp.familysearch_client import fs_mcp_manager
+
+                fs_mcp_manager._cached_auth_status = None
+                fs_mcp_manager._cached_auth_ts = 0.0
+                r_bad_tok = client.get("/api/familysearch/status")
+                self.assertEqual(r_bad_tok.status_code, 200)
+                bad_tok_json = r_bad_tok.json()
+                self.assertTrue(bad_tok_json["has_token_configured"])
+                self.assertFalse(bad_tok_json["authenticated"])
+                self.assertFalse(bad_tok_json["token_valid"])
+                self.assertFalse(bad_tok_json["sync_enabled"])
+                self.assertIn("rejected", (bad_tok_json.get("token_problem") or "").lower())
+
+                r_rematch_bad_tok = client.post("/api/familysearch/rematch")
+                self.assertEqual(r_rematch_bad_tok.status_code, 400)
+                self.assertIn("neplatn", r_rematch_bad_tok.json()["detail"].lower())
+
+            # 7. Verify FamilySearch status reports sync_enabled=True when token is accepted
+            with (
+                patch(
+                    "backend.app.mcp.familysearch_client.read_fs_env",
+                    return_value={"FS_ACCESS_TOKEN": "valid-token-xyz", "FS_ENVIRONMENT": "production"},
+                ),
+                patch(
+                    "backend.app.mcp.familysearch_client.fs_mcp_manager.call_tool",
+                    new=AsyncMock(
+                        return_value={
+                            "authenticated": True,
+                            "token_accepted": True,
+                        }
+                    ),
+                ),
+            ):
+                from backend.app.mcp.familysearch_client import fs_mcp_manager
+
+                fs_mcp_manager._cached_auth_status = None
+                fs_mcp_manager._cached_auth_ts = 0.0
+                r_ok_tok = client.get("/api/familysearch/status")
+                self.assertEqual(r_ok_tok.status_code, 200)
+                ok_tok_json = r_ok_tok.json()
+                self.assertTrue(ok_tok_json["has_token_configured"])
+                self.assertTrue(ok_tok_json["authenticated"])
+                self.assertTrue(ok_tok_json["token_valid"])
+                self.assertTrue(ok_tok_json["sync_enabled"])
+                fs_mcp_manager._cached_auth_status = None
+                fs_mcp_manager._cached_auth_ts = 0.0
         finally:
             from backend.app.db.session import delete_person_fact_cascade
             from sqlmodel import select as _sel

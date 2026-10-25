@@ -167,6 +167,11 @@ interface FsMatchProgress {
 interface FsStatus {
   connected: boolean;
   authenticated: boolean;
+  token_valid?: boolean;
+  token_accepted?: boolean | null;
+  token_problem?: string | null;
+  has_token_configured?: boolean;
+  sync_enabled?: boolean;
   mode: string;
   auth_mode?: string;
   tools_count?: number;
@@ -433,6 +438,25 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
     }
   };
 
+  const isTokenValid = Boolean(
+    fsStatus &&
+      (typeof fsStatus.token_valid === "boolean"
+        ? fsStatus.token_valid
+        : fsStatus.authenticated)
+  );
+  const hasTokenConfigured = Boolean(fsStatus?.has_token_configured);
+  const isSyncDisabled =
+    !isTokenValid || syncingAll || Boolean(progress?.running);
+  const syncDisabledTooltip = !isTokenValid
+    ? hasTokenConfigured
+      ? lang === "sk"
+        ? "FamilySearch OAuth token je neplatný alebo exspirovaný — zadajte platný token pre synchronizáciu osôb."
+        : "FamilySearch OAuth token is invalid or expired — enter a valid token to sync people."
+      : lang === "sk"
+      ? "FamilySearch OAuth token nie je vložený — vyhľadávanie osôb vyžaduje platný token."
+      : "FamilySearch OAuth token is not configured — searching people requires a valid token."
+    : undefined;
+
   const handleSaveToken = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!tokenInput.trim()) return;
@@ -443,14 +467,35 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ access_token: tokenInput.trim() }),
       });
+      const resData = await r.json().catch(() => null);
       if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
         setErrorMsg(
-          err.detail ||
+          resData?.detail ||
             (lang === "sk"
               ? "Nepodarilo sa uložiť FamilySearch token."
               : "Failed to save FamilySearch token.")
         );
+        return;
+      }
+      if (resData) {
+        setFsStatus(resData);
+        const prog = extractFsProgress(resData);
+        if (prog) setProgress(prog);
+      }
+      const savedTokenValid = Boolean(
+        resData &&
+          (typeof resData.token_valid === "boolean"
+            ? resData.token_valid
+            : resData.authenticated)
+      );
+      if (!savedTokenValid) {
+        setErrorMsg(
+          resData?.token_problem ||
+            (lang === "sk"
+              ? "Zadaný FamilySearch token je neplatný alebo exspirovaný. Synchronizácia osôb zostáva vypnutá."
+              : "The provided FamilySearch token is invalid or expired. People sync remains disabled.")
+        );
+        refreshStatus?.();
         return;
       }
       setShowTokenModal(false);
@@ -467,6 +512,11 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
   };
 
   const refreshMatch = async (factId: number) => {
+    if (!isTokenValid) {
+      setShowTokenModal(true);
+      setErrorMsg(syncDisabledTooltip || null);
+      return;
+    }
     setRefreshingId(factId);
     setErrorMsg(null);
     try {
@@ -474,10 +524,12 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
         method: "POST",
       });
       if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
         setErrorMsg(
-          lang === "sk"
-            ? "Nepodarilo sa obnoviť porovnanie."
-            : "Failed to refresh comparison."
+          err.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa obnoviť porovnanie."
+              : "Failed to refresh comparison.")
         );
       } else {
         const resData = await r.json().catch(() => null);
@@ -492,6 +544,11 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
   };
 
   const syncAllMatches = async () => {
+    if (!isTokenValid) {
+      setShowTokenModal(true);
+      setErrorMsg(syncDisabledTooltip || null);
+      return;
+    }
     setSyncingAll(true);
     setErrorMsg(null);
     setProgress((prev) =>
@@ -520,10 +577,12 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
     try {
       const r = await fetch("/api/familysearch/rematch", { method: "POST" });
       if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
         setErrorMsg(
-          lang === "sk"
-            ? "Nepodarilo sa spustiť párovanie s FamilySearch MCP."
-            : "Failed to run FamilySearch MCP matching."
+          err.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa spustiť párovanie s FamilySearch MCP."
+              : "Failed to run FamilySearch MCP matching.")
         );
       } else {
         const resData = await r.json().catch(() => null);
@@ -689,32 +748,45 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
         <div className="flex flex-wrap items-center gap-2">
           {fsStatus && (
             <div
-              className="px-2.5 py-1.5 rounded-lg bg-stone-100 border border-stone-200 text-xs"
+              data-testid="fs-token-status-badge"
+              className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold ${
+                isTokenValid
+                  ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                  : hasTokenConfigured
+                  ? "bg-rose-50 border-rose-200 text-rose-800"
+                  : "bg-amber-50 border-amber-200 text-amber-900"
+              }`}
               title={
-                fsStatus.authenticated
+                isTokenValid
                   ? lang === "sk"
-                    ? "OAuth pripojený"
-                    : "OAuth connected"
-                  : lang === "sk"
-                  ? "Verejné miesta"
-                  : "Public places mode"
+                    ? "OAuth token je platný — párovanie osôb je aktívne"
+                    : "OAuth token is valid — people sync is active"
+                  : syncDisabledTooltip
               }
             >
-              <span
-                className={
-                  fsStatus.connected
-                    ? "text-emerald-700 font-semibold"
-                    : "text-red-700 font-semibold"
-                }
-              >
-                {fsStatus.connected ? "MCP" : "MCP offline"}
+              <span>
+                {!fsStatus.connected
+                  ? "MCP offline"
+                  : isTokenValid
+                  ? lang === "sk"
+                    ? "MCP · Token aktívny"
+                    : "MCP · Token valid"
+                  : hasTokenConfigured
+                  ? lang === "sk"
+                    ? "MCP · Token neplatný"
+                    : "MCP · Token invalid"
+                  : lang === "sk"
+                  ? "MCP · Chýba token"
+                  : "MCP · No token"}
               </span>
             </div>
           )}
           <button
+            data-testid="fs-sync-header-btn"
             onClick={syncAllMatches}
-            disabled={syncingAll || Boolean(progress?.running)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-800 font-semibold text-xs cursor-pointer transition"
+            disabled={isSyncDisabled}
+            title={syncDisabledTooltip}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-800 font-semibold text-xs cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <RefreshCw
               className={`w-3.5 h-3.5 ${
@@ -730,6 +802,7 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
               : "Re-match FS"}
           </button>
           <button
+            data-testid="fs-token-modal-btn"
             onClick={() => setShowTokenModal(!showTokenModal)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs cursor-pointer transition"
           >
@@ -738,6 +811,48 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
           </button>
         </div>
       </div>
+
+      {fsStatus && !isTokenValid && (
+        <div
+          data-testid="fs-token-required-banner"
+          className="bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-950"
+        >
+          <div className="flex items-start gap-2.5 min-w-0 flex-1">
+            <AlertCircle className="w-4 h-4 text-amber-800 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-bold">
+                {hasTokenConfigured
+                  ? lang === "sk"
+                    ? "FamilySearch OAuth token je neplatný alebo exspirovaný — synchronizácia osôb je vypnutá"
+                    : "FamilySearch OAuth token is invalid or expired — people sync is disabled"
+                  : lang === "sk"
+                  ? "FamilySearch OAuth token nie je vložený — synchronizácia osôb je vypnutá"
+                  : "FamilySearch OAuth token is not configured — people sync is disabled"}
+              </p>
+              <p className="text-amber-900">
+                {hasTokenConfigured
+                  ? fsStatus.token_problem ||
+                    (lang === "sk"
+                      ? "Vyhľadávanie osôb cez FamilySearch MCP vyžaduje platný OAuth token. Zadajte nový platný token pre zapnutie synchronizácie."
+                      : "Searching people via FamilySearch MCP requires a valid OAuth token. Enter a new valid token to enable sync.")
+                  : lang === "sk"
+                  ? "FamilySearch MCP neumožňuje vyhľadávanie osôb bez prihlásenia. Vložte platný FamilySearch OAuth token pre zapnutie párovania."
+                  : "FamilySearch MCP cannot search people without authentication. Insert a valid FamilySearch OAuth token to enable matching."}
+              </p>
+            </div>
+          </div>
+          {!showTokenModal && (
+            <button
+              type="button"
+              onClick={() => setShowTokenModal(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-800 hover:bg-amber-900 text-white font-semibold text-xs shrink-0 cursor-pointer"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              {lang === "sk" ? "Vložiť token" : "Enter token"}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Prominent FamilySearch MCP Matching & Review Progress Card */}
       <div
@@ -840,9 +955,11 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
 
             <button
               type="button"
+              data-testid="fs-sync-progress-btn"
               onClick={syncAllMatches}
-              disabled={syncingAll || Boolean(progress?.running)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 font-semibold text-xs cursor-pointer transition"
+              disabled={isSyncDisabled}
+              title={syncDisabledTooltip}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 font-semibold text-xs cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <RefreshCw
                 className={`w-3.5 h-3.5 ${
@@ -992,9 +1109,11 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
           </p>
           {matches.length === 0 && (
             <button
+              data-testid="fs-sync-empty-btn"
               onClick={syncAllMatches}
-              disabled={syncingAll}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-semibold text-sm cursor-pointer"
+              disabled={isSyncDisabled}
+              title={syncDisabledTooltip}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-semibold text-sm cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <RefreshCw className={`w-4 h-4 ${syncingAll ? "animate-spin" : ""}`} />
               {lang === "sk" ? "Spustiť párovanie s FamilySearch" : "Run FamilySearch matching"}
@@ -1324,10 +1443,21 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                         : "Mark reviewed"}
                     </button>
                     <button
+                      data-testid="fs-refresh-match-btn"
                       onClick={() => refreshMatch(m.fact_id)}
-                      disabled={refreshingId === m.fact_id}
-                      className="p-2 min-h-[34px] min-w-[34px] inline-flex items-center justify-center rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 cursor-pointer"
-                      title={lang === "sk" ? "Znova porovnať" : "Re-compare"}
+                      disabled={
+                        !isTokenValid ||
+                        refreshingId === m.fact_id ||
+                        Boolean(progress?.running)
+                      }
+                      className="p-2 min-h-[34px] min-w-[34px] inline-flex items-center justify-center rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      title={
+                        !isTokenValid
+                          ? syncDisabledTooltip
+                          : lang === "sk"
+                          ? "Znova porovnať"
+                          : "Re-compare"
+                      }
                     >
                       <RefreshCw
                         className={`w-4 h-4 ${refreshingId === m.fact_id ? "animate-spin" : ""}`}

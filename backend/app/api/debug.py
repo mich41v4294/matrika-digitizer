@@ -556,6 +556,20 @@ async def rerun_single_row_stage(
                         fact = await run_extraction_for_row(task_session, scan, row)
                     out_payload = {"stage": "extract", "fact": fact}
                 elif req.stage == "mcp":
+                    token_valid, auth_status = await fs_mcp_manager.ensure_valid_token()
+                    if not token_valid:
+                        has_tok = bool(auth_status.get("has_token_configured"))
+                        prob = auth_status.get("token_problem")
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"FamilySearch OAuth token je neplatný alebo exspirovaný ({prob})."
+                                if has_tok and prob
+                                else "FamilySearch OAuth token je neplatný alebo exspirovaný."
+                                if has_tok
+                                else "FamilySearch OAuth token nie je vložený. Vyhľadávanie osôb cez FamilySearch MCP vyžaduje platný token."
+                            ),
+                        )
                     fact = task_session.exec(select(PersonFact).where(PersonFact.row_id == row.id)).first()
                     if not fact:
                         if is_census:

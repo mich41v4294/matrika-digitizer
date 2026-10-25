@@ -328,11 +328,17 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await page.locator("button").filter({ hasText: /Vyriešené \(1\)/ }).click();
     await expect(page.locator("body")).toContainText("Overenie priezviska a mien rodičov");
 
-    // B. FamilySearchReview: verify what_differs, source & review filters, and mark reviewed
+    // B. FamilySearchReview: verify what_differs, source & review filters, mark reviewed, and sync disabled when token not inserted/valid
     await page.goto("/familysearch", { waitUntil: "networkidle" });
     await expect(page.locator("body")).toContainText("Čo sa líši");
     await expect(page.locator("body")).toContainText("15.03.1898 (uvedený dátum krstu)");
     await expect(page.locator("body")).toContainText("Obec Testová (bez čísla domu)");
+
+    // Verify FamilySearch sync controls are disabled when token is not inserted/valid
+    await expect(page.getByTestId("fs-token-required-banner")).toBeVisible();
+    await expect(page.getByTestId("fs-sync-header-btn")).toBeDisabled();
+    await expect(page.getByTestId("fs-sync-progress-btn")).toBeDisabled();
+    await expect(page.getByTestId("fs-refresh-match-btn").first()).toBeDisabled();
 
     // Filter by Matrika vs Census
     await page.getByRole("button", { name: "Matrika", exact: true }).click();

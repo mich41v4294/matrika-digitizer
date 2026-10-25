@@ -1,21 +1,53 @@
 @import "tailwindcss";
 
 @theme {
-  --color-amber-600: #b45309;
-  --color-amber-700: #92400e;
-  --color-emerald-600: #047857;
+  /* Clean Nordic / Linear Minimal Palette (Mockup B) */
+  --color-stone-50: #f8fafc;
+  --color-stone-100: #f4f6f9;
+  --color-stone-200: #e2e8f0;
+  --color-stone-300: #cbd5e1;
+  --color-stone-400: #94a3b8;
+  --color-stone-500: #64748b;
+  --color-stone-600: #475569;
+  --color-stone-700: #334155;
+  --color-stone-800: #1e293b;
+  --color-stone-900: #0f172a;
+  --color-stone-950: #020617;
+
+  /* Royal Indigo Accent mapped cleanly for primary interactive accents */
+  --color-amber-50: #eef2ff;
+  --color-amber-100: #e0e7ff;
+  --color-amber-200: #c7d2fe;
+  --color-amber-300: #a5b4fc;
+  --color-amber-400: #818cf8;
+  --color-amber-500: #4f46e5;
+  --color-amber-600: #3b5bdb;
+  --color-amber-700: #364fc7;
+  --color-amber-800: #312e81;
+  --color-amber-900: #1e1b4b;
+  --color-amber-950: #17153b;
+
+  --color-emerald-600: #059669;
+  --color-emerald-700: #047857;
 }
 
 @layer base {
   html {
     font-size: 16px;
+    background-color: #f8fafc;
+    color: #0f172a;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
   body {
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     line-height: 1.5;
+    background-color: #f8fafc;
+    color: #0f172a;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
   :focus-visible {
-    outline: 2px solid #b45309;
+    outline: 2px solid #3b5bdb;
     outline-offset: 2px;
   }
 }
@@ -27,3 +59,4 @@
 .crop-invert {
   filter: invert(100%) contrast(175%);
 }
+

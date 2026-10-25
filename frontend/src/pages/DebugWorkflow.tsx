@@ -1156,6 +1156,10 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
     stageConfigs.extract.provider === "freellm" &&
     stageConfigs.layout.provider === "freellm";
 
+  const [activeConsoleTab, setActiveConsoleTab] = useState<
+    "all" | "ai" | "benchmark" | "flags" | "inspector"
+  >("all");
+
   return (
     <div className="space-y-5 text-sm">
       {/* Global Model Datalists for Local AI and Cloud API */}
@@ -1175,7 +1179,129 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
         ))}
       </datalist>
 
+      {/* Mockup D: Dedicated Admin & Debug Console Header + Admin Overlay Toggle + Tab Bar */}
+      <div className="bg-white rounded-xl p-4 border border-stone-200 shadow-2xs space-y-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-lg font-bold text-stone-900 flex items-center gap-2">
+                <Sliders className="w-5 h-5 text-amber-600" />
+                <span>
+                  {lang === "sk"
+                    ? "Admin & Debug Konzola"
+                    : "Admin & Debug Console"}
+                </span>
+              </h1>
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${
+                  isLocalOnline
+                    ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                    : "bg-red-50 text-red-800 border-red-200"
+                }`}
+              >
+                Local AI: {isLocalOnline ? "Online" : "Offline"}
+              </span>
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${
+                  isFreellmOnline
+                    ? "bg-amber-50 text-amber-800 border-amber-200"
+                    : "bg-stone-100 text-stone-600 border-stone-200"
+                }`}
+              >
+                Cloud API:{" "}
+                {isFreellmOnline
+                  ? lang === "sk"
+                    ? "Pripravené"
+                    : "Ready"
+                  : lang === "sk"
+                  ? "Nedostupné"
+                  : "Unavailable"}
+              </span>
+            </div>
+            <p className="text-xs text-stone-600">
+              {lang === "sk"
+                ? "Centrálna správa AI modelov, kvality OCR, príznakov funkcií (Feature Flags) a nízkoúrovňového inšpektora."
+                : "Central administration for AI models, OCR quality benchmarks, Feature Flags, and low-level scan inspection."}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-testid="debug-admin-overlay-toggle"
+              onClick={() => toggleFlag("admin_debug_overlay")}
+              className={`px-3.5 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-2 cursor-pointer transition border ${
+                featureFlags.admin_debug_overlay
+                  ? "bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700 shadow-2xs"
+                  : "bg-stone-100 hover:bg-stone-200 text-stone-800 border-stone-300"
+              }`}
+            >
+              <Eye className="w-4 h-4" />
+              <span>
+                {featureFlags.admin_debug_overlay
+                  ? lang === "sk"
+                    ? "Režim Admin Overlay v aplikácii: ZAPNUTÝ"
+                    : "In-App Admin Overlay Mode: ON"
+                  : lang === "sk"
+                  ? "Režim Admin Overlay v aplikácii: VYPNUTÝ (Zapnúť)"
+                  : "In-App Admin Overlay Mode: OFF (Turn ON)"}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* 4-Tab Bar (with All Sections default so all tools and E2E selectors are accessible) */}
+        <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-stone-200">
+          {(
+            [
+              {
+                id: "all",
+                labelSk: "Všetky sekcie",
+                labelEn: "All Sections",
+              },
+              {
+                id: "ai",
+                labelSk: "1. AI Modely a Fázy",
+                labelEn: "1. AI Models & Stages",
+              },
+              {
+                id: "benchmark",
+                labelSk: "2. Kvalita OCR & Benchmark",
+                labelEn: "2. OCR Quality & Benchmark",
+              },
+              {
+                id: "flags",
+                labelSk: "3. Feature Flags",
+                labelEn: "3. Feature Flags",
+              },
+              {
+                id: "inspector",
+                labelSk: "4. Inšpektor skenov a stôp",
+                labelEn: "4. Scan & Trace Inspector",
+              },
+            ] as const
+          ).map((tab) => {
+            const active = activeConsoleTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveConsoleTab(tab.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition ${
+                  active
+                    ? "bg-amber-600 text-white shadow-2xs"
+                    : "bg-stone-100 hover:bg-stone-200 text-stone-700"
+                }`}
+              >
+                {lang === "sk" ? tab.labelSk : tab.labelEn}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Top AI Status & Per-Pipeline-Stage Provider / Model Configuration Card */}
+      {(activeConsoleTab === "all" || activeConsoleTab === "ai") && (
       <div className="bg-stone-900 text-stone-100 rounded-xl p-4 border border-amber-500 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -1456,8 +1582,11 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
           </div>
         </div>
       </div>
+      )}
 
       {/* Model Combo Statistics & Individual Step Timing Breakdown View */}
+      {(activeConsoleTab === "all" || activeConsoleTab === "benchmark") && (
+      <>
       <div
         data-testid="debug-model-combo-stats-card"
         className="bg-white rounded-xl p-4 border-2 border-emerald-600/80 shadow-xs space-y-4"
@@ -2339,8 +2468,11 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
           </div>
         )}
       </div>
+      </>
+      )}
 
       {/* Feature Flags */}
+      {(activeConsoleTab === "all" || activeConsoleTab === "flags") && (
       <div className="bg-white rounded-xl p-4 border-2 border-amber-500/80 shadow-xs space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3">
           <div>
@@ -2356,14 +2488,12 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
               {lang === "sk" ? (
                 <>
                   Okamžité zapínanie/vypínanie záložiek v hornej navigácii a funkcií sčítacích
-                  hárkov (uložené v <code className="font-mono text-stone-800">localStorage</code> a
-                  synchronizované so serverom).
+                  hárkov (uložené na serveri a platné pre všetkých používateľov).
                 </>
               ) : (
                 <>
                   Instant toggling of top navigation tabs and census pipeline features (persisted
-                  in <code className="font-mono text-stone-800">localStorage</code> and synced with
-                  backend).
+                  on the server and applied globally to all users).
                 </>
               )}
             </p>
@@ -2513,8 +2643,11 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
           </div>
         </div>
       </div>
+      )}
 
       {/* Grid Inspector */}
+      {(activeConsoleTab === "all" || activeConsoleTab === "inspector") && (
+      <>
       <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-base font-bold text-stone-900 flex items-center gap-2">
@@ -2917,6 +3050,8 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
           </pre>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

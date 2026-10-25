@@ -247,10 +247,12 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(page.locator("body")).toContainText("Districts & Municipalities");
     await expect(page.locator("body")).toContainText("Source of 1930 / 1940 Census Sheets:");
 
-    // Check EN on /scitacie-harky/cair-test001 (including ZoomableScanViewer)
+    // Check EN on /scitacie-harky/cair-test001 (including on-demand ZoomableScanViewer)
     await page.goto("/scitacie-harky/cair-test001", { waitUntil: "networkidle" });
-    await expect(page.locator("body")).toContainText("Sheet Scan Viewer");
+    await expect(page.locator("body")).toContainText("Show Full Sheet Scan");
     await expect(page.locator("body")).toContainText("Household Members on Census Sheet");
+    await page.getByTestId("toggle-full-sheet-scan-btn").click();
+    await expect(page.locator("body")).toContainText("Sheet Scan Viewer");
     await expect(page.locator("body")).toContainText("Expand view");
 
     // Check EN on /knihy & /hladanie
@@ -335,6 +337,7 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
       .locator("div")
       .filter({ hasText: "Kontrola:" })
       .getByRole("button", { name: "Skontrolované", exact: true })
+      .first()
       .click();
     await expect(page.locator("body")).toContainText("1 / 2");
 
@@ -372,9 +375,27 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     const diag = attachDiagnostics(page);
     await page.setViewportSize({ width: 1440, height: 900 });
 
-    // A. Household Sheet (cair-test001): ZoomableScanViewer presets, Overlay vs Original toggle, Member edit/add/delete
+    // A. Household Sheet (cair-test001): Verify secondary full-sheet scan (hidden by default), crop-first verification on cell hover, and clean user UI (no debug controls when admin_debug_overlay=false)
     await page.goto("/scitacie-harky/cair-test001", { waitUntil: "networkidle" });
     await expect(page.locator("body")).toContainText("Členovia domácnosti na sčítacom hárku (3)");
+    await expect(page.getByTestId("full-sheet-scan-card")).toHaveCount(0);
+    await expect(page.getByTestId("ocr-feedback-correct-btn")).toHaveCount(0);
+    await expect(page.getByTestId("sheet-type-select")).toHaveCount(0);
+    await expect(page.getByTestId("hover-zoom-row-crop")).toBeVisible();
+
+    // Hover over Date of Birth cell -> shows only Date of Birth crop badge in verification bar
+    const janRowInitial = page.locator("tbody tr").filter({ hasText: "hlava domácnosti" }).first();
+    await janRowInitial.locator('[data-testid^="cell-dob-"]').hover();
+    await expect(page.getByTestId("active-field-crop-badge")).toContainText(
+      "Stĺpce 7–10: Dátum narodenia"
+    );
+
+    // Enable Admin Debug Overlay in /debug so inline OCR rating, CV overlay toggle, and sheet-type override are active
+    await page.goto("/debug", { waitUntil: "networkidle" });
+    await page.getByTestId("debug-admin-overlay-toggle").click();
+    await expect(page.getByTestId("header-admin-overlay-pill")).toBeVisible();
+
+    await page.goto("/scitacie-harky/cair-test001", { waitUntil: "networkidle" });
 
     // Test ZoomableScanViewer "Prispôsobiť" (Fit) vs "100%" vs "150%" and Overlay vs Original Scan toggle
     const preset100 = page.getByRole("button", { name: "100%", exact: true });
@@ -499,10 +520,38 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
       page.getByRole("button", { name: "Označiť ako Prehľad obvodu" })
     ).toHaveCount(0);
 
-    // Re-enable manual_scan_zoom and census_overview_sheets in /debug
+    // Simulate another user whose browser localStorage had stale all-true flags:
+    // reloading must still enforce the server-side hidden feature flags for all users
+    await page.evaluate(() => {
+      window.localStorage.setItem(
+        "matrika_feature_flags_v1",
+        JSON.stringify({
+          tab_census: true,
+          tab_matrika: true,
+          tab_questions: true,
+          tab_records: true,
+          tab_search: true,
+          tab_familysearch: true,
+          census_multi_byt: true,
+          census_surname_consensus: true,
+          census_overview_sheets: true,
+          hover_row_zoom: true,
+          manual_scan_zoom: true,
+        })
+      );
+    });
+    await page.reload({ waitUntil: "networkidle" });
+    await expect(page.getByRole("button", { name: "150%", exact: true })).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Označiť ako Prehľad obvodu" })
+    ).toHaveCount(0);
+
+    // Re-enable manual_scan_zoom and census_overview_sheets in /debug, and turn off admin_debug_overlay back to default
     await page.goto("/debug", { waitUntil: "networkidle" });
     await manualZoomToggle.click();
     await overviewSheetsToggle.click();
+    await page.getByTestId("debug-admin-overlay-toggle").click();
+    await expect(page.getByTestId("header-admin-overlay-pill")).toHaveCount(0);
 
     // D. Filter by street in CensusHub (/scitacie-harky) and Unified Search (/hladanie)
     await page.goto("/scitacie-harky?obec=Obec+Testov%C3%A1", { waitUntil: "networkidle" });

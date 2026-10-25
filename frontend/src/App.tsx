@@ -17,7 +17,11 @@ import {
   X,
 } from "lucide-react";
 import HomeDashboard from "./pages/HomeDashboard";
-import { useFeatureFlags } from "./featureFlags";
+import {
+  type FeatureFlags,
+  syncBackendFeatureFlagsIfIdle,
+  useFeatureFlags,
+} from "./featureFlags";
 
 const QuestionCenter = lazy(() => import("./pages/QuestionCenter"));
 const FamilySearchReview = lazy(() => import("./pages/FamilySearchReview"));
@@ -102,6 +106,7 @@ export interface SystemStatus {
     census_sheets?: number;
   };
   pipeline_state: PipelineState;
+  feature_flags?: Partial<FeatureFlags>;
 }
 
 export function emitClientOcrNotification(event: OcrCompletionEvent): void {
@@ -173,7 +178,7 @@ interface ToastItem extends OcrCompletionEvent {
 
 export default function App() {
   const location = useLocation();
-  const { flags: featureFlags } = useFeatureFlags();
+  const { flags: featureFlags, toggleFlag } = useFeatureFlags();
   const [lang, setLang] = useState<"sk" | "en">(
     () => (localStorage.getItem("matrika_lang") as "sk" | "en") || "sk"
   );
@@ -311,6 +316,9 @@ export default function App() {
         if (r.ok) {
           const data = (await r.json()) as SystemStatus;
           setStatus(data);
+          if (data.feature_flags && typeof data.feature_flags === "object") {
+            syncBackendFeatureFlagsIfIdle(data.feature_flags);
+          }
           handlePipelineStateTransition(data.pipeline_state, isInitial);
         }
       } catch {
@@ -392,6 +400,12 @@ export default function App() {
               window.dispatchEvent(
                 new CustomEvent("matrika:sheet-updated", { detail: msg.data })
               );
+            } else if (msg.type === "feature_flags" && msg.data) {
+              const rawFlags =
+                msg.data?.flags && typeof msg.data.flags === "object"
+                  ? msg.data.flags
+                  : msg.data;
+              syncBackendFeatureFlagsIfIdle(rawFlags);
             }
           } catch {
             // ignore
@@ -501,17 +515,17 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-stone-100 text-stone-900 overflow-x-hidden">
-      <header className="bg-stone-900 text-stone-50 border-b-2 border-amber-600">
+      <header className="bg-stone-900 text-stone-50 border-b border-stone-800 shadow-2xs">
         <div className="w-full max-w-none mx-auto px-3 lg:px-5 py-2 flex flex-wrap lg:flex-nowrap items-center justify-between gap-2">
           <Link
             to={featureFlags.tab_matrika ? "/" : "/scitacie-harky"}
-            className="flex items-center gap-2 shrink-0"
+            className="flex items-center gap-2.5 shrink-0"
           >
-            <div className="w-8 h-8 rounded-lg bg-amber-600 flex items-center justify-center font-bold text-base text-white">
+            <div className="w-8 h-8 rounded-lg bg-amber-600 flex items-center justify-center font-bold text-base text-white shadow-2xs">
               M
             </div>
             <div className="leading-tight">
-              <h1 className="text-sm xl:text-base font-bold tracking-tight whitespace-nowrap">
+              <h1 className="text-sm xl:text-base font-bold tracking-tight whitespace-nowrap text-white">
                 {lang === "sk"
                   ? "Čítačka matrík a sčítacích hárkov"
                   : "Matrika & Census Digitizer"}
@@ -545,8 +559,8 @@ export default function App() {
                   to={item.to}
                   className={`flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] rounded-lg font-semibold text-xs xl:text-sm whitespace-nowrap transition shrink-0 ${
                     active
-                      ? "bg-amber-600 text-white"
-                      : "text-stone-200 hover:bg-stone-800"
+                      ? "bg-amber-600 text-white shadow-2xs"
+                      : "text-stone-300 hover:bg-stone-800 hover:text-white"
                   }`}
                 >
                   <Icon className="w-4 h-4 shrink-0" />
@@ -554,7 +568,7 @@ export default function App() {
                   {item.badge !== null && item.badge > 0 && (
                     <span
                       className={`ml-0.5 px-1.5 py-0 rounded-full text-xs font-bold leading-5 ${
-                        active ? "bg-stone-900 text-amber-300" : item.badgeColor
+                        active ? "bg-stone-950/60 text-white" : item.badgeColor
                       }`}
                     >
                       {item.badge}
@@ -566,37 +580,54 @@ export default function App() {
           </nav>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            <span
-              className="flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] rounded-md bg-stone-800 text-xs font-semibold whitespace-nowrap"
-              title={
-                aiOnline
-                  ? `AI: ${status?.ai_server?.base_url || "online"}`
-                  : "AI server offline"
-              }
-            >
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  aiOnline ? "bg-emerald-400" : "bg-red-400"
-                }`}
-              />
-              <span className={aiOnline ? "text-emerald-300" : "text-red-300"}>
-                {aiOnline ? "AI" : "AI offline"}
-              </span>
-            </span>
+            {featureFlags.admin_debug_overlay && (
+              <>
+                <span
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] rounded-md bg-stone-800 text-xs font-semibold whitespace-nowrap"
+                  title={
+                    aiOnline
+                      ? `AI: ${status?.ai_server?.base_url || "online"}`
+                      : "AI server offline"
+                  }
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      aiOnline ? "bg-emerald-400" : "bg-red-400"
+                    }`}
+                  />
+                  <span className={aiOnline ? "text-emerald-300" : "text-red-300"}>
+                    {aiOnline ? "AI" : "AI offline"}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => toggleFlag("admin_debug_overlay")}
+                  data-testid="header-admin-overlay-pill"
+                  title={
+                    lang === "sk"
+                      ? "Vypnúť technické nástroje (Admin Debug Overlay)"
+                      : "Turn off inline debug tools (Admin Debug Overlay)"
+                  }
+                  className="px-2.5 py-1.5 min-h-[34px] rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold whitespace-nowrap cursor-pointer transition"
+                >
+                  {lang === "sk" ? "Admin Overlay: ZAP" : "Admin Overlay: ON"}
+                </button>
+              </>
+            )}
             <button
               onClick={toggleLang}
-              className="px-3 py-1.5 min-h-[34px] min-w-[38px] rounded-md bg-stone-800 hover:bg-stone-700 border border-stone-600 font-semibold text-xs cursor-pointer"
+              className="px-3 py-1.5 min-h-[34px] min-w-[38px] rounded-md bg-stone-800 hover:bg-stone-700 border border-stone-700 font-semibold text-xs cursor-pointer text-stone-200"
               title="Prepnúť jazyk / Switch language"
             >
               {lang === "sk" ? "SK" : "EN"}
             </button>
             <Link
               to="/debug"
-              title={lang === "sk" ? "Technický Debug & Feature Flags" : "Debug Workflow & Feature Flags"}
-              className={`px-2.5 py-1.5 min-h-[34px] rounded-md font-semibold text-xs inline-flex items-center gap-1.5 ${
+              title={lang === "sk" ? "Admin & Debug konzola" : "Admin & Debug Console"}
+              className={`px-2.5 py-1.5 min-h-[34px] rounded-md font-semibold text-xs inline-flex items-center gap-1.5 transition ${
                 debugActive
                   ? "bg-amber-600 text-white"
-                  : "text-stone-200 hover:bg-stone-800 hover:text-white border border-stone-700"
+                  : "text-stone-300 hover:bg-stone-800 hover:text-white border border-stone-700"
               }`}
             >
               <Activity className="w-4 h-4" />
@@ -609,16 +640,16 @@ export default function App() {
       {isBusy && ps && (
         <div
           data-testid="global-pipeline-progress-banner"
-          className="bg-amber-100 border-b border-amber-500 px-4 lg:px-6 py-2 shadow-xs"
+          className="bg-amber-50 border-b border-amber-300 px-4 lg:px-6 py-2 shadow-xs"
         >
           <div className="w-full max-w-none mx-auto flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2 min-w-0">
               <RefreshCw className="w-4 h-4 text-amber-700 animate-spin shrink-0" />
-              <span className="px-2 py-0.5 rounded-md bg-amber-700 text-white text-xs font-bold shrink-0">
+              <span className="px-2 py-0.5 rounded-md bg-amber-600 text-white text-xs font-bold shrink-0">
                 {formatStageBadgeLabel(ps.active_stage, lang)}
               </span>
               {ps.job_total_sheets != null && ps.job_total_sheets > 0 && (
-                <span className="px-2 py-0.5 rounded-md bg-stone-800 text-amber-200 text-xs font-bold shrink-0">
+                <span className="px-2 py-0.5 rounded-md bg-stone-900 text-white text-xs font-bold shrink-0">
                   {lang === "sk"
                     ? `Hárok ${ps.job_sheet_index || 1}/${ps.job_total_sheets}`
                     : `Sheet ${ps.job_sheet_index || 1}/${ps.job_total_sheets}`}
@@ -627,14 +658,14 @@ export default function App() {
               {(ps.current_slovakiana_key || ps.current_sheet_label) && activeSheetLink && (
                 <Link
                   to={activeSheetLink}
-                  className="px-2 py-0.5 rounded bg-amber-200/90 hover:bg-amber-300 text-stone-900 border border-amber-400 text-xs font-bold inline-flex items-center gap-1 shrink-0 transition"
+                  className="px-2 py-0.5 rounded bg-white hover:bg-amber-100 text-stone-900 border border-amber-300 text-xs font-bold inline-flex items-center gap-1 shrink-0 transition"
                   title={
                     lang === "sk"
                       ? "Otvoriť práve spracovávaný hárok"
                       : "Open currently processing sheet"
                   }
                 >
-                  <FileSpreadsheet className="w-3.5 h-3.5 text-amber-800" />
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-amber-700" />
                   <span>
                     {ps.current_slovakiana_key
                       ? `${ps.current_slovakiana_key}${
@@ -648,7 +679,7 @@ export default function App() {
                 </Link>
               )}
               {ps.total_rows != null && ps.total_rows > 0 && (
-                <span className="px-2 py-0.5 rounded bg-white/80 border border-amber-400 text-amber-950 text-xs font-bold shrink-0">
+                <span className="px-2 py-0.5 rounded bg-white border border-stone-300 text-stone-800 text-xs font-bold shrink-0">
                   {lang === "sk"
                     ? `Riadok ${ps.current_row_index || 1}/${ps.total_rows}`
                     : `Row ${ps.current_row_index || 1}/${ps.total_rows}`}
@@ -657,7 +688,7 @@ export default function App() {
               <span className="font-semibold text-xs sm:text-sm text-stone-900 truncate">
                 {lang === "sk" ? ps.message_sk : ps.message_en}
               </span>
-              {ps.active_model && (
+              {featureFlags.admin_debug_overlay && ps.active_model && (
                 <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono shrink-0">
                   {ps.active_model}
                 </span>
@@ -667,10 +698,10 @@ export default function App() {
               {elapsedSec > 0 && (
                 <span className="text-xs font-semibold text-stone-700">{elapsedSec} s</span>
               )}
-              <span className="px-2 py-0.5 rounded-full bg-amber-700 text-white text-xs font-bold">
+              <span className="px-2 py-0.5 rounded-full bg-amber-600 text-white text-xs font-bold">
                 {activePct}%
               </span>
-              <div className="w-36 sm:w-48 bg-amber-200/90 rounded-full h-2.5 overflow-hidden shrink-0 border border-amber-400/60">
+              <div className="w-36 sm:w-48 bg-amber-200/90 rounded-full h-2.5 overflow-hidden shrink-0 border border-amber-300">
                 <div
                   className="bg-amber-600 h-full transition-all duration-300 animate-pulse"
                   style={{ width: `${activePct}%` }}
@@ -890,8 +921,8 @@ export default function App() {
         </Suspense>
       </main>
 
-      <footer className="bg-stone-200 border-t border-stone-300 py-3 px-4 text-center text-stone-700 text-xs space-y-1.5">
-        <div className="font-medium text-stone-800 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+      <footer className="bg-white border-t border-stone-200 py-3 px-4 text-center text-stone-600 text-xs space-y-1">
+        <div className="font-medium text-stone-700 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
           <span>
             {lang === "sk"
               ? "Čítanie slovenských, maďarských a latinských cirkevných matrík a sčítacích hárkov 1930/1940 · FamilySearch · lokálna AI"
@@ -905,15 +936,15 @@ export default function App() {
                 ? `Verzia zostavenia (git commit): ${buildCommitHash}`
                 : `Build commit hash: ${buildCommitHash}`
             }
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-stone-300/80 text-stone-700 font-mono text-[11px]"
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-stone-100 border border-stone-200 text-stone-600 font-mono text-[11px]"
           >
-            <span className="font-sans text-stone-600">
+            <span className="font-sans text-stone-500">
               {lang === "sk" ? "Zostavenie:" : "Build:"}
             </span>{" "}
-            <code className="font-semibold text-stone-900">{buildCommitHash}</code>
+            <code className="font-semibold text-stone-800">{buildCommitHash}</code>
           </span>
         </div>
-        <div className="text-xs text-stone-700 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+        <div className="text-xs text-stone-600 flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
           <span>
             {lang === "sk"
               ? "Zdroj sčítacích hárkov: Slovenský národný archív (SNA) /"
@@ -923,7 +954,7 @@ export default function App() {
             href="https://slovakiana.sk/scitacie-harky"
             target="_blank"
             rel="noreferrer"
-            className="text-amber-900 hover:underline font-semibold inline-flex items-center gap-1 py-1"
+            className="text-amber-700 hover:underline font-semibold inline-flex items-center gap-1 py-0.5"
           >
             <span>Slovakiana (Národné osvetové centrum)</span>
             <ExternalLink className="w-3 h-3" />
@@ -933,7 +964,7 @@ export default function App() {
             href="https://creativecommons.org/licenses/by-nc-nd/4.0/"
             target="_blank"
             rel="noreferrer"
-            className="text-stone-900 hover:underline font-semibold inline-flex items-center gap-1 py-1"
+            className="text-stone-800 hover:underline font-semibold inline-flex items-center gap-1 py-0.5"
           >
             <span>Licencia CC BY-NC-ND 4.0</span>
             <ExternalLink className="w-3 h-3" />

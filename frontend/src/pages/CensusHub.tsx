@@ -2431,54 +2431,22 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   </div>
                 )}
 
-                {/* Bottom Row: Full-width 2-column action buttons */}
-                <div
-                  className={`grid gap-1.5 pt-1.5 border-t ${
-                    isSelected ? "border-amber-200/80" : "border-stone-100"
-                  } ${
-                    featureFlags.census_overview_sheets
-                      ? "grid-cols-2"
-                      : "grid-cols-1"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleHarvestMunicipality(
-                        m.municipality,
-                        m.slovakiana_tag_key || m.municipality_key
-                      );
-                    }}
-                    disabled={busyAction !== null}
-                    title={
-                      lang === "sk"
-                        ? "Stiahnuť katalóg hárkov obce z archívu Slovakiana"
-                        : "Fetch municipality sheet catalog from Slovakiana archive"
-                    }
-                    className={`px-2 py-1 min-h-[28px] rounded-md text-[11px] font-semibold inline-flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50 transition border ${
-                      isSelected
-                        ? "bg-stone-900 hover:bg-stone-800 text-amber-300 border-stone-900"
-                        : "bg-stone-100 hover:bg-stone-900 text-stone-700 hover:text-amber-300 border-stone-200"
+                {/* Bottom Row: Full-width 2-column action buttons (Admin Debug Overlay only) */}
+                {featureFlags.admin_debug_overlay && (
+                  <div
+                    className={`grid gap-1.5 pt-1.5 border-t ${
+                      isSelected ? "border-amber-200/80" : "border-stone-100"
+                    } ${
+                      featureFlags.census_overview_sheets
+                        ? "grid-cols-2"
+                        : "grid-cols-1"
                     }`}
                   >
-                    {isHarvesting ? (
-                      <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
-                    ) : (
-                      <FolderDown className="w-3 h-3 shrink-0" />
-                    )}
-                    <span className="truncate">
-                      {lang === "sk" ? "Stiahnuť z archívu" : "Fetch catalog"}
-                    </span>
-                  </button>
-
-                  {featureFlags.census_overview_sheets && (
                     <button
                       type="button"
-                      data-testid={`village-ocr-overviews-btn-${foldMunicipalityKey(m.municipality).replace(/\s+/g, "-")}`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleOcrOverviewOnlyMunicipality(
+                        handleHarvestMunicipality(
                           m.municipality,
                           m.slovakiana_tag_key || m.municipality_key
                         );
@@ -2486,26 +2454,60 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                       disabled={busyAction !== null}
                       title={
                         lang === "sk"
-                          ? "Stiahnuť všetky skeny obce, detegovať typy hárkov a spustiť AI OCR iba pre prehľady obvodov (bez pomalého OCR všetkých rodinných hárkov)"
-                          : "Download all village scans, run sheet type detection, and OCR only the overview sheets"
+                          ? "Stiahnuť katalóg hárkov obce z archívu Slovakiana"
+                          : "Fetch municipality sheet catalog from Slovakiana archive"
                       }
                       className={`px-2 py-1 min-h-[28px] rounded-md text-[11px] font-semibold inline-flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50 transition border ${
                         isSelected
-                          ? "bg-amber-600 hover:bg-amber-700 text-white border-amber-600"
-                          : "bg-amber-50/80 hover:bg-amber-600 text-amber-950 hover:text-white border-amber-200"
+                          ? "bg-stone-900 hover:bg-stone-800 text-amber-300 border-stone-900"
+                          : "bg-stone-100 hover:bg-stone-900 text-stone-700 hover:text-amber-300 border-stone-200"
                       }`}
                     >
-                      {isOcrOverviews ? (
+                      {isHarvesting ? (
                         <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
                       ) : (
-                        <Building2 className="w-3 h-3 shrink-0" />
+                        <FolderDown className="w-3 h-3 shrink-0" />
                       )}
                       <span className="truncate">
-                        {lang === "sk" ? "OCR prehľadov" : "OCR overviews"}
+                        {lang === "sk" ? "Stiahnuť z archívu" : "Fetch catalog"}
                       </span>
                     </button>
-                  )}
-                </div>
+
+                    {featureFlags.census_overview_sheets && (
+                      <button
+                        type="button"
+                        data-testid={`village-ocr-overviews-btn-${foldMunicipalityKey(m.municipality).replace(/\s+/g, "-")}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOcrOverviewOnlyMunicipality(
+                            m.municipality,
+                            m.slovakiana_tag_key || m.municipality_key
+                          );
+                        }}
+                        disabled={busyAction !== null}
+                        title={
+                          lang === "sk"
+                            ? "Stiahnuť všetky skeny obce, detegovať typy hárkov a spustiť AI OCR iba pre prehľady obvodov (bez pomalého OCR všetkých rodinných hárkov)"
+                            : "Download all village scans, run sheet type detection, and OCR only the overview sheets"
+                        }
+                        className={`px-2 py-1 min-h-[28px] rounded-md text-[11px] font-semibold inline-flex items-center justify-center gap-1 cursor-pointer disabled:opacity-50 transition border ${
+                          isSelected
+                            ? "bg-amber-600 hover:bg-amber-700 text-white border-amber-600"
+                            : "bg-amber-50/80 hover:bg-amber-600 text-amber-950 hover:text-white border-amber-200"
+                        }`}
+                      >
+                        {isOcrOverviews ? (
+                          <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
+                        ) : (
+                          <Building2 className="w-3 h-3 shrink-0" />
+                        )}
+                        <span className="truncate">
+                          {lang === "sk" ? "OCR prehľadov" : "OCR overviews"}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -2620,23 +2622,25 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
               </div>
             </div>
 
-            {/* Unified Split-Button Action Group & Jobs History Popover */}
+            {/* Unified Action Group & Jobs History Popover */}
             <div className="flex flex-wrap items-center justify-end gap-2">
               <div ref={splitMenuRef} className="relative inline-flex">
                 <div className="inline-flex items-stretch rounded-lg border border-stone-300 bg-white shadow-2xs overflow-hidden">
-                  <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] bg-stone-50 border-r border-stone-300 text-xs">
-                    <span className="text-stone-600 font-medium">
-                      {lang === "sk" ? "Dávka:" : "Batch:"}
-                    </span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={2000}
-                      value={maxSheetsInput}
-                      onChange={(e) => setMaxSheetsInput(Number(e.target.value) || 40)}
-                      className="w-14 min-h-[28px] bg-white rounded border border-stone-300 px-1 text-xs font-bold text-stone-900 focus:outline-none text-center"
-                    />
-                  </label>
+                  {featureFlags.admin_debug_overlay && (
+                    <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] bg-stone-50 border-r border-stone-300 text-xs">
+                      <span className="text-stone-600 font-medium">
+                        {lang === "sk" ? "Dávka:" : "Batch:"}
+                      </span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={2000}
+                        value={maxSheetsInput}
+                        onChange={(e) => setMaxSheetsInput(Number(e.target.value) || 40)}
+                        className="w-14 min-h-[28px] bg-white rounded border border-stone-300 px-1 text-xs font-bold text-stone-900 focus:outline-none text-center"
+                      />
+                    </label>
+                  )}
 
                   <button
                     type="button"
@@ -2664,28 +2668,30 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                     </span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setSplitMenuOpen((prev) => !prev)}
-                    disabled={busyAction !== null}
-                    title={
-                      lang === "sk"
-                        ? "Ďalšie možnosti: Iba načítať katalóg zo Slovakiany"
-                        : "More options: Only fetch catalog from Slovakiana"
-                    }
-                    aria-label={
-                      lang === "sk"
-                        ? "Ďalšie možnosti sťahovania"
-                        : "More download options"
-                    }
-                    className="px-2.5 py-1.5 min-h-[34px] min-w-[34px] bg-amber-700 hover:bg-amber-800 text-white border-l border-amber-500/50 inline-flex items-center justify-center cursor-pointer disabled:opacity-50 transition"
-                  >
-                    {splitMenuOpen ? (
-                      <ChevronUp className="w-4 h-4" />
-                    ) : (
-                      <ChevronDown className="w-4 h-4" />
-                    )}
-                  </button>
+                  {featureFlags.admin_debug_overlay && (
+                    <button
+                      type="button"
+                      onClick={() => setSplitMenuOpen((prev) => !prev)}
+                      disabled={busyAction !== null}
+                      title={
+                        lang === "sk"
+                          ? "Ďalšie možnosti: Iba načítať katalóg zo Slovakiany"
+                          : "More options: Only fetch catalog from Slovakiana"
+                      }
+                      aria-label={
+                        lang === "sk"
+                          ? "Ďalšie možnosti sťahovania"
+                          : "More download options"
+                      }
+                      className="px-2.5 py-1.5 min-h-[34px] min-w-[34px] bg-amber-700 hover:bg-amber-800 text-white border-l border-amber-500/50 inline-flex items-center justify-center cursor-pointer disabled:opacity-50 transition"
+                    >
+                      {splitMenuOpen ? (
+                        <ChevronUp className="w-4 h-4" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4" />
+                      )}
+                    </button>
+                  )}
                 </div>
 
                 {splitMenuOpen && (
@@ -2965,81 +2971,40 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
             </div>
           )}
 
-          {/* Row 2: Unified Search Input, Person/Birth-Year/Village Filters & Workspace Sub-Tabs */}
+          {/* Row 2: Unified Search Input & Person/Birth-Year/Village Filters */}
           <div className="space-y-2.5 pt-2.5 border-t border-stone-200">
             <div className="flex flex-wrap items-center justify-between gap-2.5">
-              {/* Sub-Tabs */}
-              <div className="inline-flex rounded-lg bg-stone-100 p-1 border border-stone-200">
-                {Boolean(selectedMunicipality) &&
-                  featureFlags.census_overview_sheets && (
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab("overview")}
-                      className={`px-3.5 py-1.5 min-h-[34px] rounded-md text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition ${
-                        activeTab === "overview"
-                          ? "bg-stone-900 text-amber-300 shadow-xs"
-                          : "text-stone-700 hover:text-stone-900"
-                      }`}
-                    >
-                      <Building2 className="w-3.5 h-3.5" />
-                      <span>
-                        {lang === "sk"
-                          ? "Prehľad obce, obvodov a domov"
-                          : "Municipality, Districts & Houses"}
-                      </span>
-                    </button>
-                  )}
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("sheets")}
-                  className={`px-3.5 py-1.5 min-h-[34px] rounded-md text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition ${
-                    !selectedMunicipality ||
-                    !featureFlags.census_overview_sheets ||
-                    activeTab === "sheets"
-                      ? "bg-stone-900 text-amber-300 shadow-xs"
-                      : "text-stone-700 hover:text-stone-900"
-                  }`}
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5" />
-                  <span>
-                    {lang === "sk"
-                      ? `Všetky hárky (Karty) (${totalSheets})`
-                      : `All Sheets (Cards) (${totalSheets})`}
-                  </span>
-                </button>
+              {/* General Quick Search Input */}
+              <div className="relative flex-1 min-w-[220px] max-w-md">
+                <Search className="w-3.5 h-3.5 text-stone-500 absolute left-2.5 top-2.5" />
+                <input
+                  type="text"
+                  value={workspaceSearch}
+                  onChange={(e) => setWorkspaceSearch(e.target.value)}
+                  placeholder={
+                    lang === "sk"
+                      ? "Rýchle hľadanie (dom č., majiteľ, osoba, cair-...)..."
+                      : "Quick search (house #, owner, person, cair-...)..."
+                  }
+                  className="w-full pl-8 pr-8 py-1.5 min-h-[34px] rounded-lg border border-stone-300 text-xs sm:text-sm"
+                />
+                {workspaceSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setWorkspaceSearch("")}
+                    className="absolute right-1 top-1 p-1.5 text-stone-500 hover:text-stone-800 cursor-pointer"
+                    title={
+                      lang === "sk"
+                        ? "Vyčistiť rýchle hľadanie"
+                        : "Clear quick search"
+                    }
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
 
-              <div className="flex flex-wrap items-center gap-2 flex-1 justify-end min-w-[260px]">
-                {/* General Quick Search Input */}
-                <div className="relative flex-1 min-w-[220px] max-w-sm">
-                  <Search className="w-3.5 h-3.5 text-stone-500 absolute left-2.5 top-2.5" />
-                  <input
-                    type="text"
-                    value={workspaceSearch}
-                    onChange={(e) => setWorkspaceSearch(e.target.value)}
-                    placeholder={
-                      lang === "sk"
-                        ? "Rýchle hľadanie (dom č., majiteľ, cair-...)..."
-                        : "Quick search (house #, owner, cair-...)..."
-                    }
-                    className="w-full pl-8 pr-8 py-1.5 min-h-[34px] rounded-lg border border-stone-300 text-xs sm:text-sm"
-                  />
-                  {workspaceSearch && (
-                    <button
-                      type="button"
-                      onClick={() => setWorkspaceSearch("")}
-                      className="absolute right-1 top-1 p-1.5 text-stone-500 hover:text-stone-800 cursor-pointer"
-                      title={
-                        lang === "sk"
-                          ? "Vyčistiť rýchle hľadanie"
-                          : "Clear quick search"
-                      }
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-
+              <div className="flex flex-wrap items-center gap-2 justify-end">
                 {hasAnyActiveFilter && (
                   <button
                     type="button"
@@ -3053,6 +3018,27 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                   >
                     <X className="w-3.5 h-3.5" />
                     <span>{lang === "sk" ? "Zrušiť filtre" : "Clear filters"}</span>
+                  </button>
+                )}
+
+                {Boolean(selectedMunicipality) && featureFlags.census_overview_sheets && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setActiveTab((prev) => (prev === "overview" ? "sheets" : "overview"))
+                    }
+                    className="px-3 py-1.5 min-h-[34px] rounded-lg bg-stone-100 hover:bg-stone-200 border border-stone-300 text-stone-700 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-stone-600" />
+                    <span>
+                      {activeTab === "overview"
+                        ? lang === "sk"
+                          ? `Surové karty hárkov (${totalSheets})`
+                          : `Raw sheet cards (${totalSheets})`
+                        : lang === "sk"
+                        ? "← Späť na adresár domov obce"
+                        : "← Back to village house directory"}
+                    </span>
                   </button>
                 )}
               </div>
@@ -3260,6 +3246,9 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 .filter(Boolean)
                 .join(" · ");
 
+              if (!isSearchingCensus && !hasAnyActiveFilter) {
+                return null;
+              }
               return (
                 <div
                   data-testid="census-search-progress-card"
@@ -3408,286 +3397,70 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 </div>
               </div>
             ) : (
-              <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
-                      <Building2 className="w-5 h-5 text-purple-700" />
-                      <span>
-                        {lang === "sk"
-                          ? "Prehľady sčítacích obvodov"
-                          : "District Overview Sheets"}{" "}
-                        ({muniOverview?.overview_sheets.length ?? 0})
-                      </span>
-                    </h2>
-                    <p className="text-xs sm:text-sm text-stone-600">
-                      {lang === "sk"
-                        ? "Sumárne hárky sčítacích komisárov so zoznamom všetkých domov, majiteľov a počtom prítomných osôb v obci."
-                        : "Summary sheets by census commissioners listing all houses, owners, and present residents in the municipality."}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Top Banner inside the card: Obecný prehľad (Tlačivo X) if present */}
-                {muniOverview?.municipal_overview_sheets &&
-                  muniOverview.municipal_overview_sheets.map((mov) => {
+              <div className="bg-white rounded-xl px-4 py-3 border border-stone-200 flex flex-wrap items-center justify-between gap-3 text-xs sm:text-sm">
+                <div className="flex flex-wrap items-center gap-2 min-w-0">
+                  <Building2 className="w-4 h-4 text-amber-600 shrink-0" />
+                  <h2 className="font-bold text-stone-900">
+                    {lang === "sk"
+                      ? "Prehľady sčítacích obvodov"
+                      : "District Overview Sheets"}{" "}
+                    ({muniOverview?.overview_sheets.length ?? 0})
+                  </h2>
+                  <span className="text-stone-600">
+                    {lang === "sk"
+                      ? `· ${muniOverview?.total_houses ?? 0} zaznamenaných domov v obci`
+                      : `· ${muniOverview?.total_houses ?? 0} recorded houses in municipality`}
+                  </span>
+                  {(muniOverview?.municipal_overview_sheets || []).map((mov) => {
                     const dists = mov.municipal_overview_districts || [];
                     const distOnly = dists.filter((d) => !d.is_summary_row);
                     const sumRow = dists.find((d) => d.is_summary_row) || null;
-                    const totHouses =
-                      sumRow?.houses_total ??
-                      distOnly.reduce((a, d) => a + (d.houses_total || 0), 0);
-                    const totInhab =
-                      sumRow?.houses_inhabited ??
-                      distOnly.reduce((a, d) => a + (d.houses_inhabited || 0), 0);
-                    const totUninhab =
-                      sumRow?.houses_uninhabited ??
-                      distOnly.reduce((a, d) => a + (d.houses_uninhabited || 0), 0);
-                    const totUnits =
-                      sumRow?.household_count ??
-                      distOnly.reduce((a, d) => a + (d.household_count || 0), 0);
                     const totPersons =
                       sumRow?.present_persons_count ??
                       distOnly.reduce((a, d) => a + (d.present_persons_count || 0), 0);
                     return (
-                      <div
+                      <span
                         key={mov.slovakiana_id}
-                        className="bg-indigo-50/70 rounded-xl p-3.5 border border-indigo-200 flex flex-wrap items-center justify-between gap-3"
+                        className="inline-flex items-center gap-1.5 text-stone-700"
                       >
-                        <div className="flex items-start gap-3 min-w-0">
-                          {mov.thumbnail_url && (
-                            <img
-                              src={mov.thumbnail_url}
-                              alt={mov.slovakiana_id}
-                              className="w-20 h-16 object-cover rounded-lg border border-indigo-300 bg-stone-200 shrink-0"
-                            />
-                          )}
-                          <div className="space-y-1 min-w-0">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
-                                {mov.slovakiana_id}
-                              </span>
-                              <span className="px-2.5 py-0.5 rounded-full bg-indigo-200 text-indigo-950 text-xs font-bold">
-                                {lang === "sk"
-                                  ? "Obecný prehľad (Súhrn obvodov)"
-                                  : "Municipal Overview (Districts Summary)"}
-                              </span>
-                              <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-xs font-bold">
-                                {mov.census_year}
-                              </span>
-                            </div>
-                            <div className="font-bold text-sm text-stone-900">
-                              {mov.municipality_name}
-                              {mov.district_name ? ` (okr. ${mov.district_name})` : ""}
-                              {mov.commissioner_name
-                                ? ` · ${lang === "sk" ? "Sčítací revízor:" : "Revisor:"} ${
-                                    mov.commissioner_name
-                                  }`
-                                : ""}
-                            </div>
-                            <div className="text-xs text-stone-800 flex flex-wrap items-center gap-2">
-                              <span>
-                                {lang === "sk" ? "Spojené obvody:" : "Joined districts:"}{" "}
-                                <strong>{distOnly.length}</strong>
-                              </span>
-                              <span>·</span>
-                              <span>
-                                {lang === "sk" ? "Domov spolu:" : "Total houses:"}{" "}
-                                <strong>
-                                  {totHouses} ({totInhab} obýv. / {totUninhab} neobýv.)
-                                </strong>
-                              </span>
-                              <span>·</span>
-                              <span>
-                                {lang === "sk" ? "Bytové strany:" : "Dwelling units:"}{" "}
-                                <strong>{totUnits}</strong>
-                              </span>
-                              <span>·</span>
-                              <span>
-                                {lang === "sk" ? "Prítomné osoby:" : "Present residents:"}{" "}
-                                <strong>{totPersons}</strong>
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="w-full">
-                          {renderAttachedSheetProgress(mov.slovakiana_id, mov.id)}
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Link
-                            to={buildSheetDetailLink(mov.slovakiana_id)}
-                            className="px-3 py-1.5 min-h-[34px] rounded-lg bg-indigo-800 hover:bg-indigo-900 text-white font-semibold text-xs inline-flex items-center gap-1.5"
-                          >
-                            <Building2 className="w-3.5 h-3.5" />
-                            <span>
-                              {lang === "sk"
-                                ? "Otvoriť obecný prehľad"
-                                : "Open municipal overview"}
-                            </span>
-                          </Link>
-                          <button
-                            type="button"
-                            onClick={() => handleProcessSingleSheet(mov.slovakiana_id)}
-                            disabled={Boolean(getAttachedSheetState(mov.slovakiana_id, mov.id)?.active)}
-                            className="px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                          >
-                            {getAttachedSheetState(mov.slovakiana_id, mov.id)?.active ? (
-                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Download className="w-3.5 h-3.5" />
-                            )}
-                            <span>
-                              {getAttachedSheetState(mov.slovakiana_id, mov.id)?.active
-                                ? `OCR (${getAttachedSheetState(mov.slovakiana_id, mov.id)?.pct}%)…`
-                                : lang === "sk"
-                                ? "Prečítať OCR"
-                                : "Read OCR"}
-                            </span>
-                          </button>
-                        </div>
-                      </div>
+                        <span>
+                          · {lang === "sk" ? "Prítomné osoby:" : "Present residents:"}{" "}
+                          <strong>{totPersons}</strong>
+                        </span>
+                        <Link
+                          to={buildSheetDetailLink(mov.slovakiana_id)}
+                          className="px-2 py-0.5 rounded bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300 font-semibold text-xs inline-flex items-center gap-1"
+                        >
+                          <span>
+                            {lang === "sk" ? "Obecný prehľad" : "Municipal overview"} ({mov.slovakiana_id}) ↗
+                          </span>
+                        </Link>
+                      </span>
                     );
                   })}
+                </div>
 
-                {/* Grid of District Overview Cards (Prehľad obvodu č. I, II, ...) */}
-                {muniOverview?.overview_sheets &&
-                  muniOverview.overview_sheets.length > 0 && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      {muniOverview.overview_sheets.map((ov) => {
-                        const allMuniDists = (
-                          muniOverview.municipal_overview_sheets || []
-                        ).flatMap((m) =>
-                          (m.municipal_overview_districts || []).filter(
-                            (d) => !d.is_summary_row
-                          )
-                        );
-                        const matchedDist =
-                          allMuniDists.find(
-                            (d) =>
-                              d.matched_overview_sheet_id === ov.id ||
-                              d.matched_overview_slovakiana_key === ov.slovakiana_id ||
-                              (ov.obvod_number &&
-                                d.obvod_number &&
-                                d.obvod_number.toUpperCase() ===
-                                  ov.obvod_number.toUpperCase())
-                          ) || null;
-                        const effObvod = ov.obvod_number || matchedDist?.obvod_number || null;
-                        const effComm =
-                          matchedDist?.commissioner_name || ov.commissioner_name || null;
-
-                        return (
-                          <div
-                            key={ov.slovakiana_id}
-                            className="bg-purple-50/50 rounded-xl p-3.5 border border-purple-200 flex flex-col justify-between gap-3"
-                          >
-                            <div className="flex gap-3">
-                              {ov.thumbnail_url ? (
-                                <img
-                                  src={ov.thumbnail_url}
-                                  alt={ov.slovakiana_id}
-                                  className="w-20 h-16 object-cover rounded-lg border border-purple-300 bg-stone-200 shrink-0"
-                                />
-                              ) : (
-                                <div className="w-20 h-16 rounded-lg border border-purple-300 bg-purple-100 flex items-center justify-center text-xs font-bold text-purple-900 shrink-0">
-                                  Obvod
-                                </div>
-                              )}
-                              <div className="min-w-0 flex-1 space-y-1">
-                                <div className="flex flex-wrap items-center gap-1.5">
-                                  <span className="px-2 py-0.5 rounded bg-stone-900 text-amber-300 text-xs font-mono font-bold">
-                                    {ov.slovakiana_id}
-                                  </span>
-                                  <span className="px-2 py-0.5 rounded-full bg-purple-200 text-purple-950 text-xs font-bold">
-                                    {lang === "sk" ? "Prehľad obvodu" : "District overview"}{" "}
-                                    {effObvod ? `č. ${effObvod}` : ""}
-                                  </span>
-                                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-xs font-bold">
-                                    {ov.census_year}
-                                  </span>
-                                </div>
-                                <div className="font-bold text-sm text-stone-900">
-                                  {ov.municipality_name}
-                                  {ov.district_name ? ` (okr. ${ov.district_name})` : ""}
-                                </div>
-                                <div className="text-xs text-stone-700 flex flex-wrap items-center gap-2">
-                                  {effComm && (
-                                    <span>
-                                      {lang === "sk" ? "Komisár:" : "Commissioner:"}{" "}
-                                      <strong>{effComm}</strong>
-                                    </span>
-                                  )}
-                                  <span>
-                                    {lang === "sk"
-                                      ? "Zaznamenaných domov:"
-                                      : "Recorded houses:"}{" "}
-                                    <strong>{ov.overview_houses_count ?? 0}</strong>
-                                  </span>
-                                </div>
-                                {matchedDist && (
-                                  <div className="text-xs text-indigo-950 bg-indigo-100/70 border border-indigo-200 rounded-md px-2 py-1 mt-1">
-                                    {lang === "sk"
-                                      ? `Podľa obecného prehľadu: ${
-                                          matchedDist.houses_total ?? "—"
-                                        } domov (${matchedDist.houses_inhabited ?? "—"} obýv. / ${
-                                          matchedDist.houses_uninhabited ?? 0
-                                        } neobýv.) · ${
-                                          matchedDist.household_count ?? "—"
-                                        } byt. strán · `
-                                      : `Per municipal overview: ${
-                                          matchedDist.houses_total ?? "—"
-                                        } houses · ${
-                                          matchedDist.household_count ?? "—"
-                                        } units · `}
-                                    <strong>
-                                      {matchedDist.present_persons_count ?? "—"}{" "}
-                                      {lang === "sk" ? "osôb" : "people"}
-                                    </strong>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-
-                            {renderAttachedSheetProgress(ov.slovakiana_id, ov.id)}
-
-                            <div className="flex items-center justify-between gap-2 pt-2 border-t border-purple-200/70">
-                              <Link
-                                to={buildSheetDetailLink(ov.slovakiana_id)}
-                                className="px-3 py-1.5 min-h-[34px] rounded-lg bg-purple-800 hover:bg-purple-900 text-white font-semibold text-xs inline-flex items-center gap-1.5"
-                              >
-                                <Building2 className="w-3.5 h-3.5" />
-                                <span>
-                                  {lang === "sk"
-                                    ? "Otvoriť prehľad obvodu"
-                                    : "Open district overview"}
-                                </span>
-                              </Link>
-                              <button
-                                type="button"
-                                onClick={() => handleProcessSingleSheet(ov.slovakiana_id)}
-                                disabled={Boolean(getAttachedSheetState(ov.slovakiana_id, ov.id)?.active)}
-                                className="px-3 py-1.5 min-h-[34px] rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                              >
-                                {getAttachedSheetState(ov.slovakiana_id, ov.id)?.active ? (
-                                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                ) : (
-                                  <Download className="w-3.5 h-3.5" />
-                                )}
-                                <span>
-                                  {getAttachedSheetState(ov.slovakiana_id, ov.id)?.active
-                                    ? `OCR (${getAttachedSheetState(ov.slovakiana_id, ov.id)?.pct}%)…`
-                                    : lang === "sk"
-                                    ? "Prečítať OCR obvodu"
-                                    : "Read district OCR"}
-                                </span>
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                {/* Secondary Links to Raw Overview Sheets */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(muniOverview?.overview_sheets || []).map((ov) => (
+                    <Link
+                      key={ov.slovakiana_id}
+                      to={buildSheetDetailLink(ov.slovakiana_id)}
+                      className="px-2.5 py-1 rounded-md bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300 text-xs font-semibold inline-flex items-center gap-1 transition"
+                      title={
+                        lang === "sk"
+                          ? `Otvoriť zdrojový hárok prehľadu obvodu (${ov.slovakiana_id})`
+                          : `Open raw district overview sheet (${ov.slovakiana_id})`
+                      }
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5 text-amber-600" />
+                      <span>
+                        {lang === "sk" ? "Zdrojový prehľad obvodu" : "Raw district overview"}{" "}
+                        {ov.obvod_number ? `č. ${ov.obvod_number}` : `(${ov.slovakiana_id})`} ↗
+                      </span>
+                    </Link>
+                  ))}
+                </div>
               </div>
             )}
 

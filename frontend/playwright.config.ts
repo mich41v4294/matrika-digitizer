@@ -63,7 +63,7 @@ export default defineConfig({
     launchOptions: executablePath ? { executablePath } : undefined,
   },
   webServer: {
-    command: `cd .. && DATA_DIR=${AUDIT_DIR} DB_PATH=${AUDIT_DB} AI_BASE_URL=http://localhost:1234/v1 AI_MODELS_URL=http://localhost:1234/api/v0/models FREELLM_BASE_URL=https://api.openai.com/v1 ./.venv/bin/python -m backend.tests.seed_e2e_db && DATA_DIR=${AUDIT_DIR} DB_PATH=${AUDIT_DB} AI_BASE_URL=http://localhost:1234/v1 AI_MODELS_URL=http://localhost:1234/api/v0/models FREELLM_BASE_URL=https://api.openai.com/v1 ./.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port ${PORT}`,
+    command: `cd .. && SQLITE_JOURNAL_MODE=DELETE DATA_DIR=${AUDIT_DIR} DB_PATH=${AUDIT_DB} AI_BASE_URL=http://localhost:1234/v1 AI_MODELS_URL=http://localhost:1234/api/v0/models FREELLM_BASE_URL=https://api.openai.com/v1 ./.venv/bin/python -m backend.tests.seed_e2e_db && SQLITE_JOURNAL_MODE=DELETE DATA_DIR=${AUDIT_DIR} DB_PATH=${AUDIT_DB} AI_BASE_URL=http://localhost:1234/v1 AI_MODELS_URL=http://localhost:1234/api/v0/models FREELLM_BASE_URL=https://api.openai.com/v1 ./.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port ${PORT}`,
     url: `${BASE_URL}/api/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 45_000,

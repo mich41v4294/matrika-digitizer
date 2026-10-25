@@ -155,6 +155,7 @@ class Settings(BaseSettings):
             "census_overview_sheets": True,
             "manual_scan_zoom": True,
             "hover_row_zoom": True,
+            "admin_debug_overlay": False,
         }
         if mtime_ns is not None:
             try:
@@ -177,14 +178,16 @@ class Settings(BaseSettings):
                     flags[k] = bool(v)
         path = self.feature_flags_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(flags, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(flags, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(path)
         try:
             mtime_ns: int | None = path.stat().st_mtime_ns
         except OSError:
             mtime_ns = None
         self._feature_flags_cache = dict(flags)
         self._feature_flags_mtime = (str(path), mtime_ns)
-        return flags
+        return dict(flags)
 
     def _default_local_model_for_stage(self, stage_key: str) -> str:
         if stage_key == "ocr":

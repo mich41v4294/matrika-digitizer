@@ -9,12 +9,13 @@ export interface FeatureFlags {
   tab_search: boolean;
   tab_familysearch: boolean;
 
-  // Functional pipeline / UI flags (default true)
+  // Functional pipeline / UI flags (default true, except admin_debug_overlay which defaults to false)
   census_multi_byt: boolean;
   census_surname_consensus: boolean;
   census_overview_sheets: boolean;
   hover_row_zoom: boolean;
   manual_scan_zoom: boolean;
+  admin_debug_overlay: boolean;
 }
 
 export type FeatureFlagKey = keyof FeatureFlags;
@@ -34,6 +35,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   census_overview_sheets: true,
   hover_row_zoom: true,
   manual_scan_zoom: true,
+  admin_debug_overlay: false,
 };
 
 export interface FeatureFlagDescriptor {
@@ -171,7 +173,56 @@ export const FUNCTIONAL_FLAG_DESCRIPTORS: FeatureFlagDescriptor[] = [
       "Interactive zooming (50%–400%) and mouse panning for full document scans",
     category: "functional",
   },
+  {
+    key: "admin_debug_overlay",
+    shortLabelSk: "Admin Debug Overlay",
+    shortLabelEn: "Admin Debug Overlay",
+    labelSk: "Zobraziť technické nástroje (OCR ✓/✗, CV Overlay, typ hárku) v aplikácii",
+    labelEn: "Show inline debug controls (OCR ✓/✗, CV Overlay, sheet type override) in app",
+    descriptionSk:
+      "Zobrazí na sčítacích hárkoch a matrikách technické ovládacie prvky pre hodnotenie OCR, CV detekciu riadkov a manuálnu zmenu typu hárku",
+    descriptionEn:
+      "Displays inline OCR rating buttons, OpenCV row overlays, and manual sheet-type overrides on user pages",
+    category: "functional",
+  },
 ];
+
+const FEATURE_FLAGS_PENDING_UPDATES_KEY =
+  "matrika_feature_flags_pending_updates_v1";
+
+let memoryFlags: FeatureFlags | null = null;
+let localMutationSeq = 0;
+let pendingSyncCount = 0;
+let inFlightFetch: Promise<FeatureFlags | null> | null = null;
+
+function readPendingUpdates(): Partial<FeatureFlags> | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(FEATURE_FLAGS_PENDING_UPDATES_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as Partial<FeatureFlags>;
+  } catch {
+    return null;
+  }
+}
+
+function writePendingUpdates(updates: Partial<FeatureFlags> | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (!updates || Object.keys(updates).length === 0) {
+      window.sessionStorage.removeItem(FEATURE_FLAGS_PENDING_UPDATES_KEY);
+    } else {
+      window.sessionStorage.setItem(
+        FEATURE_FLAGS_PENDING_UPDATES_KEY,
+        JSON.stringify(updates)
+      );
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 function sanitizeFeatureFlags(raw: unknown): FeatureFlags {
   const result: FeatureFlags = { ...DEFAULT_FEATURE_FLAGS };
@@ -187,30 +238,98 @@ function sanitizeFeatureFlags(raw: unknown): FeatureFlags {
   return result;
 }
 
+function areFlagsEqual(a: FeatureFlags, b: FeatureFlags): boolean {
+  return (Object.keys(DEFAULT_FEATURE_FLAGS) as FeatureFlagKey[]).every(
+    (key) => a[key] === b[key]
+  );
+}
+
 export function getFeatureFlags(): FeatureFlags {
   if (typeof window === "undefined") {
-    return { ...DEFAULT_FEATURE_FLAGS };
+    return memoryFlags ? { ...memoryFlags } : { ...DEFAULT_FEATURE_FLAGS };
   }
   try {
     const raw = window.localStorage.getItem(FEATURE_FLAGS_STORAGE_KEY);
     if (!raw) {
-      return { ...DEFAULT_FEATURE_FLAGS };
+      return memoryFlags ? { ...memoryFlags } : { ...DEFAULT_FEATURE_FLAGS };
     }
-    return sanitizeFeatureFlags(JSON.parse(raw));
+    const parsed = sanitizeFeatureFlags(JSON.parse(raw));
+    memoryFlags = parsed;
+    return parsed;
   } catch {
-    return { ...DEFAULT_FEATURE_FLAGS };
+    return memoryFlags ? { ...memoryFlags } : { ...DEFAULT_FEATURE_FLAGS };
   }
 }
 
-async function syncFlagsToBackend(flags: FeatureFlags): Promise<void> {
+function persistAndNotifyFlags(next: FeatureFlags): void {
+  const prev = memoryFlags ?? getFeatureFlags();
+  let hasStored = false;
+  if (typeof window !== "undefined") {
+    try {
+      hasStored = Boolean(window.localStorage.getItem(FEATURE_FLAGS_STORAGE_KEY));
+    } catch {
+      hasStored = false;
+    }
+  }
+  const changed = !areFlagsEqual(prev, next) || !hasStored;
+  memoryFlags = next;
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.setItem(FEATURE_FLAGS_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore storage quota errors
+    }
+    if (changed) {
+      window.dispatchEvent(
+        new CustomEvent<FeatureFlags>(FEATURE_FLAGS_EVENT, { detail: next })
+      );
+    }
+  }
+}
+
+export function applyBackendFeatureFlags(rawFlags: unknown): FeatureFlags | null {
+  if (!rawFlags || typeof rawFlags !== "object") return null;
+  const next = sanitizeFeatureFlags(rawFlags);
+  persistAndNotifyFlags(next);
+  return next;
+}
+
+export function syncBackendFeatureFlagsIfIdle(rawFlags: unknown): FeatureFlags | null {
+  if (pendingSyncCount > 0 || Boolean(readPendingUpdates())) {
+    return getFeatureFlags();
+  }
+  return applyBackendFeatureFlags(rawFlags);
+}
+
+async function syncFlagsToBackend(
+  updatesToFlush: Partial<FeatureFlags>,
+  seq: number
+): Promise<FeatureFlags | null> {
+  pendingSyncCount += 1;
   try {
-    await fetch("/api/debug/feature-flags", {
+    const res = await fetch("/api/debug/feature-flags", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ flags }),
+      body: JSON.stringify({ flags: updatesToFlush }),
+      keepalive: true,
     });
+    if (res.ok) {
+      const data = await res.json();
+      const rawFlags =
+        data?.flags && typeof data.flags === "object" ? data.flags : data;
+      if (seq === localMutationSeq) {
+        writePendingUpdates(null);
+        if (rawFlags && typeof rawFlags === "object") {
+          return applyBackendFeatureFlags(rawFlags);
+        }
+      }
+    }
+    return null;
   } catch {
     // Optional backend endpoint — ignore network/404 errors silently
+    return null;
+  } finally {
+    pendingSyncCount = Math.max(0, pendingSyncCount - 1);
   }
 }
 
@@ -220,18 +339,16 @@ export function setFeatureFlags(
 ): FeatureFlags {
   const current = getFeatureFlags();
   const next = sanitizeFeatureFlags({ ...current, ...updates });
-  if (typeof window !== "undefined") {
-    try {
-      window.localStorage.setItem(FEATURE_FLAGS_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // Ignore storage quota errors
-    }
-    window.dispatchEvent(
-      new CustomEvent<FeatureFlags>(FEATURE_FLAGS_EVENT, { detail: next })
-    );
-    if (syncBackend) {
-      void syncFlagsToBackend(next);
-    }
+  persistAndNotifyFlags(next);
+  if (typeof window !== "undefined" && syncBackend) {
+    const existingPending = readPendingUpdates() || {};
+    const mergedPending: Partial<FeatureFlags> = {
+      ...existingPending,
+      ...updates,
+    };
+    writePendingUpdates(mergedPending);
+    localMutationSeq += 1;
+    void syncFlagsToBackend(mergedPending, localMutationSeq);
   }
   return next;
 }
@@ -264,23 +381,44 @@ export function enableAllTabsPreset(): FeatureFlags {
 }
 
 export async function fetchBackendFeatureFlags(): Promise<FeatureFlags | null> {
-  try {
-    const res = await fetch("/api/debug/feature-flags");
-    if (!res.ok) return null;
-    const data = await res.json();
-    const rawFlags = data?.flags && typeof data.flags === "object" ? data.flags : data;
-    if (!rawFlags || typeof rawFlags !== "object") return null;
-    // Only apply backend defaults if user has not yet persisted local flags
-    const hasLocal =
-      typeof window !== "undefined" &&
-      Boolean(window.localStorage.getItem(FEATURE_FLAGS_STORAGE_KEY));
-    if (!hasLocal) {
-      return setFeatureFlags(sanitizeFeatureFlags(rawFlags), false);
-    }
-    return getFeatureFlags();
-  } catch {
-    return null;
+  if (inFlightFetch) {
+    return inFlightFetch;
   }
+  const seqAtStart = localMutationSeq;
+  inFlightFetch = (async () => {
+    try {
+      const pending = readPendingUpdates();
+      if (pending && Object.keys(pending).length > 0 && pendingSyncCount === 0) {
+        const flushed = await syncFlagsToBackend(pending, localMutationSeq);
+        if (flushed) return flushed;
+      }
+      const res = await fetch("/api/debug/feature-flags", {
+        cache: "no-store",
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const rawFlags =
+        data?.flags && typeof data.flags === "object" ? data.flags : data;
+      if (!rawFlags || typeof rawFlags !== "object") return null;
+      if (
+        localMutationSeq !== seqAtStart ||
+        pendingSyncCount > 0 ||
+        Boolean(readPendingUpdates())
+      ) {
+        return getFeatureFlags();
+      }
+      return applyBackendFeatureFlags(rawFlags);
+    } catch {
+      return null;
+    } finally {
+      inFlightFetch = null;
+    }
+  })();
+  return inFlightFetch;
+}
+
+if (typeof window !== "undefined") {
+  void fetchBackendFeatureFlags();
 }
 
 export function useFeatureFlags(): {
@@ -308,11 +446,20 @@ export function useFeatureFlags(): {
       }
     };
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void fetchBackendFeatureFlags();
+      }
+    };
+
     window.addEventListener(FEATURE_FLAGS_EVENT, handleCustomEvent);
     window.addEventListener("storage", handleStorageEvent);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    void fetchBackendFeatureFlags();
     return () => {
       window.removeEventListener(FEATURE_FLAGS_EVENT, handleCustomEvent);
       window.removeEventListener("storage", handleStorageEvent);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 

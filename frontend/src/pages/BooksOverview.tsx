@@ -220,8 +220,9 @@ export default function BooksOverview({
     return Number.isFinite(r) && r > 0 ? r : null;
   });
   const [activeScanTab, setActiveScanTab] = useState<"overlay" | "original">(() =>
-    searchParams.get("mode") === "original" ? "original" : "overlay"
+    searchParams.get("mode") === "overlay" ? "overlay" : "original"
   );
+  const [showFullPageScan, setShowFullPageScan] = useState<boolean>(false);
   const [processingId, setProcessingId] = useState<number | null>(null);
   const [livePipelineState, setLivePipelineState] = useState<PipelineState | null>(null);
   const [scanRefreshVersion, setScanRefreshVersion] = useState<number>(0);
@@ -988,50 +989,76 @@ export default function BooksOverview({
               </span>
             </div>
 
-            {/* Unified Mode Tabs: Originálny sken vs Detekované riadky (Overlay) */}
-            <div className="inline-flex rounded-lg bg-stone-100 p-1 border border-stone-200">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => setActiveScanTab("original")}
-                className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold cursor-pointer transition ${
-                  activeScanTab === "original"
-                    ? "bg-amber-600 text-white shadow-xs"
-                    : "text-stone-700 hover:text-stone-900"
+                onClick={() => setShowFullPageScan((prev) => !prev)}
+                className={`px-3 py-1.5 min-h-[32px] rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition ${
+                  showFullPageScan
+                    ? "bg-stone-900 text-white border-stone-900"
+                    : "bg-white hover:bg-stone-100 text-stone-800 border-stone-300"
                 }`}
               >
-                {lang === "sk" ? "Originálny sken" : "Original Scan"}
+                <Eye className="w-3.5 h-3.5" />
+                <span>
+                  {showFullPageScan
+                    ? lang === "sk"
+                      ? "Skryť celý sken strany"
+                      : "Hide full page scan"
+                    : lang === "sk"
+                    ? "Zobraziť celý sken strany"
+                    : "Show full page scan"}
+                </span>
               </button>
-              <button
-                type="button"
-                onClick={() => setActiveScanTab("overlay")}
-                className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold cursor-pointer transition ${
-                  activeScanTab === "overlay"
-                    ? "bg-amber-600 text-white shadow-xs"
-                    : "text-stone-700 hover:text-stone-900"
-                }`}
-              >
-                {lang === "sk" ? "Detekované riadky (Overlay)" : "Detected Rows (Overlay)"}
-              </button>
+
+              {featureFlags.admin_debug_overlay && (
+                <div className="inline-flex rounded-lg bg-stone-100 p-1 border border-stone-200">
+                  <button
+                    type="button"
+                    onClick={() => setActiveScanTab("original")}
+                    className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold cursor-pointer transition ${
+                      activeScanTab === "original"
+                        ? "bg-amber-600 text-white shadow-xs"
+                        : "text-stone-700 hover:text-stone-900"
+                    }`}
+                  >
+                    {lang === "sk" ? "Originálny sken" : "Original Scan"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveScanTab("overlay")}
+                    className={`px-3 py-1.5 min-h-[32px] rounded-md text-xs font-semibold cursor-pointer transition ${
+                      activeScanTab === "overlay"
+                        ? "bg-amber-600 text-white shadow-xs"
+                        : "text-stone-700 hover:text-stone-900"
+                    }`}
+                  >
+                    {lang === "sk" ? "Detekované riadky (Overlay)" : "Detected Rows (Overlay)"}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
-          <ZoomableScanViewer
-            src={activeScanImageUrl || ""}
-            alt={selectedScanDetail.scan.filename}
-            title={selectedScanDetail.scan.filename}
-            subtitle={
-              activeScanTab === "overlay"
-                ? lang === "sk"
-                  ? "Detekované riadky (Overlay)"
-                  : "Detected Rows (Overlay)"
-                : lang === "sk"
-                ? "Originálny sken strany"
-                : "Original Page Scan"
-            }
-            defaultHeightClass="max-h-[420px]"
-            expandedHeightClass="max-h-[85vh]"
-            lang={lang}
-          />
+          {(showFullPageScan || featureFlags.admin_debug_overlay) && (
+            <ZoomableScanViewer
+              src={activeScanImageUrl || ""}
+              alt={selectedScanDetail.scan.filename}
+              title={selectedScanDetail.scan.filename}
+              subtitle={
+                activeScanTab === "overlay"
+                  ? lang === "sk"
+                    ? "Detekované riadky (Overlay)"
+                    : "Detected Rows (Overlay)"
+                  : lang === "sk"
+                  ? "Originálny sken strany"
+                  : "Original Page Scan"
+              }
+              defaultHeightClass="max-h-[420px]"
+              expandedHeightClass="max-h-[85vh]"
+              lang={lang}
+            />
+          )}
 
           {/* Row Selector Pills & HoverZoomRowCrop for Selected Row */}
           {selectedScanDetail.rows.length > 0 && (
@@ -1069,44 +1096,46 @@ export default function BooksOverview({
               {selectedRow &&
                 (selectedRow.stitched_crop_path || selectedRow.stitched_crop_url) && (
                   <div className="space-y-1.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-xs font-semibold text-stone-700">
-                        {lang === "sk"
-                          ? `Hodnotenie OCR pre riadok #${selectedRow.row_index}:`
-                          : `OCR feedback for row #${selectedRow.row_index}:`}
-                      </span>
-                      <OcrFeedbackControls
-                        lang={lang}
-                        targetType={selectedRow.fact?.id ? "person_fact" : "row"}
-                        rowId={selectedRow.id}
-                        scanId={selectedScanDetail.scan.id}
-                        personFactId={selectedRow.fact?.id ?? null}
-                        initialFeedback={selectedRow.ocr_feedback}
-                        resetVersion={feedbackResetVersion}
-                        compact={false}
-                        onFeedbackSaved={(fb) => {
-                          setSelectedScanDetail((prev) =>
-                            prev
-                              ? {
-                                  ...prev,
-                                  rows: prev.rows.map((rw) =>
-                                    rw.id === selectedRow.id
-                                      ? { ...rw, ocr_feedback: fb }
-                                      : rw
-                                  ),
-                                }
-                              : prev
-                          );
-                          setRecords((prev) =>
-                            prev.map((rec) =>
-                              rec.fact.row_id === selectedRow.id
-                                ? { ...rec, ocr_feedback: fb }
-                                : rec
-                            )
-                          );
-                        }}
-                      />
-                    </div>
+                    {featureFlags.admin_debug_overlay && (
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-stone-700">
+                          {lang === "sk"
+                            ? `Hodnotenie OCR pre riadok #${selectedRow.row_index}:`
+                            : `OCR feedback for row #${selectedRow.row_index}:`}
+                        </span>
+                        <OcrFeedbackControls
+                          lang={lang}
+                          targetType={selectedRow.fact?.id ? "person_fact" : "row"}
+                          rowId={selectedRow.id}
+                          scanId={selectedScanDetail.scan.id}
+                          personFactId={selectedRow.fact?.id ?? null}
+                          initialFeedback={selectedRow.ocr_feedback}
+                          resetVersion={feedbackResetVersion}
+                          compact={false}
+                          onFeedbackSaved={(fb) => {
+                            setSelectedScanDetail((prev) =>
+                              prev
+                                ? {
+                                    ...prev,
+                                    rows: prev.rows.map((rw) =>
+                                      rw.id === selectedRow.id
+                                        ? { ...rw, ocr_feedback: fb }
+                                        : rw
+                                    ),
+                                  }
+                                : prev
+                            );
+                            setRecords((prev) =>
+                              prev.map((rec) =>
+                                rec.fact.row_id === selectedRow.id
+                                  ? { ...rec, ocr_feedback: fb }
+                                  : rec
+                              )
+                            );
+                          }}
+                        />
+                      </div>
+                    )}
                     <HoverZoomRowCrop
                       cropUrl={
                         selectedRow.stitched_crop_path || selectedRow.stitched_crop_url || ""
@@ -1584,37 +1613,39 @@ export default function BooksOverview({
                         );
                       })}
 
-                    <OcrFeedbackControls
-                      lang={lang}
-                      targetType="person_fact"
-                      personFactId={r.id}
-                      rowId={r.row_id}
-                      scanId={r.scan_id}
-                      censusSheetId={r.census_sheet_id ?? null}
-                      initialFeedback={item.ocr_feedback}
-                      resetVersion={feedbackResetVersion}
-                      onFeedbackSaved={(fb) => {
-                        setRecords((prev) =>
-                          prev.map((rec) =>
-                            rec.fact.id === r.id
-                              ? { ...rec, ocr_feedback: fb }
-                              : rec
-                          )
-                        );
-                        setSelectedScanDetail((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                rows: prev.rows.map((rw) =>
-                                  rw.id === r.row_id
-                                    ? { ...rw, ocr_feedback: fb }
-                                    : rw
-                                ),
-                              }
-                            : prev
-                        );
-                      }}
-                    />
+                    {featureFlags.admin_debug_overlay && (
+                      <OcrFeedbackControls
+                        lang={lang}
+                        targetType="person_fact"
+                        personFactId={r.id}
+                        rowId={r.row_id}
+                        scanId={r.scan_id}
+                        censusSheetId={r.census_sheet_id ?? null}
+                        initialFeedback={item.ocr_feedback}
+                        resetVersion={feedbackResetVersion}
+                        onFeedbackSaved={(fb) => {
+                          setRecords((prev) =>
+                            prev.map((rec) =>
+                              rec.fact.id === r.id
+                                ? { ...rec, ocr_feedback: fb }
+                                : rec
+                            )
+                          );
+                          setSelectedScanDetail((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  rows: prev.rows.map((rw) =>
+                                    rw.id === r.row_id
+                                      ? { ...rw, ocr_feedback: fb }
+                                      : rw
+                                  ),
+                                }
+                              : prev
+                          );
+                        }}
+                      />
+                    )}
 
                     <button
                       type="button"

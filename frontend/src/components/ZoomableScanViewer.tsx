@@ -320,6 +320,203 @@ export function ZoomableScanViewer({
   );
 }
 
+export type CensusFieldCropKey =
+  | "row_num"
+  | "surname"
+  | "given_name"
+  | "relation"
+  | "sex"
+  | "dob_marital"
+  | "birthplace"
+  | "domicile_citizenship"
+  | "nationality_religion"
+  | "occupation_notes"
+  | "ov_ordinal_settlement"
+  | "ov_house_num"
+  | "ov_owner_name"
+  | "ov_counts"
+  | "ov_remarks";
+
+export interface FieldCropRangeSpec {
+  key: CensusFieldCropKey;
+  xStartPct: number;
+  xEndPct: number;
+  labelSk: string;
+  labelEn: string;
+  shortSk: string;
+  shortEn: string;
+  group: "household" | "overview";
+}
+
+export interface ActiveFieldFocus {
+  key: CensusFieldCropKey;
+  valuePreview?: string | null;
+}
+
+export const CENSUS_FIELD_CROP_RANGES: Record<CensusFieldCropKey, FieldCropRangeSpec> = {
+  row_num: {
+    key: "row_num",
+    xStartPct: 0.0,
+    xEndPct: 0.075,
+    labelSk: "Stĺpce 1–2: Číslo bytu a radové č.",
+    labelEn: "Cols 1–2: Dwelling & row #",
+    shortSk: "Č. riadku",
+    shortEn: "Row #",
+    group: "household",
+  },
+  surname: {
+    key: "surname",
+    xStartPct: 0.032,
+    xEndPct: 0.168,
+    labelSk: "Stĺpec 3: Priezvisko (a rodné priezvisko)",
+    labelEn: "Col 3: Surname (& maiden name)",
+    shortSk: "Priezvisko",
+    shortEn: "Surname",
+    group: "household",
+  },
+  given_name: {
+    key: "given_name",
+    xStartPct: 0.128,
+    xEndPct: 0.228,
+    labelSk: "Stĺpec 4: Krstné meno",
+    labelEn: "Col 4: Given name",
+    shortSk: "Meno",
+    shortEn: "Given name",
+    group: "household",
+  },
+  relation: {
+    key: "relation",
+    xStartPct: 0.198,
+    xEndPct: 0.268,
+    labelSk: "Stĺpec 5: Pomer k hlave domácnosti",
+    labelEn: "Col 5: Relation to head",
+    shortSk: "Vzťah",
+    shortEn: "Relation",
+    group: "household",
+  },
+  sex: {
+    key: "sex",
+    xStartPct: 0.242,
+    xEndPct: 0.292,
+    labelSk: "Stĺpec 6: Pohlavie",
+    labelEn: "Col 6: Sex",
+    shortSk: "Pohlavie",
+    shortEn: "Sex",
+    group: "household",
+  },
+  dob_marital: {
+    key: "dob_marital",
+    xStartPct: 0.262,
+    xEndPct: 0.388,
+    labelSk: "Stĺpce 7–10: Dátum narodenia (deň, mesiac, rok) a stav",
+    labelEn: "Cols 7–10: Date of birth & marital status",
+    shortSk: "Dátum nar.",
+    shortEn: "Date of birth",
+    group: "household",
+  },
+  birthplace: {
+    key: "birthplace",
+    xStartPct: 0.355,
+    xEndPct: 0.518,
+    labelSk: "Stĺpce 11–12: Rodisko (obec, okres, krajina)",
+    labelEn: "Cols 11–12: Birthplace (municipality, district)",
+    shortSk: "Rodisko",
+    shortEn: "Birthplace",
+    group: "household",
+  },
+  domicile_citizenship: {
+    key: "domicile_citizenship",
+    xStartPct: 0.492,
+    xEndPct: 0.578,
+    labelSk: "Stĺpce 13–14: Domovská a štátna príslušnosť",
+    labelEn: "Cols 13–14: Domicile & citizenship",
+    shortSk: "Príslušnosť",
+    shortEn: "Domicile",
+    group: "household",
+  },
+  nationality_religion: {
+    key: "nationality_religion",
+    xStartPct: 0.552,
+    xEndPct: 0.698,
+    labelSk: "Stĺpce 15–17: Národnosť, náboženstvo a gramotnosť",
+    labelEn: "Cols 15–17: Nationality, religion & literacy",
+    shortSk: "Národ./Nábož.",
+    shortEn: "Nat./Relig.",
+    group: "household",
+  },
+  occupation_notes: {
+    key: "occupation_notes",
+    xStartPct: 0.675,
+    xEndPct: 1.0,
+    labelSk: "Stĺpce 18–24: Povolanie, postavenie, závod a poznámky",
+    labelEn: "Cols 18–24: Occupation, workplace & remarks",
+    shortSk: "Povolanie",
+    shortEn: "Occupation",
+    group: "household",
+  },
+  ov_ordinal_settlement: {
+    key: "ov_ordinal_settlement",
+    xStartPct: 0.0,
+    xEndPct: 0.28,
+    labelSk: "Stĺpce 1–2: Radové č. a meno osady/ulice",
+    labelEn: "Cols 1–2: Ordinal # & settlement/street",
+    shortSk: "Osada",
+    shortEn: "Settlement",
+    group: "overview",
+  },
+  ov_house_num: {
+    key: "ov_house_num",
+    xStartPct: 0.22,
+    xEndPct: 0.39,
+    labelSk: "Stĺpec 3: Popisné číslo domu",
+    labelEn: "Col 3: House conscription #",
+    shortSk: "Č. domu",
+    shortEn: "House #",
+    group: "overview",
+  },
+  ov_owner_name: {
+    key: "ov_owner_name",
+    xStartPct: 0.34,
+    xEndPct: 0.68,
+    labelSk: "Stĺpec 6: Meno majiteľa domu",
+    labelEn: "Col 6: House owner name",
+    shortSk: "Majiteľ domu",
+    shortEn: "Owner",
+    group: "overview",
+  },
+  ov_counts: {
+    key: "ov_counts",
+    xStartPct: 0.63,
+    xEndPct: 0.89,
+    labelSk: "Stĺpce 7–8: Počet bytov a prítomných osôb",
+    labelEn: "Cols 7–8: Dwelling units & present residents",
+    shortSk: "Počty osôb",
+    shortEn: "Counts",
+    group: "overview",
+  },
+  ov_remarks: {
+    key: "ov_remarks",
+    xStartPct: 0.82,
+    xEndPct: 1.0,
+    labelSk: "Stĺpec 9: Poznámka",
+    labelEn: "Col 9: Remarks",
+    shortSk: "Poznámka",
+    shortEn: "Remarks",
+    group: "overview",
+  },
+};
+
+export const HOUSEHOLD_FIELD_PILLS: CensusFieldCropKey[] = [
+  "surname",
+  "given_name",
+  "relation",
+  "dob_marital",
+  "birthplace",
+  "domicile_citizenship",
+  "nationality_religion",
+  "occupation_notes",
+];
+
 export interface HoverZoomRowCropProps {
   cropUrl?: string | null;
   headerCropUrl?: string | null;
@@ -330,6 +527,9 @@ export interface HoverZoomRowCropProps {
   scanHeight?: number | null;
   scanWidth?: number | null;
   rowLabel?: string;
+  activeFieldFocus?: ActiveFieldFocus | null;
+  onSelectFieldFocus?: (focus: ActiveFieldFocus | null) => void;
+  showFieldPills?: boolean;
   className?: string;
   lang?: "sk" | "en";
 }
@@ -359,6 +559,9 @@ export function HoverZoomRowCrop({
   scanHeight,
   scanWidth,
   rowLabel,
+  activeFieldFocus = null,
+  onSelectFieldFocus,
+  showFieldPills = false,
   className = "",
   lang: explicitLang,
 }: HoverZoomRowCropProps) {
@@ -368,6 +571,7 @@ export function HoverZoomRowCrop({
 
   const [isHovered, setIsHovered] = useState<boolean>(false);
   const [isPinned, setIsPinned] = useState<boolean>(false);
+  const [forceFullRow, setForceFullRow] = useState<boolean>(false);
   const [contextPaddingMult, setContextPaddingMult] = useState<number>(3.5);
   const [cropImgFailed, setCropImgFailed] = useState<boolean>(false);
   const [headerImgFailed, setHeaderImgFailed] = useState<boolean>(false);
@@ -385,6 +589,13 @@ export function HoverZoomRowCrop({
   );
   const [panRatio, setPanRatio] = useState<{ x: number; y: number }>({ x: 0.5, y: 0.5 });
 
+  // Whenever the hovered cell changes to a new field, automatically exit forceFullRow so the field crop shows immediately
+  useEffect(() => {
+    if (activeFieldFocus?.key) {
+      setForceFullRow(false);
+    }
+  }, [activeFieldFocus?.key, activeFieldFocus?.valuePreview]);
+
   useEffect(() => {
     setCropImgFailed(false);
   }, [cropUrl]);
@@ -397,7 +608,7 @@ export function HoverZoomRowCrop({
   }, [resolvedHeaderCropUrl]);
 
   useEffect(() => {
-    if (!resolvedHeaderCropUrl || !(isHovered || isPinned) || headerNaturalDim || headerImgFailed) {
+    if (!resolvedHeaderCropUrl || headerNaturalDim || headerImgFailed) {
       return;
     }
     let cancelled = false;
@@ -419,7 +630,7 @@ export function HoverZoomRowCrop({
     return () => {
       cancelled = true;
     };
-  }, [resolvedHeaderCropUrl, isHovered, isPinned, headerNaturalDim, headerImgFailed]);
+  }, [resolvedHeaderCropUrl, headerNaturalDim, headerImgFailed]);
 
   useEffect(() => {
     if (!scanUrl || !(isHovered || isPinned)) return;
@@ -489,28 +700,54 @@ export function HoverZoomRowCrop({
     fallbackScanHeaderYEnd - fallbackScanHeaderY0
   );
 
-  const zoomScale = showContext && !hasValidRowBand ? 1.65 : 1;
-  const sharedHorizTransformStyle: React.CSSProperties | undefined =
-    zoomScale > 1
-      ? {
-          transform: `scale(${zoomScale})`,
-          transformOrigin: `${(panRatio.x * 100).toFixed(1)}% 50%`,
-        }
-      : undefined;
+  const fieldSpec =
+    !forceFullRow && activeFieldFocus?.key
+      ? CENSUS_FIELD_CROP_RANGES[activeFieldFocus.key] || null
+      : null;
+
+  const sliceX0 = fieldSpec ? fieldSpec.xStartPct : 0;
+  const sliceX1 = fieldSpec ? fieldSpec.xEndPct : 1;
+  const sliceWidthFraction = Math.max(0.05, sliceX1 - sliceX0);
+
+  const fieldSliceImgStyle: React.CSSProperties | undefined = fieldSpec
+    ? {
+        width: `${(1 / sliceWidthFraction) * 100}%`,
+        maxWidth: "none",
+        marginLeft: `${(-sliceX0 / sliceWidthFraction) * 100}%`,
+      }
+    : undefined;
+
+  const zoomScale = !fieldSpec && showContext && !hasValidRowBand ? 1.65 : 1;
+  const sharedHorizTransformStyle: React.CSSProperties | undefined = fieldSliceImgStyle
+    ? fieldSliceImgStyle
+    : zoomScale > 1
+    ? {
+        transform: `scale(${zoomScale})`,
+        transformOrigin: `${(panRatio.x * 100).toFixed(1)}% 50%`,
+      }
+    : undefined;
 
   const renderPinnedColumnHeader = (syncZoomWithRowStrip: boolean) => {
     const transformStyle = syncZoomWithRowStrip ? sharedHorizTransformStyle : undefined;
     if (canUseHeaderCropImg && resolvedHeaderCropUrl) {
+      const hdrViewX0 = fieldSpec ? Math.round(hdrW * sliceX0) : 0;
+      const hdrViewW = fieldSpec ? Math.max(20, Math.round(hdrW * sliceWidthFraction)) : hdrW;
       return (
-        <div className="relative overflow-hidden bg-stone-950 border-b-2 border-amber-500/80">
-          <span className="absolute top-1 left-1.5 z-10 px-2 py-0.5 rounded bg-stone-950/90 text-amber-300 border border-amber-500/50 text-xs font-bold uppercase tracking-wider pointer-events-none shadow">
-            {lang === "sk" ? "Hlavička stĺpcov" : "Column header"}
+        <div className="relative overflow-hidden bg-stone-950 border-b border-stone-700">
+          <span className="absolute top-1 left-1.5 z-10 px-2 py-0.5 rounded bg-stone-950/90 text-amber-300 border border-stone-700 text-[11px] font-bold uppercase tracking-wider pointer-events-none shadow">
+            {fieldSpec
+              ? lang === "sk"
+                ? fieldSpec.labelSk
+                : fieldSpec.labelEn
+              : lang === "sk"
+              ? "Hlavička stĺpcov"
+              : "Column header"}
           </span>
           {headerNaturalDim ? (
             <svg
-              viewBox={`0 ${hdrSliceY0} ${hdrW} ${hdrSliceH}`}
-              style={transformStyle}
-              className="w-full h-auto block transition-transform duration-150 ease-out"
+              viewBox={`${hdrViewX0} ${hdrSliceY0} ${hdrViewW} ${hdrSliceH}`}
+              style={fieldSpec ? undefined : transformStyle}
+              className="w-full h-auto max-h-24 block transition-transform duration-150 ease-out"
               preserveAspectRatio="none"
             >
               <image
@@ -536,15 +773,25 @@ export function HoverZoomRowCrop({
     }
 
     if (scanUrl) {
+      const scanViewX0 = fieldSpec ? Math.round(effectiveScanWidth * sliceX0) : 0;
+      const scanViewW = fieldSpec
+        ? Math.max(20, Math.round(effectiveScanWidth * sliceWidthFraction))
+        : effectiveScanWidth;
       return (
-        <div className="relative overflow-hidden bg-stone-950 border-b-2 border-amber-500/80">
-          <span className="absolute top-1 left-1.5 z-10 px-2 py-0.5 rounded bg-stone-950/90 text-amber-300 border border-amber-500/50 text-xs font-bold uppercase tracking-wider pointer-events-none shadow">
-            {lang === "sk" ? "Hlavička stĺpcov" : "Column header"}
+        <div className="relative overflow-hidden bg-stone-950 border-b border-stone-700">
+          <span className="absolute top-1 left-1.5 z-10 px-2 py-0.5 rounded bg-stone-950/90 text-amber-300 border border-stone-700 text-[11px] font-bold uppercase tracking-wider pointer-events-none shadow">
+            {fieldSpec
+              ? lang === "sk"
+                ? fieldSpec.labelSk
+                : fieldSpec.labelEn
+              : lang === "sk"
+              ? "Hlavička stĺpcov"
+              : "Column header"}
           </span>
           <svg
-            viewBox={`0 ${fallbackScanHeaderY0} ${effectiveScanWidth} ${fallbackScanHeaderH}`}
-            style={transformStyle}
-            className="w-full h-auto block transition-transform duration-150 ease-out"
+            viewBox={`${scanViewX0} ${fallbackScanHeaderY0} ${scanViewW} ${fallbackScanHeaderH}`}
+            style={fieldSpec ? undefined : transformStyle}
+            className="w-full h-auto max-h-24 block transition-transform duration-150 ease-out"
             preserveAspectRatio="none"
           >
             <image
@@ -578,136 +825,201 @@ export function HoverZoomRowCrop({
 
   return (
     <div
+      data-testid="hover-zoom-row-crop"
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       onMouseMove={handleMouseMoveStrip}
-      className={`bg-stone-900 rounded-xl p-2 border transition-all duration-200 ${
-        showContext
-          ? "border-amber-500 shadow-lg ring-1 ring-amber-500/40"
+      className={`bg-stone-900 rounded-xl p-2.5 border transition-all duration-200 ${
+        showContext || fieldSpec
+          ? "border-amber-500 shadow-md ring-1 ring-amber-500/30"
           : "border-stone-300"
       } ${className}`}
     >
-      {/* Top Status & Hint Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5 px-1 text-xs">
-        <div className="flex flex-wrap items-center gap-2 text-stone-200">
+      {/* Top Status & Field Crop Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2 px-1 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-stone-200 min-w-0">
           <Eye className="w-4 h-4 text-amber-400 shrink-0" />
           {rowLabel ? (
-            <span className="font-semibold text-stone-100 text-xs sm:text-sm">{rowLabel}</span>
+            <span className="font-semibold text-stone-100 text-xs sm:text-sm truncate">
+              {rowLabel}
+            </span>
           ) : (
             <span className="font-semibold text-stone-200 text-xs sm:text-sm">
               {lang === "sk" ? "Výrez vybraného riadku" : "Selected row crop"}
             </span>
           )}
-          {hoverZoomEnabled && (
+          {fieldSpec ? (
             <span
-              className={`px-2.5 py-1 rounded-full text-xs font-medium transition ${
-                showContext
-                  ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                  : "bg-stone-800 text-stone-300"
-              }`}
+              data-testid="active-field-crop-badge"
+              className="px-2.5 py-0.5 rounded-full bg-amber-500 text-white font-bold text-xs inline-flex items-center gap-1.5"
             >
-              {showContext
-                ? hasValidRowBand
-                  ? lang === "sk"
-                    ? "Kontext okolitých riadkov + hlavička stĺpcov"
-                    : "Neighboring rows context + column header"
-                  : lang === "sk"
-                  ? "Zväčšený detail riadku + hlavička stĺpcov"
-                  : "Zoomed row detail + column header"
-                : lang === "sk"
-                ? "Najeďte myšou pre kontext okolitých riadkov"
-                : "Hover for neighboring rows context"}
+              <span>{lang === "sk" ? fieldSpec.labelSk : fieldSpec.labelEn}</span>
+              {activeFieldFocus?.valuePreview && (
+                <span className="px-1.5 py-0 rounded bg-stone-950/60 text-amber-200 font-mono text-[11px]">
+                  {activeFieldFocus.valuePreview}
+                </span>
+              )}
+            </span>
+          ) : (
+            <span className="px-2 py-0.5 rounded-full bg-stone-800 text-stone-300 text-xs">
+              {lang === "sk"
+                ? "Najeďte myšou na bunku v tabuľke pre detailný výrez daného údaja"
+                : "Hover any cell in the table below to view its targeted column crop"}
             </span>
           )}
         </div>
 
-        {hoverZoomEnabled && (
-          <div className="flex items-center gap-1.5">
-            {showContext && hasValidRowBand && (
-              <div className="flex items-center gap-1 text-xs">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setContextPaddingMult(2.2);
-                  }}
-                  className={`px-2.5 py-1 min-h-[32px] rounded-md cursor-pointer ${
-                    contextPaddingMult === 2.2
-                      ? "bg-amber-500 text-stone-950 font-bold"
-                      : "bg-stone-800 text-stone-200 hover:bg-stone-700"
-                  }`}
-                >
-                  {lang === "sk" ? "±2 riadky" : "±2 rows"}
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setContextPaddingMult(3.5);
-                  }}
-                  className={`px-2.5 py-1 min-h-[32px] rounded-md cursor-pointer ${
-                    contextPaddingMult === 3.5
-                      ? "bg-amber-500 text-stone-950 font-bold"
-                      : "bg-stone-800 text-stone-200 hover:bg-stone-700"
-                  }`}
-                >
-                  {lang === "sk" ? "±3.5 riadku" : "±3.5 rows"}
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setContextPaddingMult(5.5);
-                  }}
-                  className={`px-2.5 py-1 min-h-[32px] rounded-md cursor-pointer ${
-                    contextPaddingMult === 5.5
-                      ? "bg-amber-500 text-stone-950 font-bold"
-                      : "bg-stone-800 text-stone-200 hover:bg-stone-700"
-                  }`}
-                >
-                  {lang === "sk" ? "±5.5 riadku" : "±5.5 rows"}
-                </button>
-              </div>
-            )}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {activeFieldFocus?.key && (
+            <div className="inline-flex rounded-lg bg-stone-800 p-0.5 border border-stone-700 text-xs">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setForceFullRow(false);
+                }}
+                className={`px-2.5 py-1 rounded-md font-semibold cursor-pointer transition ${
+                  !forceFullRow
+                    ? "bg-amber-500 text-white"
+                    : "text-stone-300 hover:text-white"
+                }`}
+              >
+                {lang === "sk" ? "Výrez poľa" : "Field crop"}
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setForceFullRow(true);
+                }}
+                className={`px-2.5 py-1 rounded-md font-semibold cursor-pointer transition ${
+                  forceFullRow
+                    ? "bg-amber-500 text-white"
+                    : "text-stone-300 hover:text-white"
+                }`}
+              >
+                {lang === "sk" ? "Celý riadok" : "Full row"}
+              </button>
+            </div>
+          )}
 
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setIsPinned((prev) => !prev);
-              }}
-              title={
-                isPinned
-                  ? lang === "sk"
-                    ? "Zrušiť pripnutie kontextu"
-                    : "Unpin context"
-                  : lang === "sk"
-                  ? "Pripnúť kontext okolitých riadkov"
-                  : "Pin neighboring rows context"
-              }
-              className={`px-2.5 py-1 min-h-[32px] rounded-md text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer ${
-                isPinned
-                  ? "bg-amber-500 text-stone-950"
-                  : "bg-stone-800 text-stone-200 hover:bg-stone-700"
-              }`}
-            >
-              <Pin className="w-3.5 h-3.5" />
-              <span>
-                {isPinned
-                  ? lang === "sk"
-                    ? "Pripnuté"
-                    : "Pinned"
-                  : lang === "sk"
-                  ? "Pripnúť kontext"
-                  : "Pin context"}
-              </span>
-            </button>
-          </div>
-        )}
+          {hoverZoomEnabled && (
+            <>
+              {showContext && hasValidRowBand && !fieldSpec && (
+                <div className="flex items-center gap-1 text-xs">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setContextPaddingMult(2.2);
+                    }}
+                    className={`px-2 py-1 min-h-[28px] rounded-md cursor-pointer ${
+                      contextPaddingMult === 2.2
+                        ? "bg-amber-500 text-white font-bold"
+                        : "bg-stone-800 text-stone-200 hover:bg-stone-700"
+                    }`}
+                  >
+                    {lang === "sk" ? "±2 riadky" : "±2 rows"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setContextPaddingMult(3.5);
+                    }}
+                    className={`px-2 py-1 min-h-[28px] rounded-md cursor-pointer ${
+                      contextPaddingMult === 3.5
+                        ? "bg-amber-500 text-white font-bold"
+                        : "bg-stone-800 text-stone-200 hover:bg-stone-700"
+                    }`}
+                  >
+                    {lang === "sk" ? "±3.5 riadku" : "±3.5 rows"}
+                  </button>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsPinned((prev) => !prev);
+                }}
+                title={
+                  isPinned
+                    ? lang === "sk"
+                      ? "Zrušiť pripnutie kontextu"
+                      : "Unpin context"
+                    : lang === "sk"
+                    ? "Pripnúť kontext okolitých riadkov"
+                    : "Pin neighboring rows context"
+                }
+                className={`px-2.5 py-1 min-h-[28px] rounded-md text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer ${
+                  isPinned
+                    ? "bg-amber-500 text-white"
+                    : "bg-stone-800 text-stone-200 hover:bg-stone-700"
+                }`}
+              >
+                <Pin className="w-3.5 h-3.5" />
+                <span>
+                  {isPinned
+                    ? lang === "sk"
+                      ? "Pripnuté"
+                      : "Pinned"
+                    : lang === "sk"
+                    ? "Kontext riadkov"
+                    : "Row context"}
+                </span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
+      {/* Optional Quick Field Selector Pills */}
+      {showFieldPills && onSelectFieldFocus && (
+        <div className="flex flex-wrap items-center gap-1 mb-2 px-1">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelectFieldFocus(null);
+              setForceFullRow(true);
+            }}
+            className={`px-2 py-0.5 rounded text-[11px] font-semibold cursor-pointer transition ${
+              !fieldSpec
+                ? "bg-amber-500 text-white"
+                : "bg-stone-800 text-stone-300 hover:bg-stone-700"
+            }`}
+          >
+            {lang === "sk" ? "Celý riadok (1–24)" : "Full row (1–24)"}
+          </button>
+          {HOUSEHOLD_FIELD_PILLS.map((fKey) => {
+            const spec = CENSUS_FIELD_CROP_RANGES[fKey];
+            const isAct = fieldSpec?.key === fKey;
+            return (
+              <button
+                key={fKey}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setForceFullRow(false);
+                  onSelectFieldFocus({ key: fKey });
+                }}
+                className={`px-2 py-0.5 rounded text-[11px] font-semibold cursor-pointer transition ${
+                  isAct
+                    ? "bg-amber-500 text-white"
+                    : "bg-stone-800 text-stone-300 hover:bg-stone-700"
+                }`}
+              >
+                {lang === "sk" ? spec.shortSk : spec.shortEn}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Main Crop / Contextual View Area with Pinned Aligned Column Header */}
-      {showContext && hasValidRowBand && scanUrl ? (
+      {!fieldSpec && showContext && hasValidRowBand && scanUrl ? (
         <div className="space-y-1.5">
           {/* Pinned Column Header + Zoomed-out contextual window from full scan */}
           <div className="relative rounded-lg overflow-hidden border border-amber-500/60 bg-stone-950">
@@ -748,8 +1060,8 @@ export function HoverZoomRowCrop({
                 y={y0}
                 width={Math.max(10, effectiveScanWidth - 8)}
                 height={rowH}
-                fill="rgba(245, 158, 11, 0.14)"
-                stroke="#f59e0b"
+                fill="rgba(79, 70, 229, 0.14)"
+                stroke="#4f46e5"
                 strokeWidth={Math.max(4, Math.round(effectiveScanHeight * 0.002))}
                 rx={6}
               />
@@ -761,7 +1073,7 @@ export function HoverZoomRowCrop({
               <img
                 src={cropUrl}
                 alt={rowLabel || (lang === "sk" ? "Výrez riadku" : "Row crop")}
-                loading="lazy"
+                loading="eager"
                 decoding="async"
                 onError={() => setCropImgFailed(true)}
                 className="w-full h-auto block rounded opacity-95"
@@ -770,18 +1082,22 @@ export function HoverZoomRowCrop({
           )}
         </div>
       ) : (
-        <div className="relative overflow-hidden rounded-lg bg-stone-950 border border-stone-800">
+        <div
+          className={`relative overflow-hidden rounded-lg bg-stone-950 border border-stone-800 ${
+            fieldSpec ? "max-w-3xl mx-auto shadow-inner" : ""
+          }`}
+        >
           {renderPinnedColumnHeader(true)}
           <div className="relative overflow-hidden bg-stone-950">
             {!cropImgFailed ? (
               <img
                 src={cropUrl}
                 alt={rowLabel || (lang === "sk" ? "Výrez riadku" : "Row crop")}
-                loading="lazy"
+                loading="eager"
                 decoding="async"
                 style={sharedHorizTransformStyle}
                 onError={() => setCropImgFailed(true)}
-                className="w-full h-auto block transition-transform duration-150 ease-out"
+                className="w-full h-auto block transition-all duration-150 ease-out"
               />
             ) : (
               <div className="py-4 px-3 text-center text-xs text-stone-400 flex items-center justify-center gap-1.5">

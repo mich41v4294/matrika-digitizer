@@ -233,6 +233,7 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
   const [showTokenModal, setShowTokenModal] = useState(false);
   const [tokenInput, setTokenInput] = useState("");
   const [refreshingId, setRefreshingId] = useState<number | null>(null);
+  const [reviewingId, setReviewingId] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const prevRunningRef = useRef<boolean>(false);
   const prevMatchedCountRef = useRef<number>(0);
@@ -531,32 +532,37 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
 
   const toggleReviewed = async (matchId: number, currentReviewed: boolean) => {
     setErrorMsg(null);
-    const r = await fetch(`/api/familysearch/matches/${matchId}/review`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reviewed: !currentReviewed }),
-    });
-    if (!r.ok) {
-      setErrorMsg(
-        lang === "sk"
-          ? "Nepodarilo sa zmeniť stav kontroly."
-          : "Failed to update review state."
+    setReviewingId(matchId);
+    try {
+      const r = await fetch(`/api/familysearch/matches/${matchId}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewed: !currentReviewed }),
+      });
+      if (!r.ok) {
+        setErrorMsg(
+          lang === "sk"
+            ? "Nepodarilo sa zmeniť stav kontroly."
+            : "Failed to update review state."
+        );
+        return;
+      }
+      const resData = await r.json().catch(() => null);
+      const confirmedReviewed =
+        typeof resData?.reviewed_by_user === "boolean"
+          ? resData.reviewed_by_user
+          : !currentReviewed;
+      setMatches((prev) =>
+        prev.map((m) =>
+          m.id === matchId ? { ...m, reviewed_by_user: confirmedReviewed } : m
+        )
       );
-      return;
+      const prog = extractFsProgress(resData);
+      if (prog) setProgress(prog);
+      refreshStatus?.();
+    } finally {
+      setReviewingId(null);
     }
-    const resData = await r.json().catch(() => null);
-    const confirmedReviewed =
-      typeof resData?.reviewed_by_user === "boolean"
-        ? resData.reviewed_by_user
-        : !currentReviewed;
-    setMatches((prev) =>
-      prev.map((m) =>
-        m.id === matchId ? { ...m, reviewed_by_user: confirmedReviewed } : m
-      )
-    );
-    const prog = extractFsProgress(resData);
-    if (prog) setProgress(prog);
-    refreshStatus?.();
   };
 
   const toggleExpanded = (id: number) => {
@@ -1276,13 +1282,18 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                     {statusBadge(m.match_status || m.status)}
                     <button
                       onClick={() => toggleReviewed(m.id, Boolean(m.reviewed_by_user))}
-                      className={`px-3 py-1.5 min-h-[34px] rounded-lg font-semibold text-xs flex items-center gap-1.5 cursor-pointer ${
+                      disabled={reviewingId === m.id}
+                      className={`px-3 py-1.5 min-h-[34px] rounded-lg font-semibold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50 ${
                         m.reviewed_by_user
                           ? "bg-emerald-700 text-white"
                           : "bg-stone-100 hover:bg-stone-200 text-stone-800 border border-stone-300"
                       }`}
                     >
-                      <Check className="w-3.5 h-3.5" />
+                      {reviewingId === m.id ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Check className="w-3.5 h-3.5" />
+                      )}
                       {m.reviewed_by_user
                         ? lang === "sk"
                           ? "Skontrolované"

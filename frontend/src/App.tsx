@@ -817,8 +817,11 @@ export default function App() {
       <main className="flex-1 w-full max-w-none mx-auto px-4 lg:px-6 py-5 overflow-x-hidden">
         <Suspense
           fallback={
-            <div className="p-8 text-center text-sm font-medium text-stone-600">
-              {lang === "sk" ? "Načítavam…" : "Loading…"}
+            <div className="bg-white rounded-xl border border-stone-200 p-10 text-center space-y-2.5 shadow-2xs">
+              <RefreshCw className="w-6 h-6 text-amber-600 animate-spin mx-auto" />
+              <div className="text-sm font-semibold text-stone-700">
+                {lang === "sk" ? "Načítavam…" : "Loading…"}
+              </div>
             </div>
           }
         >

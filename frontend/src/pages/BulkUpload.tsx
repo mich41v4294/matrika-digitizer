@@ -1,6 +1,13 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { AlertCircle, CheckCircle2, FolderUp, Sparkles, Upload } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  FolderUp,
+  RefreshCw,
+  Sparkles,
+  Upload,
+} from "lucide-react";
 
 interface Props {
   lang: "sk" | "en";
@@ -274,25 +281,52 @@ export default function BulkUpload({ lang, refreshStatus }: Props) {
           </label>
 
           {files.length > 0 && (
-            <div className="bg-emerald-50 border border-emerald-500 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <CheckCircle2 className="w-5 h-5 text-emerald-700" />
-                <span className="text-sm font-semibold text-stone-900">
-                  {files.length}{" "}
-                  {lang === "sk" ? "fotiek pripravených" : "files ready"}
-                </span>
+            <div className="bg-emerald-50 border border-emerald-500 rounded-xl p-3.5 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  {uploading ? (
+                    <RefreshCw className="w-5 h-5 text-emerald-700 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-5 h-5 text-emerald-700" />
+                  )}
+                  <span className="text-sm font-semibold text-stone-900">
+                    {uploading
+                      ? lang === "sk"
+                        ? `Nahrávam súbory na server (${uploadedCount} z ${files.length})…`
+                        : `Uploading files to server (${uploadedCount} of ${files.length})…`
+                      : `${files.length} ${
+                          lang === "sk" ? "fotiek pripravených" : "files ready"
+                        }`}
+                  </span>
+                </div>
+                <button
+                  onClick={handleStartChunkedUpload}
+                  disabled={uploading}
+                  className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-sm inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {uploading && <RefreshCw className="w-4 h-4 animate-spin" />}
+                  <span>
+                    {uploading
+                      ? `${uploadedCount} / ${files.length}`
+                      : lang === "sk"
+                      ? "Spustiť nahrávanie"
+                      : "Start upload"}
+                  </span>
+                </button>
               </div>
-              <button
-                onClick={handleStartChunkedUpload}
-                disabled={uploading}
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-sm cursor-pointer disabled:opacity-50"
-              >
-                {uploading
-                  ? `${uploadedCount} / ${files.length}`
-                  : lang === "sk"
-                  ? "Spustiť nahrávanie"
-                  : "Start upload"}
-              </button>
+              {uploading && (
+                <div className="w-full bg-emerald-200 rounded-full h-2 overflow-hidden">
+                  <div
+                    className="bg-emerald-700 h-full transition-all duration-300 animate-pulse"
+                    style={{
+                      width: `${Math.max(
+                        10,
+                        Math.round((uploadedCount / Math.max(files.length, 1)) * 100)
+                      )}%`,
+                    }}
+                  />
+                </div>
+              )}
             </div>
           )}
 
@@ -323,7 +357,11 @@ export default function BulkUpload({ lang, refreshStatus }: Props) {
           disabled={loadingSamples}
           className="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer disabled:opacity-50"
         >
-          <Sparkles className="w-4 h-4" />
+          {loadingSamples ? (
+            <RefreshCw className="w-4 h-4 animate-spin" />
+          ) : (
+            <Sparkles className="w-4 h-4" />
+          )}
           <span>
             {loadingSamples
               ? lang === "sk"

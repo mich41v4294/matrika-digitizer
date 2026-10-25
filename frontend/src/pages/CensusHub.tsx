@@ -615,6 +615,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   const isSearchingCensusRef = useRef<boolean>(false);
   const hasLoadedCensusOnceRef = useRef<boolean>(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [loadingFacets, setLoadingFacets] = useState<boolean>(false);
+  const [jobActionId, setJobActionId] = useState<number | null>(null);
   const [processingSheetId, setProcessingSheetId] = useState<string | null>(null);
   const [livePipelineState, setLivePipelineState] = useState<PipelineState | null>(null);
   const [localSheetProgress, setLocalSheetProgress] = useState<{
@@ -644,6 +646,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   const selectedYearTag = selectedYearFilter === "1940" ? "10003" : "10001";
 
   const loadFacets = async (districtTag?: string, yearTag?: string) => {
+    setLoadingFacets(true);
     try {
       const params = new URLSearchParams();
       if (districtTag) params.set("district_tag", districtTag);
@@ -656,6 +659,8 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
       }
     } catch {
       // ignore offline
+    } finally {
+      setLoadingFacets(false);
     }
   };
 
@@ -1485,14 +1490,24 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
   };
 
   const handlePauseResumeJob = async (job: CensusJob) => {
-    const action = job.status === "paused" ? "resume" : "pause";
-    await fetch(`/api/census/jobs/${job.id}/${action}`, { method: "POST" });
-    await loadWorkspaceData();
+    setJobActionId(job.id);
+    try {
+      const action = job.status === "paused" ? "resume" : "pause";
+      await fetch(`/api/census/jobs/${job.id}/${action}`, { method: "POST" });
+      await loadWorkspaceData();
+    } finally {
+      setJobActionId(null);
+    }
   };
 
   const handleDeleteJob = async (jobId: number) => {
-    await fetch(`/api/census/jobs/${jobId}`, { method: "DELETE" });
-    await loadWorkspaceData();
+    setJobActionId(jobId);
+    try {
+      await fetch(`/api/census/jobs/${jobId}`, { method: "DELETE" });
+      await loadWorkspaceData();
+    } finally {
+      setJobActionId(null);
+    }
   };
 
   const formatJobStatusLabel = (status: string) => {
@@ -2204,6 +2219,11 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
             <span>
               {lang === "sk" ? "Okresy a obce" : "Districts & Municipalities"}
             </span>
+            {(loadingFacets || loading) && (
+              <span title={lang === "sk" ? "Načítavam obce…" : "Loading municipalities…"}>
+                <RefreshCw className="w-3.5 h-3.5 text-amber-600 animate-spin" />
+              </span>
+            )}
           </h2>
           <a
             href="https://slovakiana.sk/scitacie-harky/?page=1&lm=0"
@@ -2816,29 +2836,40 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                                 {(job.status === "running" || job.status === "paused") && (
                                   <button
                                     type="button"
+                                    disabled={jobActionId === job.id}
                                     onClick={() => handlePauseResumeJob(job)}
-                                    className="px-2 py-1 rounded bg-stone-800 hover:bg-stone-700 text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer shrink-0"
+                                    className="px-2 py-1 rounded bg-stone-800 hover:bg-stone-700 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer shrink-0"
                                   >
-                                    {job.status === "paused" ? (
-                                      <>
-                                        <Play className="w-3 h-3" />
-                                        <span>{lang === "sk" ? "Pokračovať" : "Resume"}</span>
-                                      </>
+                                    {jobActionId === job.id ? (
+                                      <RefreshCw className="w-3 h-3 animate-spin" />
+                                    ) : job.status === "paused" ? (
+                                      <Play className="w-3 h-3" />
                                     ) : (
-                                      <>
-                                        <Pause className="w-3 h-3" />
-                                        <span>{lang === "sk" ? "Pozastaviť" : "Pause"}</span>
-                                      </>
+                                      <Pause className="w-3 h-3" />
                                     )}
+                                    <span>
+                                      {job.status === "paused"
+                                        ? lang === "sk"
+                                          ? "Pokračovať"
+                                          : "Resume"
+                                        : lang === "sk"
+                                        ? "Pozastaviť"
+                                        : "Pause"}
+                                    </span>
                                   </button>
                                 )}
                                 <button
                                   type="button"
+                                  disabled={jobActionId === job.id}
                                   onClick={() => handleDeleteJob(job.id)}
                                   title={lang === "sk" ? "Odstrániť úlohu z histórie" : "Remove job"}
-                                  className="p-1 rounded hover:bg-stone-200 text-stone-500 hover:text-red-700 cursor-pointer"
+                                  className="p-1 rounded hover:bg-stone-200 disabled:opacity-50 text-stone-500 hover:text-red-700 cursor-pointer"
                                 >
-                                  <X className="w-3.5 h-3.5" />
+                                  {jobActionId === job.id ? (
+                                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <X className="w-3.5 h-3.5" />
+                                  )}
                                 </button>
                               </div>
                             </div>
@@ -2855,6 +2886,18 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
               )}
             </div>
           </div>
+
+          {/* Immediate Starting Banner when busyAction is triggered before activeRunningJob appears */}
+          {busyAction && !activeRunningJob && (
+            <div className="px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 flex items-center gap-2 text-xs font-semibold text-stone-900">
+              <RefreshCw className="w-3.5 h-3.5 text-amber-600 animate-spin shrink-0" />
+              <span>
+                {lang === "sk"
+                  ? "Spúšťam sťahovanie a spracovanie hárkov na serveri…"
+                  : "Starting sheet download and processing on the server…"}
+              </span>
+            </div>
+          )}
 
           {/* Slim 1-Line Active Job Progress Bar (only when running or paused and not dismissed) */}
           {activeRunningJob && (
@@ -3476,6 +3519,12 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                         ? `Adresár domov a rodín v obci (${filteredHousesDirectory.length})`
                         : `Municipality House & Family Directory (${filteredHousesDirectory.length})`}
                     </span>
+                    {(isSearchingCensus || loading) && (
+                      <span className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 text-xs font-semibold inline-flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        <span>{lang === "sk" ? "Načítavam…" : "Loading…"}</span>
+                      </span>
+                    )}
                   </h2>
                   <p className="text-xs sm:text-sm text-stone-600">
                     {lang === "sk"
@@ -3486,11 +3535,22 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
               </div>
 
               {filteredHousesDirectory.length === 0 ? (
-                <div className="text-center py-8 text-stone-600 text-sm">
-                  {lang === "sk"
-                    ? "Pre tento filter sa nenašli žiadne domy. Skúste vybrať obec v ľavom paneli alebo stiahnuť hárky zo Slovakiany."
-                    : "No houses match the current filter. Select a municipality on the left or fetch sheets from Slovakiana."}
-                </div>
+                loading || isSearchingCensus ? (
+                  <div className="py-10 text-center text-stone-600 text-sm flex flex-col items-center justify-center gap-2">
+                    <RefreshCw className="w-6 h-6 text-amber-600 animate-spin" />
+                    <span className="font-semibold text-stone-800">
+                      {lang === "sk"
+                        ? `Načítavam adresár domov a rodín pre obec ${selectedMunicipality}…`
+                        : `Loading house & family directory for ${selectedMunicipality}…`}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="text-center py-8 text-stone-600 text-sm">
+                    {lang === "sk"
+                      ? "Pre tento filter sa nenašli žiadne domy. Skúste vybrať obec v ľavom paneli alebo stiahnuť hárky zo Slovakiany."
+                      : "No houses match the current filter. Select a municipality on the left or fetch sheets from Slovakiana."}
+                  </div>
+                )
               ) : (
                 <div className="w-full overflow-x-auto">
                   <table className="w-full table-auto text-left border-collapse text-xs sm:text-sm">
@@ -3825,11 +3885,14 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
               </span>
             </div>
 
-            {loading ? (
-              <div className="text-center py-10 text-stone-600 text-sm">
-                {lang === "sk"
-                  ? "Načítavam sčítacie hárky…"
-                  : "Loading census sheets…"}
+            {loading || (isSearchingCensus && filteredSheets.length === 0) ? (
+              <div className="py-10 text-center text-stone-600 text-sm flex flex-col items-center justify-center gap-2">
+                <RefreshCw className="w-6 h-6 text-amber-600 animate-spin" />
+                <span className="font-semibold text-stone-800">
+                  {lang === "sk"
+                    ? "Načítavam sčítacie hárky…"
+                    : "Loading census sheets…"}
+                </span>
               </div>
             ) : filteredSheets.length === 0 ? (
               <div className="text-center py-10 text-stone-600 text-sm">

@@ -12,6 +12,7 @@ import {
   ExternalLink,
   FileText,
   Info,
+  RefreshCw,
 } from "lucide-react";
 
 interface RowContext {
@@ -575,9 +576,18 @@ export default function QuestionCenter({ lang = "sk", refreshStatus }: Props) {
                   <button
                     disabled={submitting || !customAnswer.trim()}
                     onClick={() => submitAnswer(customAnswer)}
-                    className="px-4 py-2 min-h-[38px] rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:bg-stone-200 disabled:text-stone-600 text-white font-semibold text-sm cursor-pointer"
+                    className="px-4 py-2 min-h-[38px] rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:bg-stone-200 disabled:text-stone-600 text-white font-semibold text-sm inline-flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    {lang === "sk" ? "Potvrdiť" : "Confirm"}
+                    {submitting && <RefreshCw className="w-4 h-4 animate-spin" />}
+                    <span>
+                      {submitting
+                        ? lang === "sk"
+                          ? "Ukladám…"
+                          : "Saving…"
+                        : lang === "sk"
+                        ? "Potvrdiť"
+                        : "Confirm"}
+                    </span>
                   </button>
                 </div>
               </div>
@@ -585,14 +595,14 @@ export default function QuestionCenter({ lang = "sk", refreshStatus }: Props) {
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                 <div className="flex gap-1.5">
                   <button
-                    disabled={currentIdx === 0}
+                    disabled={currentIdx === 0 || submitting}
                     onClick={() => setCurrentIdx((i) => Math.max(0, i - 1))}
                     className="px-3.5 py-2 min-h-[36px] rounded-lg bg-stone-100 hover:bg-stone-200 disabled:opacity-40 font-medium text-sm cursor-pointer"
                   >
                     {lang === "sk" ? "← Predošlá" : "← Previous"}
                   </button>
                   <button
-                    disabled={currentIdx >= questions.length - 1}
+                    disabled={currentIdx >= questions.length - 1 || submitting}
                     onClick={() => setCurrentIdx((i) => Math.min(questions.length - 1, i + 1))}
                     className="px-3.5 py-2 min-h-[36px] rounded-lg bg-stone-100 hover:bg-stone-200 disabled:opacity-40 font-medium text-sm cursor-pointer"
                   >
@@ -603,9 +613,13 @@ export default function QuestionCenter({ lang = "sk", refreshStatus }: Props) {
                   <button
                     disabled={submitting}
                     onClick={skipQuestion}
-                    className="flex items-center gap-1.5 px-3.5 py-2 min-h-[36px] rounded-lg bg-stone-200 hover:bg-stone-300 text-stone-800 font-semibold text-sm cursor-pointer"
+                    className="flex items-center gap-1.5 px-3.5 py-2 min-h-[36px] rounded-lg bg-stone-200 hover:bg-stone-300 disabled:opacity-50 text-stone-800 font-semibold text-sm cursor-pointer"
                   >
-                    <SkipForward className="w-4 h-4" />
+                    {submitting ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <SkipForward className="w-4 h-4" />
+                    )}
                     {lang === "sk" ? "Odložiť na neskôr" : "Defer question"}
                   </button>
                 )}

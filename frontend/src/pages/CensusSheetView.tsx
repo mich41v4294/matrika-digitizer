@@ -1032,6 +1032,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   });
   const [editForm, setEditForm] = useState<Record<string, any>>({});
   const [savingId, setSavingId] = useState<number | null>(null);
+  const [addingPerson, setAddingPerson] = useState<boolean>(false);
 
   // Overview house selection & drawer editing
   const [selectedHouseId, setSelectedHouseId] = useState<number | null>(() => {
@@ -1848,46 +1849,52 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
   };
 
   const handleAddPerson = async () => {
-    if (!sheetId) return;
-    const nextRow = (detail?.members.length || 0) + 1;
-    const r = await fetch(`/api/census/sheets/${sheetId}/persons`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        person_row_number: nextRow,
-        surname_raw: detail?.household?.head_surname || "",
-        given_name_raw: "",
-        relation_to_head: nextRow === 1 ? "hlava domácnosti" : "syn",
-      }),
-    });
-    if (r.ok) {
-      const resData = await r.json().catch(() => ({}));
-      const createdFact = resData.fact;
-      if (createdFact) {
-        setDetail((prev) =>
-          prev
-            ? {
-                ...prev,
-                members: [
-                  ...(prev.members || []),
-                  {
-                    fact: createdFact,
-                    row: null,
-                    dwelling_unit: "I",
-                    household_id: prev.household?.id ?? null,
-                    stitched_crop_url: null,
-                    cell_crops: {},
-                    fs_match: null,
-                    local_matches: [],
-                    ocr_feedback: null,
-                  },
-                ],
-              }
-            : prev
-        );
+    if (!sheetId || addingPerson) return;
+    setAddingPerson(true);
+    setActionError(null);
+    try {
+      const nextRow = (detail?.members.length || 0) + 1;
+      const r = await fetch(`/api/census/sheets/${sheetId}/persons`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          person_row_number: nextRow,
+          surname_raw: detail?.household?.head_surname || "",
+          given_name_raw: "",
+          relation_to_head: nextRow === 1 ? "hlava domácnosti" : "syn",
+        }),
+      });
+      if (r.ok) {
+        const resData = await r.json().catch(() => ({}));
+        const createdFact = resData.fact;
+        if (createdFact) {
+          setDetail((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  members: [
+                    ...(prev.members || []),
+                    {
+                      fact: createdFact,
+                      row: null,
+                      dwelling_unit: "I",
+                      household_id: prev.household?.id ?? null,
+                      stitched_crop_url: null,
+                      cell_crops: {},
+                      fs_match: null,
+                      local_matches: [],
+                      ocr_feedback: null,
+                    },
+                  ],
+                }
+              : prev
+          );
+        }
+        void loadDetail();
+        refreshStatus();
       }
-      void loadDetail();
-      refreshStatus();
+    } finally {
+      setAddingPerson(false);
     }
   };
 
@@ -2216,8 +2223,16 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
 
   if (loading) {
     return (
-      <div className="p-8 text-center text-stone-600">
-        {lang === "sk" ? "Načítavam sčítací hárok…" : "Loading census sheet…"}
+      <div className="bg-white rounded-xl border border-stone-200 p-10 text-center space-y-3 shadow-2xs">
+        <RefreshCw className="w-7 h-7 text-amber-600 animate-spin mx-auto" />
+        <div className="font-bold text-stone-900 text-base">
+          {lang === "sk"
+            ? `Načítavam sčítací hárok${sheetId ? ` (${sheetId})` : ""}…`
+            : `Loading census sheet${sheetId ? ` (${sheetId})` : ""}…`}
+        </div>
+        <div className="w-48 h-1.5 bg-stone-200 rounded-full overflow-hidden mx-auto">
+          <div className="w-2/3 h-full bg-amber-600 rounded-full animate-pulse" />
+        </div>
       </div>
     );
   }
@@ -2589,6 +2604,12 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                     );
                   })}
                 </div>
+                {switchingYear && (
+                  <span className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 text-xs font-semibold inline-flex items-center gap-1">
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    <span>{lang === "sk" ? "Prepínam rok…" : "Switching year…"}</span>
+                  </span>
+                )}
 
                 <span
                   className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
@@ -3599,11 +3620,21 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                         type="button"
                                         onClick={() => handleSaveDistrictRow(d.id)}
                                         disabled={savingDistrictRowId === d.id}
-                                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
                                       >
-                                        <Save className="w-3.5 h-3.5" />
+                                        {savingDistrictRowId === d.id ? (
+                                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                        ) : (
+                                          <Save className="w-3.5 h-3.5" />
+                                        )}
                                         <span>
-                                          {lang === "sk" ? "Uložiť zmeny" : "Save changes"}
+                                          {savingDistrictRowId === d.id
+                                            ? lang === "sk"
+                                              ? "Ukladám…"
+                                              : "Saving…"
+                                            : lang === "sk"
+                                            ? "Uložiť zmeny"
+                                            : "Save changes"}
                                         </span>
                                       </button>
                                       <button
@@ -4217,11 +4248,21 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       type="button"
                                       onClick={() => handleSaveHouse(h.id)}
                                       disabled={savingHouseId === h.id}
-                                      className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
+                                      className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center gap-1 cursor-pointer"
                                     >
-                                      <Save className="w-3.5 h-3.5" />
+                                      {savingHouseId === h.id ? (
+                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                      ) : (
+                                        <Save className="w-3.5 h-3.5" />
+                                      )}
                                       <span>
-                                        {lang === "sk" ? "Uložiť zmeny" : "Save changes"}
+                                        {savingHouseId === h.id
+                                          ? lang === "sk"
+                                            ? "Ukladám…"
+                                            : "Saving…"
+                                          : lang === "sk"
+                                          ? "Uložiť zmeny"
+                                          : "Save changes"}
                                       </span>
                                     </button>
                                     <button
@@ -4426,11 +4467,22 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
             </div>
             <button
               onClick={handleAddPerson}
-              className="px-3.5 py-2 min-h-[36px] rounded-lg bg-stone-900 hover:bg-stone-800 text-white font-semibold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer"
+              disabled={addingPerson}
+              className="px-3.5 py-2 min-h-[36px] rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-white font-semibold text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer"
             >
-              <Plus className="w-4 h-4" />
+              {addingPerson ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <Plus className="w-4 h-4" />
+              )}
               <span>
-                {lang === "sk" ? "Pridať osobu do domácnosti" : "Add Person to Household"}
+                {addingPerson
+                  ? lang === "sk"
+                    ? "Pridávam osobu…"
+                    : "Adding person…"
+                  : lang === "sk"
+                  ? "Pridať osobu do domácnosti"
+                  : "Add Person to Household"}
               </span>
             </button>
           </div>
@@ -4543,11 +4595,22 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                             <button
                               type="button"
                               onClick={handleAddPerson}
-                              className="px-3.5 py-1.5 min-h-[34px] rounded-lg bg-stone-900 hover:bg-stone-800 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer"
+                              disabled={addingPerson}
+                              className="px-3.5 py-1.5 min-h-[34px] rounded-lg bg-stone-900 hover:bg-stone-800 disabled:opacity-50 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer"
                             >
-                              <Plus className="w-3.5 h-3.5" />
+                              {addingPerson ? (
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Plus className="w-3.5 h-3.5" />
+                              )}
                               <span>
-                                {lang === "sk" ? "Pridať osobu ručne" : "Add person manually"}
+                                {addingPerson
+                                  ? lang === "sk"
+                                    ? "Pridávam osobu…"
+                                    : "Adding person…"
+                                  : lang === "sk"
+                                  ? "Pridať osobu ručne"
+                                  : "Add person manually"}
                               </span>
                             </button>
                           </div>

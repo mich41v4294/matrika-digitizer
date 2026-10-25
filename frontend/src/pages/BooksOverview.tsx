@@ -215,6 +215,7 @@ export default function BooksOverview({
   const [selectedScanDetail, setSelectedScanDetail] = useState<SelectedScanDetail | null>(
     null
   );
+  const [loadingScanDetail, setLoadingScanDetail] = useState<boolean>(false);
   const [selectedRowId, setSelectedRowId] = useState<number | null>(() => {
     const r = Number(searchParams.get("row"));
     return Number.isFinite(r) && r > 0 ? r : null;
@@ -523,9 +524,11 @@ export default function BooksOverview({
   useEffect(() => {
     if (!selectedScanId) {
       setSelectedScanDetail(null);
+      setLoadingScanDetail(false);
       return;
     }
     let cancelled = false;
+    setLoadingScanDetail(true);
     fetch(`/api/scans/${selectedScanId}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -552,6 +555,9 @@ export default function BooksOverview({
           if (prev && mappedRows.some((r) => r.id === prev)) return prev;
           return mappedRows[0]?.id ?? null;
         });
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingScanDetail(false);
       });
     return () => {
       cancelled = true;
@@ -967,6 +973,16 @@ export default function BooksOverview({
       </div>
 
       {/* Prominent Matrika Scan Overview with Manual Zoom & Row Crop */}
+      {loadingScanDetail && !selectedScanDetail && (
+        <div className="bg-white rounded-xl p-6 border border-stone-300 text-center space-y-2">
+          <RefreshCw className="w-6 h-6 text-amber-600 animate-spin mx-auto" />
+          <div className="text-sm font-semibold text-stone-700">
+            {lang === "sk"
+              ? "Načítavam detail strany matriky a detekované riadky…"
+              : "Loading matrika page details and detected rows…"}
+          </div>
+        </div>
+      )}
       {selectedScanDetail && (
         <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -977,6 +993,9 @@ export default function BooksOverview({
                   {lang === "sk" ? "Prehľad strany matriky:" : "Matrika Page Overview:"}{" "}
                   <span className="text-amber-800">{selectedScanDetail.scan.filename}</span>
                 </span>
+                {loadingScanDetail && (
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-600 animate-spin" />
+                )}
               </h3>
               {selectedScanDetail.scan.detected_year && (
                 <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 text-xs font-bold">
@@ -1776,7 +1795,11 @@ export default function BooksOverview({
                           onClick={() => handleSaveFact(r.id)}
                           className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
                         >
-                          <Save className="w-3.5 h-3.5" />
+                          {savingFactId === r.id ? (
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Save className="w-3.5 h-3.5" />
+                          )}
                           <span>
                             {savingFactId === r.id
                               ? lang === "sk"

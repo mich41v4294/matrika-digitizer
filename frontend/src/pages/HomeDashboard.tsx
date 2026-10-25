@@ -116,7 +116,11 @@ export default function HomeDashboard({ status, lang, refreshStatus }: Props) {
                 disabled={loadingSamples}
                 className="px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold text-sm flex items-center gap-2 cursor-pointer disabled:opacity-50"
               >
-                <Sparkles className="w-4 h-4" />
+                {loadingSamples ? (
+                  <div className="w-4 h-4 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                ) : (
+                  <Sparkles className="w-4 h-4" />
+                )}
                 <span>
                   {loadingSamples
                     ? lang === "sk"

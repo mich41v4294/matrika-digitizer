@@ -482,6 +482,8 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
   );
   const [editingCommentText, setEditingCommentText] = useState<string>("");
   const [feedbackResetVersion, setFeedbackResetVersion] = useState<number>(0);
+  const [refreshingDebug, setRefreshingDebug] = useState<boolean>(false);
+  const [loadingScanDetail, setLoadingScanDetail] = useState<boolean>(false);
 
   const loadFeedbackAndStats = async (
     filterOverride?: "" | "incorrect" | "correct"
@@ -737,11 +739,19 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
 
   useEffect(() => {
     if (!selectedScanId) return;
+    let cancelled = false;
+    setLoadingScanDetail(true);
     fetch(`/api/scans/${selectedScanId}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (d) setScanDetail(d);
+        if (!cancelled && d) setScanDetail(d);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingScanDetail(false);
       });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedScanId]);
 
   const applyOptimisticStages = (
@@ -1352,7 +1362,11 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
               onClick={handleSaveAllStages}
               className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
             >
-              <Check className="w-3.5 h-3.5" />
+              {savingAiConfig ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Check className="w-3.5 h-3.5" />
+              )}
               <span>
                 {savingAiConfig
                   ? lang === "sk"
@@ -1364,14 +1378,29 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
               </span>
             </button>
             <button
-              onClick={() => {
-                loadDebug();
-                loadAiConfig();
-                void loadFeedbackAndStats();
+              disabled={refreshingDebug}
+              onClick={async () => {
+                setRefreshingDebug(true);
+                try {
+                  await Promise.all([
+                    loadDebug(),
+                    loadAiConfig(),
+                    loadFeedbackAndStats(),
+                  ]);
+                } finally {
+                  setRefreshingDebug(false);
+                }
               }}
-              className="px-3 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-700 border border-stone-600 font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
+              className="px-3 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-700 disabled:opacity-50 border border-stone-600 font-semibold text-xs flex items-center gap-1.5 cursor-pointer"
             >
-              <RefreshCw className="w-3.5 h-3.5" /> Refresh
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${refreshingDebug ? "animate-spin" : ""}`}
+              />{" "}
+              {refreshingDebug
+                ? lang === "sk"
+                  ? "Obnovujem…"
+                  : "Refreshing…"
+                : "Refresh"}
             </button>
           </div>
         </div>
@@ -2652,7 +2681,10 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-base font-bold text-stone-900 flex items-center gap-2">
             <Eye className="w-4 h-4 text-amber-600" />
-            Grid inspector
+            <span>Grid inspector</span>
+            {loadingScanDetail && (
+              <RefreshCw className="w-3.5 h-3.5 text-amber-600 animate-spin" />
+            )}
           </h3>
           <div className="flex flex-wrap gap-1.5">
             {scans.map((s) => (

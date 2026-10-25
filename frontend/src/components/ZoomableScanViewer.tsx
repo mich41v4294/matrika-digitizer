@@ -6,6 +6,7 @@ import {
   Minimize2,
   Move,
   Pin,
+  RefreshCw,
   RotateCcw,
   ZoomIn,
   ZoomOut,
@@ -65,7 +66,9 @@ export function ZoomableScanViewer({
   const [expanded, setExpanded] = useState<boolean>(false);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [imgError, setImgError] = useState<boolean>(false);
+  const [imgLoading, setImgLoading] = useState<boolean>(false);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const scanImgRef = useRef<HTMLImageElement | null>(null);
   const dragStartRef = useRef<{
     x: number;
     y: number;
@@ -75,6 +78,19 @@ export function ZoomableScanViewer({
 
   useEffect(() => {
     setImgError(false);
+    if (!src) {
+      setImgLoading(false);
+      return;
+    }
+    if (
+      scanImgRef.current &&
+      scanImgRef.current.complete &&
+      scanImgRef.current.naturalWidth > 0
+    ) {
+      setImgLoading(false);
+    } else {
+      setImgLoading(true);
+    }
   }, [src]);
 
   const clampZoom = (val: number) => Math.max(50, Math.min(400, Math.round(val)));
@@ -286,11 +302,24 @@ export function ZoomableScanViewer({
               effectiveFitMode ? "w-fit max-w-full" : ""
             }`}
           >
+            {imgLoading && (
+              <div className="py-8 px-4 text-center text-stone-300 text-xs font-semibold flex items-center justify-center gap-2">
+                <RefreshCw className="w-4 h-4 text-amber-400 animate-spin shrink-0" />
+                <span>
+                  {lang === "sk" ? "Načítavam obrázok skenu…" : "Loading scan image…"}
+                </span>
+              </div>
+            )}
             <img
+              ref={scanImgRef}
               src={src}
               alt={alt}
               draggable={false}
-              onError={() => setImgError(true)}
+              onLoad={() => setImgLoading(false)}
+              onError={() => {
+                setImgLoading(false);
+                setImgError(true);
+              }}
               className={`block rounded select-none pointer-events-none ${
                 effectiveFitMode
                   ? expanded
@@ -574,6 +603,8 @@ export function HoverZoomRowCrop({
   const [forceFullRow, setForceFullRow] = useState<boolean>(false);
   const [contextPaddingMult, setContextPaddingMult] = useState<number>(3.5);
   const [cropImgFailed, setCropImgFailed] = useState<boolean>(false);
+  const [cropImgLoading, setCropImgLoading] = useState<boolean>(false);
+  const cropImgRef = useRef<HTMLImageElement | null>(null);
   const [headerImgFailed, setHeaderImgFailed] = useState<boolean>(false);
   const [headerNaturalDim, setHeaderNaturalDim] = useState<{
     width: number;
@@ -598,6 +629,19 @@ export function HoverZoomRowCrop({
 
   useEffect(() => {
     setCropImgFailed(false);
+    if (!cropUrl) {
+      setCropImgLoading(false);
+      return;
+    }
+    if (
+      cropImgRef.current &&
+      cropImgRef.current.complete &&
+      cropImgRef.current.naturalWidth > 0
+    ) {
+      setCropImgLoading(false);
+    } else {
+      setCropImgLoading(true);
+    }
   }, [cropUrl]);
 
   const resolvedHeaderCropUrl = deriveHeaderCropUrlFromRowCrop(cropUrl, headerCropUrl);
@@ -848,6 +892,12 @@ export function HoverZoomRowCrop({
               {lang === "sk" ? "Výrez vybraného riadku" : "Selected row crop"}
             </span>
           )}
+          {cropImgLoading && !cropImgFailed && (
+            <span className="px-2 py-0.5 rounded-full bg-stone-800 text-amber-300 text-xs font-semibold inline-flex items-center gap-1">
+              <RefreshCw className="w-3 h-3 animate-spin" />
+              <span>{lang === "sk" ? "Načítavam výrez…" : "Loading crop…"}</span>
+            </span>
+          )}
           {fieldSpec ? (
             <span
               data-testid="active-field-crop-badge"
@@ -1090,15 +1140,20 @@ export function HoverZoomRowCrop({
           {renderPinnedColumnHeader(true)}
           <div className="relative overflow-hidden bg-stone-950">
             {!cropImgFailed ? (
-              <img
-                src={cropUrl}
-                alt={rowLabel || (lang === "sk" ? "Výrez riadku" : "Row crop")}
-                loading="eager"
-                decoding="async"
-                style={sharedHorizTransformStyle}
-                onError={() => setCropImgFailed(true)}
-                className="w-full h-auto block transition-all duration-150 ease-out"
-              />
+            <img
+              ref={cropImgRef}
+              src={cropUrl}
+              alt={rowLabel || (lang === "sk" ? "Výrez riadku" : "Row crop")}
+              loading="eager"
+              decoding="async"
+              style={sharedHorizTransformStyle}
+              onLoad={() => setCropImgLoading(false)}
+              onError={() => {
+                setCropImgLoading(false);
+                setCropImgFailed(true);
+              }}
+              className="w-full h-auto block transition-all duration-150 ease-out"
+            />
             ) : (
               <div className="py-4 px-3 text-center text-xs text-stone-400 flex items-center justify-center gap-1.5">
                 <ImageOff className="w-4 h-4 text-stone-500" />

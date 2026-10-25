@@ -579,7 +579,7 @@ def _serialize_household(hh: CensusHousehold | None) -> dict[str, Any] | None:
 
 class StartCensusJobRequest(BaseModel):
     name: str | None = None
-    job_type: str = "catalog_harvest"  # "catalog_harvest" | "download_and_pipeline"
+    job_type: str = "catalog_harvest"  # "catalog_harvest" | "download_and_pipeline" | "overview_only"
     census_year_tag: str | None = "10001"  # "10001" (1930) | "10003" (1940) — always single year (1930 default)
     census_year: int | None = None
     district_tag: str | None = None
@@ -591,6 +591,7 @@ class StartCensusJobRequest(BaseModel):
     run_pipeline: bool = True
     run_mcp: bool = True
     only_undone: bool = True
+    overview_only: bool = False
 
 
 class RemoteSearchRequest(BaseModel):
@@ -868,10 +869,15 @@ async def start_census_job(
     resolved_year = _resolve_single_census_year(req.census_year, req.census_year_tag)
     years = [resolved_year]
     cat_keys = [k for k in (req.district_tag, req.municipality_tag) if k]
+    is_overview_only = bool(req.overview_only or req.job_type == "overview_only")
     job_name = req.name or (
         f"Katalóg Slovakiana ({req.municipality or req.query_text or req.municipality_tag or req.district_tag or 'všetky'})"
         if req.job_type == "catalog_harvest"
-        else f"Sťahovanie a OCR hárkov ({req.municipality or req.query_text or req.municipality_tag or 'výber'})"
+        else (
+            f"Stiahnuť hárky a OCR prehľadov ({req.municipality or req.query_text or req.municipality_tag or 'výber'})"
+            if is_overview_only
+            else f"Sťahovanie a OCR hárkov ({req.municipality or req.query_text or req.municipality_tag or 'výber'})"
+        )
     )
     db_job_type = "catalog_harvest" if req.job_type == "catalog_harvest" else "full_pipeline"
     filter_payload = {
@@ -882,10 +888,11 @@ async def start_census_job(
         "district": (req.district or "").strip() or None,
         "search_text": req.query_text or "",
         "include_blackened": True,
-        "limit_sheets": req.max_sheets or 50,
+        "limit_sheets": req.max_sheets or (500 if is_overview_only else 50),
         "auto_ocr": req.run_pipeline,
         "run_mcp": req.run_mcp,
         "only_undone": req.only_undone,
+        "overview_only": is_overview_only,
     }
     job = CensusDownloadJob(
         job_type=db_job_type,

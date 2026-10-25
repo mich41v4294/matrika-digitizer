@@ -757,12 +757,16 @@ async def process_census_sheet_pipeline(
     max_rows: int | None = None,
     run_mcp: bool = True,
     force_sheet_type: str | None = None,
+    overview_only: bool = False,
 ) -> dict[str, Any]:
     """
     Runs the full pipeline on a CensusSheet (front scan `_v` and optional back scan `_r`
     if overflow household members exist), reconciles household relationships across rows,
     and cross-matches against both FamilySearch and local parish registers.
     Automatically detects and extracts `Prehľad sčítacieho obvodu` (`sheet_type == 'overview'`).
+    When `overview_only=True`, slices the front scan and runs header OCR to detect the sheet type,
+    full-extracting only `overview` and `municipal_overview` sheets and stopping before row OCR
+    if the sheet is a regular `household` sheet.
     """
     with Session(engine) as session:
         sheet = session.get(CensusSheet, sheet_id)
@@ -910,6 +914,28 @@ async def process_census_sheet_pipeline(
                     "rows_processed": len(houses),
                     "overview_houses_count": len(houses),
                     "download_status": sheet.download_status,
+                }
+            if overview_only:
+                sheet.sheet_type = "household"
+                sheet.download_status = "sliced"
+                session.add(sheet)
+                session.commit()
+                await ws_manager.broadcast(
+                    "sheet_updated",
+                    {
+                        "sheet_id": sheet.id,
+                        "slovakiana_key": sheet.slovakiana_key,
+                        "sheet_type": "household",
+                        "download_status": sheet.download_status,
+                    },
+                )
+                return {
+                    "census_sheet_id": sheet.id,
+                    "slovakiana_key": sheet.slovakiana_key,
+                    "sheet_type": "household",
+                    "rows_processed": 0,
+                    "download_status": sheet.download_status,
+                    "skipped_household_ocr": True,
                 }
 
     res_front = await process_single_scan_pipeline(

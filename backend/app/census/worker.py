@@ -45,9 +45,26 @@ DONE_DOWNLOAD_ONLY_STATUSES: tuple[str, ...] = (
 )
 
 
-def is_census_sheet_done(sheet: CensusSheet, *, run_ocr: bool = True) -> bool:
+def is_census_sheet_done(
+    sheet: CensusSheet,
+    *,
+    run_ocr: bool = True,
+    overview_only: bool = False,
+) -> bool:
     """Returns True if a CensusSheet has already completed the target batch stage."""
     status = (sheet.download_status or "").strip()
+    if overview_only:
+        is_potential_ov = bool(
+            sheet.sheet_type in ("municipal_overview", "overview")
+            or not (sheet.house_number and str(sheet.house_number).strip())
+        )
+        if not is_potential_ov:
+            return status in DONE_DOWNLOAD_ONLY_STATUSES
+        if status in DONE_PIPELINE_STATUSES:
+            return True
+        if status == "sliced" and sheet.sheet_type == "household" and sheet.front_scan_id:
+            return True
+        return False
     done_set = DONE_PIPELINE_STATUSES if run_ocr else DONE_DOWNLOAD_ONLY_STATUSES
     return status in done_set
 
@@ -77,6 +94,7 @@ def _find_matching_census_sheets(
     *,
     only_undone: bool = True,
     run_ocr: bool = True,
+    overview_only: bool = False,
 ) -> list[CensusSheet]:
     """
     Finds CensusSheet rows in the local DB matching the job filter criteria.
@@ -103,7 +121,7 @@ def _find_matching_census_sheets(
         stmt = stmt.where(CensusSheet.census_year.in_(years))  # type: ignore[union-attr]
     if not include_blackened:
         stmt = stmt.where(CensusSheet.is_blackened == False)  # noqa: E712
-    if only_undone:
+    if only_undone and not overview_only:
         done_statuses = list(
             DONE_PIPELINE_STATUSES if run_ocr else DONE_DOWNLOAD_ONLY_STATUSES
         )
@@ -122,6 +140,8 @@ def _find_matching_census_sheets(
     dist_folded = fold_text_diacritics(district) if district else ""
 
     for s in all_rows:
+        if only_undone and overview_only and is_census_sheet_done(s, run_ocr=run_ocr, overview_only=True):
+            continue
         if muni_keys or municipality:
             key_ok = bool(muni_keys and s.municipality_key in muni_keys)
             name_ok = bool(eff_muni_name and _sheet_matches_muni_filter(s, eff_muni_name))
@@ -436,6 +456,7 @@ async def download_and_process_single_census_sheet(
     run_mcp: bool = True,
     max_rows: int | None = None,
     force_sheet_type: str | None = None,
+    overview_only: bool = False,
 ) -> dict[str, Any]:
     """
     Tier 2 Single-Sheet Materializer:
@@ -615,6 +636,24 @@ async def download_and_process_single_census_sheet(
                 downloaded_scan_ids.append(scan.id)
 
     if run_pipeline and downloaded_scan_ids:
+        if overview_only:
+            with Session(engine) as session:
+                sh_check = session.get(CensusSheet, sheet_id)
+                is_potential_ov = bool(
+                    sh_check
+                    and (
+                        sh_check.sheet_type in ("municipal_overview", "overview")
+                        or not (sh_check.house_number and str(sh_check.house_number).strip())
+                    )
+                )
+            if not is_potential_ov:
+                return {
+                    "sheet_id": sheet_id,
+                    "slovakiana_key": slovakiana_key,
+                    "scan_ids": downloaded_scan_ids,
+                    "status": "downloaded",
+                    "skipped_household_ocr": True,
+                }
         from backend.app.pipeline.orchestrator import process_census_sheet_pipeline
 
         pipeline_res = await process_census_sheet_pipeline(
@@ -622,6 +661,7 @@ async def download_and_process_single_census_sheet(
             max_rows=max_rows,
             run_mcp=run_mcp,
             force_sheet_type=force_sheet_type,
+            overview_only=overview_only,
         )
         return {
             "sheet_id": sheet_id,
@@ -667,6 +707,7 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
         run_ocr = bool(filters.get("auto_ocr", job.job_type == "full_pipeline"))
         run_mcp = bool(filters.get("run_mcp", True))
         only_undone = bool(filters.get("only_undone", True))
+        overview_only = bool(filters.get("overview_only", False))
         max_rows = filters.get("max_rows")
 
         undone_matches = _find_matching_census_sheets(
@@ -674,23 +715,27 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
             filters,
             only_undone=only_undone,
             run_ocr=run_ocr,
+            overview_only=overview_only,
         )
         all_matches = _find_matching_census_sheets(
             session,
             filters,
             only_undone=False,
             run_ocr=run_ocr,
+            overview_only=overview_only,
         )
         existing_total_count = len(all_matches)
         already_done_count = max(0, existing_total_count - len(undone_matches))
 
-    # If the local DB has fewer than `limit_sheets` undone sheets, harvest catalog pages
-    # from Slovakiana until we have at least `limit_sheets` undone sheets or exhaust remote pages.
+    # If the local DB has fewer than `limit_sheets` undone sheets (or when `overview_only=True`
+    # and we need the full village catalog so overview sheets at the end of the remote pagination
+    # are discovered), harvest catalog pages from Slovakiana.
     harvest_attempts = 0
     max_harvest_pages = 25
+    has_more_remote = True
     while (
         _ACTIVE_JOB_FLAGS.get(job_id, True)
-        and len(undone_matches) < limit_sheets
+        and (len(undone_matches) < limit_sheets or (overview_only and has_more_remote))
         and harvest_attempts < max_harvest_pages
     ):
         harvest_page_size = min(200, max(50, limit_sheets + existing_total_count))
@@ -701,18 +746,21 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
             finalize_job=False,
         )
         harvest_attempts += 1
+        has_more_remote = bool(harvest_res.get("has_more", False))
         with Session(engine) as session:
             undone_matches = _find_matching_census_sheets(
                 session,
                 filters,
                 only_undone=only_undone,
                 run_ocr=run_ocr,
+                overview_only=overview_only,
             )
             all_matches = _find_matching_census_sheets(
                 session,
                 filters,
                 only_undone=False,
                 run_ocr=run_ocr,
+                overview_only=overview_only,
             )
             existing_total_count = len(all_matches)
             already_done_count = max(0, existing_total_count - len(undone_matches))
@@ -720,7 +768,7 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
         if (
             harvest_res.get("error")
             or int(harvest_res.get("harvested") or 0) == 0
-            or not harvest_res.get("has_more", False)
+            or not has_more_remote
         ):
             break
 
@@ -759,6 +807,7 @@ async def run_download_and_pipeline_job(job_id: int) -> dict[str, Any]:
                 run_pipeline=run_ocr,
                 run_mcp=run_mcp,
                 max_rows=max_rows,
+                overview_only=overview_only,
             )
             processed += 1
         except Exception as exc:
@@ -825,10 +874,12 @@ async def download_and_prepare_or_process(
     run_pipeline: bool = True,
     run_mcp: bool = True,
     max_rows: int | None = None,
+    overview_only: bool = False,
 ) -> dict[str, Any]:
     return await download_and_process_single_census_sheet(
         sheet_id,
         run_pipeline=run_pipeline,
         run_mcp=run_mcp,
         max_rows=max_rows,
+        overview_only=overview_only,
     )

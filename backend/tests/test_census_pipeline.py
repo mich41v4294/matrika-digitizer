@@ -2476,6 +2476,212 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
             muni_ov = get_municipality_overview(session, municipality="Horný Čepeň", census_year=1930)
             self.assertEqual(len(muni_ov["houses_directory"]), 39)
 
+    def test_overview_only_village_job_downloads_all_and_ocrs_only_overviews(self) -> None:
+        import asyncio
+        import json
+        from unittest.mock import AsyncMock, patch
+        from sqlmodel import select
+        from backend.app.census.worker import (
+            _find_matching_census_sheets,
+            download_and_process_single_census_sheet,
+            is_census_sheet_done,
+            run_download_and_pipeline_job,
+        )
+        from backend.app.config import settings
+        from backend.app.db.models import CensusDownloadJob, CensusOverviewHouse, ScanImage
+        from backend.app.pipeline.ai_client import ai_client
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            crops_dir = tmp_path / "crops"
+            census_dir = tmp_path / "slovakiana"
+            crops_dir.mkdir(parents=True, exist_ok=True)
+            census_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create a synthetic image with 2 populated rows
+            w, h = 1600, 1200
+            synth_img = np.full((h, w, 3), 245, dtype=np.uint8)
+            cv2.line(synth_img, (40, 420), (w - 40, 420), (15, 15, 15), 6)
+            for r_i in range(1, 4):
+                y_line = 420 + r_i * 60
+                cv2.line(synth_img, (40, y_line), (w - 40, y_line), (70, 70, 70), 2)
+            for r_i in range(2):
+                ry = 420 + r_i * 60 + 38
+                hn = r_i + 1
+                cv2.putText(synth_img, f"{hn}. TestObec {hn}", (int(w * 0.06), ry), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (10, 10, 10), 2)
+                cv2.putText(synth_img, f"Stefan Kovac {hn}", (int(w * 0.48), ry), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (10, 10, 10), 3)
+                cv2.putText(synth_img, "1  4", (int(w * 0.74), ry), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (10, 10, 10), 2)
+
+            test_engine = create_engine("sqlite:///:memory:")
+            SQLModel.metadata.create_all(test_engine)
+            ensure_fts_schema(test_engine)
+
+            with Session(test_engine) as session:
+                # 1. Known household sheet with house_number="15" (cataloged)
+                sh_house = CensusSheet(
+                    slovakiana_key="cair-ovonly-h15",
+                    census_year=1930,
+                    district="Trnava",
+                    municipality="TestObec",
+                    municipality_folded="testobec",
+                    house_number="15",
+                    house_number_int=15,
+                    sheet_type="household",
+                    download_status="cataloged",
+                )
+                # 2. Unnumbered sheet that header OCR reveals is a regular household sheet (no house_number in metadata)
+                sh_unnum_hh = CensusSheet(
+                    slovakiana_key="cair-ovonly-unnumhh",
+                    census_year=1930,
+                    district="Trnava",
+                    municipality="TestObec",
+                    municipality_folded="testobec",
+                    house_number=None,
+                    sheet_type="household",
+                    download_status="cataloged",
+                )
+                # 3. Unnumbered sheet that header OCR reveals is a District Overview sheet ('Prehľad sčítacieho obvodu')
+                sh_unnum_ov = CensusSheet(
+                    slovakiana_key="cair-ovonly-ov1",
+                    census_year=1930,
+                    district="Trnava",
+                    municipality="TestObec",
+                    municipality_folded="testobec",
+                    house_number=None,
+                    sheet_type="household",
+                    download_status="cataloged",
+                )
+                session.add_all([sh_house, sh_unnum_hh, sh_unnum_ov])
+                session.commit()
+                for s in (sh_house, sh_unnum_hh, sh_unnum_ov):
+                    session.refresh(s)
+
+                filters = {
+                    "name": "Stiahnuť hárky a OCR prehľadov: TestObec",
+                    "years": [1930],
+                    "municipality": "TestObec",
+                    "limit_sheets": 50,
+                    "auto_ocr": True,
+                    "run_mcp": False,
+                    "only_undone": True,
+                    "overview_only": True,
+                }
+                job = CensusDownloadJob(
+                    job_type="full_pipeline",
+                    filter_json=json.dumps(filters, ensure_ascii=False),
+                    status="running",
+                )
+                session.add(job)
+                session.commit()
+                session.refresh(job)
+                job_id = job.id or 1
+
+            async def fake_fetch_detail(key: str) -> dict[str, object]:
+                is_h15 = key == "cair-ovonly-h15"
+                return {
+                    "slovakiana_key": key,
+                    "census_year": 1930,
+                    "district": "Trnava",
+                    "municipality": "TestObec",
+                    "municipality_folded": "testobec",
+                    "house_number": "15" if is_h15 else None,
+                    "house_number_int": 15 if is_h15 else None,
+                    "has_images": True,
+                    "images": [
+                        {
+                            "index": 0,
+                            "page_number": 1,
+                            "page_side": "front",
+                            "jpeg_url": f"https://example.test/{key}_front.jpg",
+                        }
+                    ],
+                }
+
+            async def fake_download_jpeg(img_desc: dict[str, object], dest_path: Path) -> Path:
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(dest_path), synth_img)
+                return dest_path
+
+            ai_calls: list[tuple[str, int | None]] = []
+
+            async def fake_chat_completion(**kwargs: object) -> dict[str, object]:
+                stage = str(kwargs.get("stage") or "")
+                scan_id = kwargs.get("scan_id")
+                ai_calls.append((stage, int(scan_id) if isinstance(scan_id, int) else None))
+                if stage == "ocr_header":
+                    with Session(test_engine) as s_chk:
+                        sc = s_chk.get(ScanImage, scan_id) if scan_id else None
+                        sh = s_chk.get(CensusSheet, sc.census_sheet_id) if (sc and sc.census_sheet_id) else None
+                        key = sh.slovakiana_key if sh else ""
+                    if key == "cair-ovonly-ov1":
+                        return {
+                            "content": "Prehľad sčítacieho obvodu | Obvod č. I | Meno sčítacieho komisára: Ján Komisár",
+                            "parsed": {},
+                        }
+                    return {
+                        "content": "Popisný hárok | Priezvisko | Meno | Pomer k hlave domácnosti",
+                        "parsed": {},
+                    }
+                return {
+                    "content": "<table><tr><td>1.</td><td>TestObec</td><td>15</td><td>obývaný</td><td>Štefan Kováč</td><td>1</td><td>4</td></tr></table>",
+                    "parsed": {},
+                }
+
+            with (
+                patch("backend.app.census.worker.engine", test_engine),
+                patch("backend.app.pipeline.orchestrator.engine", test_engine),
+                patch.object(settings, "crops_dir", crops_dir),
+                patch.object(settings, "census_data_dir", census_dir),
+                patch("backend.app.pipeline.ocr_stage.settings.crops_dir", crops_dir),
+                patch("backend.app.census.worker.slovakiana_client.search_sheets", new=AsyncMock(return_value={"total": 3, "items": []})),
+                patch("backend.app.census.worker.slovakiana_client.download_thumbnails_batch", new=AsyncMock(return_value=None)),
+                patch("backend.app.census.worker.slovakiana_client.download_thumbnail", new=AsyncMock(return_value=None)),
+                patch("backend.app.census.worker.slovakiana_client.fetch_sheet_detail", side_effect=fake_fetch_detail),
+                patch("backend.app.census.worker.slovakiana_client.download_image_to_jpeg", side_effect=fake_download_jpeg),
+                patch.object(ai_client, "chat_completion", side_effect=fake_chat_completion),
+            ):
+                res = asyncio.run(run_download_and_pipeline_job(job_id))
+                self.assertEqual(res["processed"], 3)
+                self.assertEqual(res["failed"], 0)
+
+                with Session(test_engine) as session:
+                    h15 = session.exec(select(CensusSheet).where(CensusSheet.slovakiana_key == "cair-ovonly-h15")).one()
+                    unnum_hh = session.exec(select(CensusSheet).where(CensusSheet.slovakiana_key == "cair-ovonly-unnumhh")).one()
+                    ov1 = session.exec(select(CensusSheet).where(CensusSheet.slovakiana_key == "cair-ovonly-ov1")).one()
+
+                    # 1. Known household sheet (with house_number='15'): downloaded, NO OCR run on it!
+                    self.assertEqual(h15.download_status, "downloaded")
+                    self.assertEqual(h15.sheet_type, "household")
+                    self.assertIsNotNone(h15.front_scan_id)
+
+                    # 2. Unnumbered household sheet: downloaded, header OCR ran type detection, stopped at 'sliced' before row OCR!
+                    self.assertEqual(unnum_hh.download_status, "sliced")
+                    self.assertEqual(unnum_hh.sheet_type, "household")
+                    self.assertEqual(
+                        len(session.exec(select(PersonFact).where(PersonFact.census_sheet_id == unnum_hh.id)).all()),
+                        0,
+                    )
+
+                    # 3. Unnumbered overview sheet: detected as 'overview' and full overview OCR extracted its houses!
+                    self.assertEqual(ov1.download_status, "extracted")
+                    self.assertEqual(ov1.sheet_type, "overview")
+                    ov_houses = session.exec(
+                        select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == ov1.id)
+                    ).all()
+                    self.assertGreaterEqual(len(ov_houses), 1)
+
+                    # All 3 sheets are now considered done for overview_only=True
+                    self.assertTrue(is_census_sheet_done(h15, run_ocr=True, overview_only=True))
+                    self.assertTrue(is_census_sheet_done(unnum_hh, run_ocr=True, overview_only=True))
+                    self.assertTrue(is_census_sheet_done(ov1, run_ocr=True, overview_only=True))
+                    rem = _find_matching_census_sheets(session, filters, only_undone=True, run_ocr=True, overview_only=True)
+                    self.assertEqual(rem, [])
+
+                    # But for regular full OCR (overview_only=False), the 2 household sheets are still undone and ready for selective or batch OCR!
+                    self.assertFalse(is_census_sheet_done(h15, run_ocr=True, overview_only=False))
+                    self.assertFalse(is_census_sheet_done(unnum_hh, run_ocr=True, overview_only=False))
+                    self.assertTrue(is_census_sheet_done(ov1, run_ocr=True, overview_only=False))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1250,6 +1250,81 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
     }
   };
 
+  const handleOcrOverviewOnlyMunicipality = async (
+    muniName?: string,
+    muniTagKey?: string | null
+  ) => {
+    const { targetName, resolvedMuniTag, distName, resolvedDistTag } =
+      resolveMunicipalityAndDistrictTags(muniName, muniTagKey);
+    const matchedMuni = targetName
+      ? combinedMunicipalities.find(
+          (m) =>
+            foldMunicipalityKey(m.municipality) ===
+            foldMunicipalityKey(targetName)
+        )
+      : activeMuniSummary;
+    const targetLimit = Math.max(
+      maxSheetsInput || 40,
+      matchedMuni?.slovakiana_count || 0,
+      matchedMuni?.total_sheets || 0,
+      500
+    );
+    setBusyAction(`overview_ocr_${targetName || "all"}`);
+    try {
+      await fetch("/api/census/sheets/remote-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query_text: resolvedMuniTag
+            ? workspaceSearch.trim() || null
+            : targetName || workspaceSearch.trim() || null,
+          year_tag: selectedYearTag || null,
+          district_tag: resolvedDistTag || null,
+          municipality_tag: resolvedMuniTag || null,
+          page: 1,
+          page_size: 50,
+          save_to_catalog: true,
+        }),
+      });
+      await fetch("/api/census/jobs/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name:
+            lang === "sk"
+              ? `Stiahnuť hárky a OCR prehľadov: ${targetName || distName || "Výber"}`
+              : `Download & OCR Overviews: ${targetName || distName || "Selection"}`,
+          job_type: "overview_only",
+          census_year_tag: selectedYearTag || null,
+          district_tag: resolvedDistTag || null,
+          municipality_tag: resolvedMuniTag || null,
+          municipality: targetName || null,
+          district: distName || null,
+          query_text: resolvedMuniTag
+            ? workspaceSearch.trim() || null
+            : targetName || workspaceSearch.trim() || null,
+          max_sheets: targetLimit,
+          run_pipeline: true,
+          run_mcp: false,
+          only_undone: true,
+          overview_only: true,
+        }),
+      });
+      if (targetName) {
+        setSelectedMunicipality(targetName);
+        setActiveTab("overview");
+      }
+      if (resolvedMuniTag) {
+        setSelectedMunicipalityTag(resolvedMuniTag);
+      }
+      setDismissedActiveJobId(null);
+      await loadWorkspaceData();
+      refreshStatus();
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const handleBulkOcrWorkspace = async () => {
     setBusyAction("bulk_ocr");
     try {
@@ -1867,6 +1942,7 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
               foldMunicipalityKey(selectedMunicipality) ===
                 foldMunicipalityKey(m.municipality);
             const isHarvesting = busyAction === `harvest_${m.municipality}`;
+            const isOcrOverviews = busyAction === `overview_ocr_${m.municipality}`;
             return (
               <div
                 key={`${m.municipality}-${m.district}`}
@@ -1895,33 +1971,64 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                     )}
                   </div>
 
-                  {/* 1-click "Stiahnuť z archívu" action button */}
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleHarvestMunicipality(
-                        m.municipality,
-                        m.slovakiana_tag_key || m.municipality_key
-                      );
-                    }}
-                    disabled={busyAction !== null}
-                    title={
-                      lang === "sk"
-                        ? "Stiahnuť hárky obce z archívu Slovakiana"
-                        : "Download municipality sheets from Slovakiana archive"
-                    }
-                    className="px-2.5 py-1.5 min-h-[32px] rounded-md bg-stone-900 hover:bg-stone-700 text-amber-300 text-xs font-semibold inline-flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-50"
-                  >
-                    {isHarvesting ? (
-                      <RefreshCw className="w-3 h-3 animate-spin" />
-                    ) : (
-                      <FolderDown className="w-3 h-3" />
+                  {/* Per-village action buttons: Stiahnuť z archívu & OCR prehľadov */}
+                  <div className="flex flex-wrap items-center justify-end gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleHarvestMunicipality(
+                          m.municipality,
+                          m.slovakiana_tag_key || m.municipality_key
+                        );
+                      }}
+                      disabled={busyAction !== null}
+                      title={
+                        lang === "sk"
+                          ? "Stiahnuť hárky obce z archívu Slovakiana"
+                          : "Download municipality sheets from Slovakiana archive"
+                      }
+                      className="px-2 py-1.5 min-h-[30px] rounded-md bg-stone-900 hover:bg-stone-700 text-amber-300 text-xs font-semibold inline-flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {isHarvesting ? (
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <FolderDown className="w-3 h-3" />
+                      )}
+                      <span>
+                        {lang === "sk" ? "Stiahnuť z archívu" : "Fetch from archive"}
+                      </span>
+                    </button>
+                    {featureFlags.census_overview_sheets && (
+                      <button
+                        type="button"
+                        data-testid={`village-ocr-overviews-btn-${foldMunicipalityKey(m.municipality).replace(/\s+/g, "-")}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOcrOverviewOnlyMunicipality(
+                            m.municipality,
+                            m.slovakiana_tag_key || m.municipality_key
+                          );
+                        }}
+                        disabled={busyAction !== null}
+                        title={
+                          lang === "sk"
+                            ? "Stiahnuť všetky skeny obce, detegovať typy hárkov a spustiť AI OCR iba pre prehľady obvodov (bez pomalého OCR všetkých rodinných hárkov)"
+                            : "Download all village scans, run sheet type detection, and OCR only the overview sheets"
+                        }
+                        className="px-2 py-1.5 min-h-[30px] rounded-md bg-purple-700 hover:bg-purple-800 text-white text-xs font-semibold inline-flex items-center gap-1 shrink-0 cursor-pointer disabled:opacity-50"
+                      >
+                        {isOcrOverviews ? (
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Building2 className="w-3 h-3" />
+                        )}
+                        <span>
+                          {lang === "sk" ? "OCR prehľadov" : "OCR overviews"}
+                        </span>
+                      </button>
                     )}
-                    <span>
-                      {lang === "sk" ? "Stiahnuť z archívu" : "Fetch from archive"}
-                    </span>
-                  </button>
+                  </div>
                 </div>
 
                 {/* Counts pills: overview houses / persons count / OCR-done over total village sheets */}
@@ -2060,6 +2167,32 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
 
             {/* Unified Split-Button Action Group & Jobs History Popover */}
             <div className="flex flex-wrap items-center justify-end gap-2">
+              {featureFlags.census_overview_sheets && (
+                <button
+                  type="button"
+                  data-testid="workspace-ocr-overviews-btn"
+                  onClick={() => handleOcrOverviewOnlyMunicipality()}
+                  disabled={busyAction !== null}
+                  title={
+                    lang === "sk"
+                      ? "Stiahnuť všetky skeny obce, spustiť detekciu typov a prečítať pomocou AI OCR iba prehľadové hárky (Obecný prehľad a Prehľad obvodu)"
+                      : "Download all scans for the municipality, run type detection, and OCR only the overview sheets"
+                  }
+                  className="px-3 py-1.5 min-h-[34px] rounded-lg bg-purple-700 hover:bg-purple-800 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-2xs transition"
+                >
+                  {busyAction?.startsWith("overview_ocr_") ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Building2 className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {lang === "sk"
+                      ? "Stiahnuť a OCR iba prehľady"
+                      : "Download & OCR Overviews Only"}
+                  </span>
+                </button>
+              )}
+
               <div ref={splitMenuRef} className="relative inline-flex">
                 <div className="inline-flex items-stretch rounded-lg border border-stone-300 bg-white shadow-2xs overflow-hidden">
                   <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] bg-stone-50 border-r border-stone-300 text-xs">
@@ -2127,7 +2260,32 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                 </div>
 
                 {splitMenuOpen && (
-                  <div className="absolute right-0 top-full mt-1.5 z-30 w-72 bg-white rounded-lg border border-stone-200 shadow-xl p-1">
+                  <div className="absolute right-0 top-full mt-1.5 z-30 w-80 bg-white rounded-lg border border-stone-200 shadow-xl p-1 space-y-0.5">
+                    {featureFlags.census_overview_sheets && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSplitMenuOpen(false);
+                          handleOcrOverviewOnlyMunicipality();
+                        }}
+                        disabled={busyAction !== null}
+                        className="w-full text-left px-3 py-2 rounded-md hover:bg-purple-50 text-stone-800 text-xs font-semibold flex items-start gap-2 cursor-pointer disabled:opacity-50"
+                      >
+                        <Building2 className="w-4 h-4 text-purple-700 shrink-0 mt-0.5" />
+                        <div>
+                          <div>
+                            {lang === "sk"
+                              ? "Stiahnuť hárky a OCR iba prehľadov"
+                              : "Download all & OCR overview sheets only"}
+                          </div>
+                          <div className="text-[11px] font-normal text-stone-500">
+                            {lang === "sk"
+                              ? "Stiahne všetky skeny obce, deteguje typ hárku a prečíta len prehľady obvodov a domov"
+                              : "Downloads all scans, runs type detection, and OCRs only overview sheets"}
+                          </div>
+                        </div>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => {
@@ -2751,17 +2909,37 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
                       : "District Overview Sheets (0)"}
                   </span>
                 </div>
-                <span className="text-xs text-stone-600">
-                  {lang === "sk" ? (
-                    <>
-                      Pre túto obec zatiaľ nie je klasifikovaný úvodný hárok obvodu (č. 0001).
-                    </>
-                  ) : (
-                    <>
-                      No introductory District Overview Sheet (#0001) classified yet for this municipality.
-                    </>
-                  )}
-                </span>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <span className="text-xs text-stone-600">
+                    {lang === "sk" ? (
+                      <>
+                        Pre túto obec zatiaľ nie je klasifikovaný úvodný hárok obvodu (č. 0001).
+                      </>
+                    ) : (
+                      <>
+                        No introductory District Overview Sheet (#0001) classified yet for this municipality.
+                      </>
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="empty-overview-ocr-btn"
+                    onClick={() => handleOcrOverviewOnlyMunicipality()}
+                    disabled={busyAction !== null}
+                    className="px-3 py-1.5 min-h-[32px] rounded-lg bg-purple-700 hover:bg-purple-800 text-white font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {busyAction?.startsWith("overview_ocr_") ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Building2 className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      {lang === "sk"
+                        ? "Stiahnuť hárky a OCR iba prehľadov"
+                        : "Download all & OCR overviews only"}
+                    </span>
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="bg-white rounded-xl p-4 border border-stone-300 space-y-3.5">

@@ -153,6 +153,7 @@ class Settings(BaseSettings):
             "census_multi_byt": True,
             "census_surname_consensus": True,
             "census_overview_sheets": True,
+            "skip_row_ocr": True,
             "manual_scan_zoom": True,
             "hover_row_zoom": True,
             "admin_debug_overlay": False,

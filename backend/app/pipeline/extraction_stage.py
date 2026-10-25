@@ -494,7 +494,21 @@ async def run_extraction_for_row(
     scan: ScanImage,
     row: RecordRow,
     prev_fact: PersonFact | None = None,
+    *,
+    skip_row_ocr: bool | None = None,
 ) -> PersonFact:
+    eff_skip_row_ocr = (
+        bool(settings.get_feature_flags().get("skip_row_ocr", True))
+        if skip_row_ocr is None
+        else bool(skip_row_ocr)
+    )
+    has_ocr_text = bool(
+        (row.raw_ocr_left or "").strip()
+        or (row.raw_ocr_right or "").strip()
+        or (row.raw_ocr_combined or "").strip()
+    )
+    use_direct_image_only = bool(eff_skip_row_ocr or not has_ocr_text)
+
     answered_qs = session.exec(
         select(QuestionItem).where(QuestionItem.row_id == row.id, QuestionItem.status == "answered")
     ).all()
@@ -502,34 +516,54 @@ async def run_extraction_for_row(
         [f"{q.field_name}: {q.selected_answer}" for q in answered_qs if q.selected_answer]
     )
 
-    fallback = _heuristic_fallback_extract(
-        row.raw_ocr_left or "",
-        row.raw_ocr_right or "",
-        scan.detected_year,
-        scan.detected_type,
-        human_notes or None,
-    )
-
-    user_prompt = (
-        f"IMPORTANT: NEVER translate or modernize personal names or surnames. Keep exact historical variants (e.g. keep Andreas as Andreas, Stephanus as Stephanus).\n"
-        f"TYPE SAFETY: Dates must ONLY contain day (1..31) and month (e.g. '18. Augustus', 'Julius 28'). NEVER put personal names (e.g. 'Paulus') in dates, and NEVER put month names (e.g. 'Augustus') or punctuation ('.', '/') in person/parent names!\n"
-        f"Pre-parsed column hints: entry={fallback.get('entry_number')}, birth_date={fallback.get('birth_or_event_date')}, "
-        f"baptism_date={fallback.get('baptism_or_burial_date')}, child={fallback.get('given_name_raw')}, "
-        f"father={fallback.get('father_name')}, mother={fallback.get('mother_name')}, village={fallback.get('village_raw')}\n"
-        f"Return ONLY raw JSON (no markdown, no explanation) with keys: entry_number, event_year, birth_or_event_date, baptism_or_burial_date, "
-        f"given_name_raw, surname_raw, sex, father_name, mother_name, "
-        f"mother_maiden_surname, village_raw, house_number, godparents_or_witnesses, "
-        f"officiant, observationes_raw from this {scan.detected_type} matrika row (Year {scan.detected_year or '1884'}):\n"
-        f"{row.raw_ocr_combined or ''}"
-    )
+    if use_direct_image_only:
+        fallback: dict[str, Any] = {
+            "event_year": validate_event_year(scan.detected_year, scan.detected_year),
+            "type_safety_repairs": [],
+        }
+        user_prompt = (
+            f"IMPORTANT: NEVER translate or modernize personal names or surnames. Keep exact historical variants (e.g. keep Andreas as Andreas, Stephanus as Stephanus).\n"
+            f"TYPE SAFETY: Dates must ONLY contain day (1..31) and month (e.g. '18. Augustus', 'Julius 28'). NEVER put personal names (e.g. 'Paulus') in dates, and NEVER put month names (e.g. 'Augustus') or punctuation ('.', '/') in person/parent names!\n"
+            f"Transcribe this {scan.detected_type} matrika row (Row #{row.row_index}, Year {scan.detected_year or '1884'}) directly from the attached column crop image.\n"
+            f"Return ONLY raw JSON (no markdown, no explanation) with keys: entry_number, event_year, birth_or_event_date, baptism_or_burial_date, "
+            f"given_name_raw, surname_raw, sex, father_name, mother_name, "
+            f"mother_maiden_surname, village_raw, house_number, godparents_or_witnesses, "
+            f"officiant, observationes_raw."
+        )
+    else:
+        fallback = _heuristic_fallback_extract(
+            row.raw_ocr_left or "",
+            row.raw_ocr_right or "",
+            scan.detected_year,
+            scan.detected_type,
+            human_notes or None,
+        )
+        user_prompt = (
+            f"IMPORTANT: NEVER translate or modernize personal names or surnames. Keep exact historical variants (e.g. keep Andreas as Andreas, Stephanus as Stephanus).\n"
+            f"TYPE SAFETY: Dates must ONLY contain day (1..31) and month (e.g. '18. Augustus', 'Julius 28'). NEVER put personal names (e.g. 'Paulus') in dates, and NEVER put month names (e.g. 'Augustus') or punctuation ('.', '/') in person/parent names!\n"
+            f"Pre-parsed column hints: entry={fallback.get('entry_number')}, birth_date={fallback.get('birth_or_event_date')}, "
+            f"baptism_date={fallback.get('baptism_or_burial_date')}, child={fallback.get('given_name_raw')}, "
+            f"father={fallback.get('father_name')}, mother={fallback.get('mother_name')}, village={fallback.get('village_raw')}\n"
+            f"Return ONLY raw JSON (no markdown, no explanation) with keys: entry_number, event_year, birth_or_event_date, baptism_or_burial_date, "
+            f"given_name_raw, surname_raw, sex, father_name, mother_name, "
+            f"mother_maiden_surname, village_raw, house_number, godparents_or_witnesses, "
+            f"officiant, observationes_raw from this {scan.detected_type} matrika row (Year {scan.detected_year or '1884'}):\n"
+            f"{row.raw_ocr_combined or ''}"
+        )
     if human_notes:
         user_prompt += f"\nVerified human correction: {human_notes}"
+
+    extract_image_path, extract_image_rel = await asyncio.to_thread(
+        resolve_row_extraction_crop, row
+    )
 
     res = await ai_client.chat_completion(
         stage="extract",
         model=settings.model_extract,
         system_prompt=EXTRACTION_SYSTEM_PROMPT,
         prompt=user_prompt,
+        image_path=extract_image_path,
+        image_rel_url=extract_image_rel,
         scan_id=scan.id,
         row_id=row.id,
         max_tokens=260,
@@ -1448,14 +1482,29 @@ async def run_census_extraction_for_row(
     scan: ScanImage,
     row: RecordRow,
     prev_fact: PersonFact | None = None,
+    *,
+    skip_row_ocr: bool | None = None,
 ) -> PersonFact | None:
     """
     Extracts a single census household row (1930 full or 1940 partially redacted) into a PersonFact.
+    When `skip_row_ocr` is True (or when no prior row OCR text exists), sends the 5-band composite
+    column crop (`row_XX_extract_composite.jpg`) straight to the extraction VLM without OCR hints.
     Returns None and marks row.status = 'empty_row' if no person name was found.
     """
     sheet = session.get(CensusSheet, scan.census_sheet_id) if scan.census_sheet_id else None
     census_year = sheet.census_year if sheet else (int(scan.detected_year) if (scan.detected_year and scan.detected_year.isdigit()) else 1930)
     is_blackened = bool(sheet and sheet.is_blackened)
+    eff_skip_row_ocr = (
+        bool(settings.get_feature_flags().get("skip_row_ocr", True))
+        if skip_row_ocr is None
+        else bool(skip_row_ocr)
+    )
+    has_ocr_text = bool(
+        (row.raw_ocr_left or "").strip()
+        or (row.raw_ocr_right or "").strip()
+        or (row.raw_ocr_combined or "").strip()
+    )
+    use_direct_image_only = bool(eff_skip_row_ocr or not has_ocr_text)
 
     # Automatically resolve prev_fact from previous row of the same scan when not explicitly passed
     if prev_fact is None and row.row_index > 1:
@@ -1477,7 +1526,11 @@ async def run_census_extraction_for_row(
         [f"{q.field_name}: {q.selected_answer}" for q in answered_qs if q.selected_answer]
     )
 
-    left_is_blank = _is_effectively_blank_census_left_ocr(row.raw_ocr_left)
+    left_is_blank = (
+        False
+        if use_direct_image_only
+        else _is_effectively_blank_census_left_ocr(row.raw_ocr_left)
+    )
     if left_is_blank and not human_notes:
         from backend.app.pipeline.feedback import reset_ocr_feedback
 
@@ -1492,34 +1545,57 @@ async def run_census_extraction_for_row(
         session.commit()
         return None
 
-    fallback = _heuristic_fallback_census_extract(
-        row.raw_ocr_left or "",
-        row.raw_ocr_right or "",
-        census_year=census_year,
-        sheet=sheet,
-        row_index=row.row_index,
-        prev_fact=prev_fact,
-    )
+    if use_direct_image_only:
+        fallback: dict[str, Any] = {
+            "person_row_number": row.row_index,
+            "village_raw": sheet.municipality if sheet else None,
+            "house_number": sheet.house_number if sheet else None,
+            "presence_type": "trvale",
+        }
+    else:
+        fallback = _heuristic_fallback_census_extract(
+            row.raw_ocr_left or "",
+            row.raw_ocr_right or "",
+            census_year=census_year,
+            sheet=sheet,
+            row_index=row.row_index,
+            prev_fact=prev_fact,
+        )
 
     data: dict[str, Any] = {}
-    if not left_is_blank and (not is_blackened or (row.raw_ocr_left and len(row.raw_ocr_left.strip()) > 5)):
+    if not left_is_blank and (
+        use_direct_image_only
+        or not is_blackened
+        or (row.raw_ocr_left and len(row.raw_ocr_left.strip()) > 5)
+    ):
         nearby_villages = get_regional_municipality_gazetteer(
             sheet.municipality if sheet else None,
             sheet.district if sheet else None,
         )[:25]
-        user_prompt = (
-            f"Transcribe this {census_year} Slovak Census row (Municipality: {sheet.municipality if sheet else 'Unknown'}, "
-            f"District: {sheet.district if sheet else 'Unknown'}, "
-            f"House: {sheet.house_number if sheet else 'Unknown'}).\n"
-            f"Regional ~100km villages in vicinity: {', '.join(nearby_villages)}\n"
-            f"Pre-parsed hints: surname={fallback.get('surname_raw')}, given_name={fallback.get('given_name_raw')}, "
-            f"relation={fallback.get('relation_to_head')}, birth_date={fallback.get('birth_date_raw')}, "
-            f"birth_place_municipality={fallback.get('birth_place_municipality')}, "
-            f"birth_place_district={fallback.get('birth_place_district')}, "
-            f"birth_place_country={fallback.get('birth_place_country')}, "
-            f"occupation={fallback.get('occupation_raw')}\n"
-            f"OCR text:\n{row.raw_ocr_combined or ''}"
-        )
+        if use_direct_image_only:
+            user_prompt = (
+                f"Transcribe this {census_year} Slovak Census row directly from the attached column crops image "
+                f"(Row #{row.row_index}, Municipality: {sheet.municipality if sheet else 'Unknown'}, "
+                f"District: {sheet.district if sheet else 'Unknown'}, "
+                f"House: {sheet.house_number if sheet else 'Unknown'}).\n"
+                f"Regional ~100km villages in vicinity: {', '.join(nearby_villages)}"
+            )
+            if is_blackened:
+                user_prompt += "\nNote: This is a 1940 partially redacted census sheet (right-side columns 11-24 are blackened; transcribe columns 1-10)."
+        else:
+            user_prompt = (
+                f"Transcribe this {census_year} Slovak Census row (Municipality: {sheet.municipality if sheet else 'Unknown'}, "
+                f"District: {sheet.district if sheet else 'Unknown'}, "
+                f"House: {sheet.house_number if sheet else 'Unknown'}).\n"
+                f"Regional ~100km villages in vicinity: {', '.join(nearby_villages)}\n"
+                f"Pre-parsed hints: surname={fallback.get('surname_raw')}, given_name={fallback.get('given_name_raw')}, "
+                f"relation={fallback.get('relation_to_head')}, birth_date={fallback.get('birth_date_raw')}, "
+                f"birth_place_municipality={fallback.get('birth_place_municipality')}, "
+                f"birth_place_district={fallback.get('birth_place_district')}, "
+                f"birth_place_country={fallback.get('birth_place_country')}, "
+                f"occupation={fallback.get('occupation_raw')}\n"
+                f"OCR text:\n{row.raw_ocr_combined or ''}"
+            )
         if prev_fact and (prev_fact.surname_raw or prev_fact.surname_normalized):
             user_prompt += (
                 f"\nHousehold context (previous row): surname={prev_fact.surname_raw or prev_fact.surname_normalized}, "
@@ -1551,8 +1627,23 @@ async def run_census_extraction_for_row(
         )
         data = res.get("parsed") or {}
 
+    if any(isinstance(v, str) and _is_census_ditto(v) for v in data.values()):
+        row.has_ditto_marks = True
+
+    raw_g = data.get("given_name_raw")
+    if not use_direct_image_only and _is_ungrounded_llm_person_name(
+        raw_g,
+        raw_ocr_left=row.raw_ocr_left,
+        prev_fact=prev_fact,
+        fallback_val=fallback.get("given_name_raw"),
+        role="given",
+    ):
+        raw_g = None
+    given_cand, _ = validate_person_name(raw_g, role="given")
+    given_name_raw = given_cand or fallback.get("given_name_raw")
+
     raw_s = data.get("surname_raw")
-    if _is_ungrounded_llm_person_name(
+    if not use_direct_image_only and _is_ungrounded_llm_person_name(
         raw_s,
         raw_ocr_left=row.raw_ocr_left,
         prev_fact=prev_fact,
@@ -1560,8 +1651,13 @@ async def run_census_extraction_for_row(
         role="surname",
     ):
         raw_s = None
-    if _is_census_ditto(raw_s) and prev_fact:
-        raw_s = prev_fact.surname_raw
+    surname_was_inherited = False
+    if _is_census_ditto(raw_s):
+        if prev_fact and (not use_direct_image_only or given_name_raw):
+            raw_s = prev_fact.surname_raw
+            surname_was_inherited = True
+        else:
+            raw_s = None
     surname_cand, _ = validate_person_name(raw_s, role="surname")
     surname_raw = surname_cand or fallback.get("surname_raw")
     maiden_cand, _ = validate_person_name(data.get("maiden_surname"), role="surname")
@@ -1573,18 +1669,11 @@ async def run_census_extraction_for_row(
             surname_raw = m_sur
         surname_raw = sanitize_corrupted_surname_suffix(surname_raw) or surname_raw
 
-    raw_g = data.get("given_name_raw")
-    if _is_ungrounded_llm_person_name(
-        raw_g,
-        raw_ocr_left=row.raw_ocr_left,
-        prev_fact=prev_fact,
-        fallback_val=fallback.get("given_name_raw"),
-        role="given",
-    ):
-        raw_g = None
-    given_cand, _ = validate_person_name(raw_g, role="given")
-    given_name_raw = given_cand or fallback.get("given_name_raw")
-    relation_to_head = normalize_census_relation(data.get("relation_to_head")) or fallback.get("relation_to_head")
+    raw_rel = data.get("relation_to_head")
+    if _is_census_ditto(raw_rel) and prev_fact and prev_fact.relation_to_head:
+        relation_to_head = prev_fact.relation_to_head
+    else:
+        relation_to_head = normalize_census_relation(raw_rel) or fallback.get("relation_to_head")
 
     # Apply human answers early if they corrected identity_name
     for q in answered_qs:
@@ -1613,14 +1702,59 @@ async def run_census_extraction_for_row(
 
     if not surname_raw and prev_fact and (row.has_ditto_marks or relation_to_head in ("manželka", "syn", "dcéra")):
         surname_raw = prev_fact.surname_raw
+        surname_was_inherited = True
 
-    surname_norm = strip_slovak_feminine_suffix(surname_raw) if surname_raw else None
     g_sk, g_sex = normalize_given_name(given_name_raw)
     g_hu = g_sk
     sex = validate_sex(data.get("sex") or fallback.get("sex") or g_sex, given_name_raw)
 
     b_date, b_year = validate_census_date(data.get("birth_date_raw") or fallback.get("birth_date_raw"))
     birth_year_est = data.get("birth_year") or data.get("birth_year_est") or b_year or fallback.get("birth_year_est")
+
+    if not relation_to_head:
+        if row.row_index == 1:
+            relation_to_head = "hlava domácnosti"
+        elif prev_fact:
+            if row.row_index == 2 and sex == "F" and (
+                not birth_year_est
+                or not prev_fact.birth_year_est
+                or abs(int(birth_year_est) - int(prev_fact.birth_year_est)) <= 22
+            ):
+                relation_to_head = "manželka"
+            elif birth_year_est and prev_fact.birth_year_est and int(birth_year_est) >= int(prev_fact.birth_year_est) + 15:
+                relation_to_head = "dcéra" if sex == "F" else "syn"
+            elif prev_fact.relation_to_head in ("syn", "dcéra") and (
+                not birth_year_est
+                or not prev_fact.birth_year_est
+                or abs(int(birth_year_est) - int(prev_fact.birth_year_est)) <= 20
+            ):
+                relation_to_head = "dcéra" if sex == "F" else "syn"
+
+    if not surname_raw and prev_fact and relation_to_head in ("manželka", "syn", "dcéra"):
+        surname_raw = prev_fact.surname_raw
+        surname_was_inherited = True
+
+    surname_norm = strip_slovak_feminine_suffix(surname_raw) if surname_raw else None
+    if surname_raw and surname_norm:
+        if surname_was_inherited:
+            prev_has_ova = _has_ocr_feminine_ova_ending(
+                prev_fact.surname_raw if prev_fact else surname_raw,
+                surname_norm,
+            )
+            surname_raw = _inflect_census_surname(
+                surname_norm,
+                sex,
+                relation_to_head,
+                raw_ocr_surname=None,
+                force_ova_on_ditto=prev_has_ova,
+            )
+        else:
+            surname_raw = _inflect_census_surname(
+                surname_norm,
+                sex,
+                relation_to_head,
+                raw_ocr_surname=surname_raw,
+            )
 
     # Rodisko (a) Obec, (b) Okres, (c) Krajina + Ditto resolution
     bp_muni = data.get("birth_place_municipality") or fallback.get("birth_place_municipality")
@@ -1793,6 +1927,7 @@ async def run_census_extraction_for_row(
     )
 
     merged_dict: dict[str, Any] = {
+        "apartment_number": str(data.get("apartment_number") or "").strip() or None,
         "person_row_number": str(row.row_index),
         "surname_raw": surname_raw,
         "surname_normalized": surname_norm or surname_raw,
@@ -2528,6 +2663,19 @@ def _detect_explicit_byt_marker(fact: PersonFact, row: RecordRow | None) -> str 
         if token.isdigit() and 2 <= int(token) <= 10:
             return _int_to_roman(int(token))
 
+    # Check apartment_number in row.normalized_json (populated by direct VLM extraction)
+    if row and row.normalized_json:
+        try:
+            nd = json.loads(row.normalized_json)
+            if isinstance(nd, dict) and nd.get("apartment_number"):
+                apt_tok = str(nd["apartment_number"]).strip(" .").upper()
+                if apt_tok in _ROMAN_TO_INT and _ROMAN_TO_INT[apt_tok] >= 2:
+                    return apt_tok
+                if apt_tok.isdigit() and 2 <= int(apt_tok) <= 10:
+                    return _int_to_roman(int(apt_tok))
+        except Exception:
+            pass
+
     # Check Column 1 | Column 2 leading pipe pattern in raw_ocr_left: e.g. "2 | 7 | Opacity | Anton"
     raw_left = (row.raw_ocr_left if row else "") or ""
     for line in raw_left.splitlines():
@@ -2963,6 +3111,8 @@ def reconcile_census_household_relationships(
                     if normalize_census_relation(cell_txt.strip()) in _HEAD_RELATIONS:
                         left_has_head_phrase = True
                         break
+        elif is_explicit_head:
+            left_has_head_phrase = True
 
         # Guard against treating a ditto/continuation row or same-family / sequential row without Byt marker as a new Byt
         first_head = current_group[0]
@@ -5140,7 +5290,8 @@ async def _extract_census_overview_sheet_locked(
                 or not has_valid_owner_or_ditto
                 or (heur_probe.get("is_inhabited", True) and heur_probe.get("present_persons_count") is None)
             )
-            if needs_focused_ocr and r_path and r_path.exists():
+            skip_row_text_ocr = bool(settings.get_feature_flags().get("skip_row_ocr", True))
+            if needs_focused_ocr and r_path and r_path.exists() and not skip_row_text_ocr:
                 cached_r_ocr = (
                     html_table_to_pipe_text(trace_by_img.get(r_info.right_crop_rel, "")).strip(" |")
                     if can_reuse_row_cache
@@ -5284,18 +5435,33 @@ async def _extract_census_overview_sheet_locked(
         parsed: dict[str, Any] = {}
         if not heur.get("owner_name"):
             session.commit()
-            prompt = (
-                f"Transcribe row #{expected_ord} (House #{heur.get('house_number')}) of Prehľad sčítacieho obvodu (Municipality: {sheet.municipality or 'Unknown'}).\n"
-                f"Previous row settlement: {prev_house.settlement_name if prev_house else (sheet.municipality or 'dedina')}, "
-                f"Previous row owner: {prev_house.owner_name if prev_house else 'None'}.\n"
-                f"Heuristic hints: ordinal={heur.get('ordinal_number')}, house={heur.get('house_number')}, owner={heur.get('owner_name')}\n"
-                f"OCR text:\n{combined_ocr}"
-            )
+            skip_row_text_ocr = bool(settings.get_feature_flags().get("skip_row_ocr", True))
+            ov_r_path = media_rel_to_path(r_info.right_crop_rel) if getattr(r_info, "right_crop_rel", None) else None
+            ov_l_path = media_rel_to_path(r_info.left_crop_rel) if getattr(r_info, "left_crop_rel", None) else None
+            ov_img_path = ov_r_path if (ov_r_path and ov_r_path.exists()) else (ov_l_path if (ov_l_path and ov_l_path.exists()) else None)
+            ov_img_rel = r_info.right_crop_rel if (ov_r_path and ov_r_path.exists()) else getattr(r_info, "left_crop_rel", None)
+            if skip_row_text_ocr:
+                prompt = (
+                    f"Transcribe row #{expected_ord} (House #{heur.get('house_number')}) of Prehľad sčítacieho obvodu "
+                    f"(Municipality: {sheet.municipality or 'Unknown'}) directly from the attached crop image.\n"
+                    f"Previous row settlement: {prev_house.settlement_name if prev_house else (sheet.municipality or 'dedina')}, "
+                    f"Previous row owner: {prev_house.owner_name if prev_house else 'None'}."
+                )
+            else:
+                prompt = (
+                    f"Transcribe row #{expected_ord} (House #{heur.get('house_number')}) of Prehľad sčítacieho obvodu (Municipality: {sheet.municipality or 'Unknown'}).\n"
+                    f"Previous row settlement: {prev_house.settlement_name if prev_house else (sheet.municipality or 'dedina')}, "
+                    f"Previous row owner: {prev_house.owner_name if prev_house else 'None'}.\n"
+                    f"Heuristic hints: ordinal={heur.get('ordinal_number')}, house={heur.get('house_number')}, owner={heur.get('owner_name')}\n"
+                    f"OCR text:\n{combined_ocr}"
+                )
             res_ext = await ai_client.chat_completion(
                 stage="extract",
                 model=settings.model_extract,
                 system_prompt=CENSUS_OVERVIEW_SYSTEM_PROMPT,
                 prompt=prompt,
+                image_path=ov_img_path,
+                image_rel_url=ov_img_rel,
                 scan_id=scan_obj.id,
                 row_id=r_rec.id,
                 max_tokens=200,

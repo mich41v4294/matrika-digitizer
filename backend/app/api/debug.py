@@ -389,8 +389,17 @@ async def rerun_single_row_stage(
     )
 
     try:
+        skip_row_ocr = bool(settings.get_feature_flags().get("skip_row_ocr", True))
         if req.stage == "all":
-            ocr_out = await run_ocr_for_row(session, scan, row)
+            ocr_out: dict[str, Any] = {}
+            if not skip_row_ocr:
+                ocr_out = await run_ocr_for_row(session, scan, row)
+            else:
+                row.raw_ocr_left = None
+                row.raw_ocr_right = None
+                row.raw_ocr_combined = None
+                session.add(row)
+                session.commit()
             if is_census:
                 await ws_manager.broadcast(
                     "state",
@@ -407,17 +416,37 @@ async def rerun_single_row_stage(
                         "message_en": f"Extracting row #{row.row_index} ({scan.filename})...",
                     },
                 )
-                fact = await run_census_extraction_for_row(session, scan, row)
+                fact = await run_census_extraction_for_row(
+                    session, scan, row, skip_row_ocr=skip_row_ocr
+                )
                 if scan.census_sheet_id:
                     reconcile_census_household_relationships(session, scan.census_sheet_id)
                     if fact:
                         session.refresh(fact)
                 evaluate_census_row_deterministic(session, scan, row, fact, log_trace=False)
-                out_payload: dict[str, Any] = {"stage": "all", "ocr": ocr_out, "fact": fact, "skipped_decision": True}
+                out_payload: dict[str, Any] = {
+                    "stage": "all",
+                    "ocr": ocr_out,
+                    "fact": fact,
+                    "skipped_decision": True,
+                    "skipped_row_ocr": skip_row_ocr,
+                }
             else:
-                dec_out = await run_decision_for_row(session, scan, row)
-                fact = await run_extraction_for_row(session, scan, row)
-                out_payload = {"stage": "all", "ocr": ocr_out, "decision": dec_out, "fact": fact}
+                dec_out = (
+                    await run_decision_for_row(session, scan, row)
+                    if not skip_row_ocr
+                    else {"action": "auto_accept", "confidence": 0.95}
+                )
+                fact = await run_extraction_for_row(
+                    session, scan, row, skip_row_ocr=skip_row_ocr
+                )
+                out_payload = {
+                    "stage": "all",
+                    "ocr": ocr_out,
+                    "decision": dec_out,
+                    "fact": fact,
+                    "skipped_row_ocr": skip_row_ocr,
+                }
         elif req.stage == "ocr":
             out = await run_ocr_for_row(session, scan, row)
             out_payload = {"stage": "ocr", "result": out}

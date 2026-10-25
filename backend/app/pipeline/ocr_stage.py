@@ -129,85 +129,162 @@ def media_rel_to_path(rel_url: str | None) -> Path | None:
     return None
 
 
+_CENSUS_COMPOSITE_SECTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("identity_name", "identity_relation"),
+        "COLS 1-5: 1. Byt c. | 2. Por. c. | 3. Priezvisko (rod.) | 4. Krstne meno | 5. Pomer k hlave domacnosti",
+    ),
+    (
+        ("birth_marital", "birth_marriage_children"),
+        "COLS 6-10: 6. Pohlavie | 7. Datum narodenia | 8. Rodinny stav | 9. Datum sobasa | 10. Pocet deti (zive / zomrele)",
+    ),
+    (
+        ("origin_domicile",),
+        "COLS 11-14: 11-12. Rodisko a) Obec, b) Okres, c) Krajina | 13. Pristahovanie | 14. Domovska a statna prislusnost",
+    ),
+    (
+        ("nationality_religion_literacy",),
+        "COLS 15-17: 15. Narodnost | 16. Nabozenstvo | 17. Znalost citania a pisania",
+    ),
+    (
+        ("occupation_presence_notes",),
+        "COLS 18-24: 18. Povolanie | 19. Postavenie v povolani | 20. Zavod/zamestnavatel | 21-23. Pritomnost | 24. Poznamka",
+    ),
+)
+
+_MATRIKA_COMPOSITE_SECTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("date_name",),
+        "COLS 1-2: Poradove cislo (Entry No.), Datum narodenia/krstu (Birth/Baptism Date), Meno dietata (Given Name)",
+    ),
+    (
+        ("parents",),
+        "COLS 3-4: Rodicia, Priezvisko, Nabozenske vyznanie, Stav/Povolanie (Parents, Surname, Religion, Status)",
+    ),
+    (
+        ("village",),
+        "COL 5: Obec a cislo domu (Village & House No. / Locus Domicilii)",
+    ),
+    (
+        ("observationes",),
+        "COLS 6-7: Krstni rodicia / Svedkovia, Knaz, Poznamky (Godparents, Officiant, Observationes)",
+    ),
+)
+
+
 def resolve_row_extraction_crop(row: RecordRow) -> tuple[Path | None, str | None]:
     """
     Returns `(image_path, image_rel_url)` for the highest-signal row crop to attach
-    to multimodal census extraction.
-    When `cell_crops_json` has both `identity_name` (Cols 1-5) and `origin_domicile` (Cols 11-14: Rodisko),
-    builds and caches a high-resolution stacked composite (`row_XX_extract_composite.jpg`) so the
-    extraction model directly sees both the name/relation crop and the Rodisko (Obec, Okres, Krajina) cell crop.
+    to multimodal extraction.
+    Stacks all available semantic column crops (for census: all 5 column groups Cols 1-5,
+    6-10, 11-14, 15-17, 18-24; for church matrika: all 4 semantic column groups) with
+    labeled banners into `row_XX_extract_composite.jpg` so the extraction VLM sees every
+    column at full horizontal resolution without needing prior row OCR hints.
     """
-    identity_crop_rel: str | None = None
-    origin_crop_rel: str | None = None
+    crop_url_by_key: dict[str, str] = {}
     try:
         parsed_crops = json.loads(row.cell_crops_json or "[]")
         if isinstance(parsed_crops, list):
             for item in parsed_crops:
-                if not isinstance(item, dict) or not item.get("crop_url"):
-                    continue
-                k = item.get("key")
-                if k in ("identity_name", "identity_relation") and not identity_crop_rel:
-                    identity_crop_rel = str(item["crop_url"])
-                elif k == "origin_domicile" and not origin_crop_rel:
-                    origin_crop_rel = str(item["crop_url"])
+                if isinstance(item, dict) and item.get("key") and item.get("crop_url"):
+                    k = str(item["key"])
+                    if k not in crop_url_by_key:
+                        crop_url_by_key[k] = str(item["crop_url"])
         elif isinstance(parsed_crops, dict):
-            identity_crop_rel = parsed_crops.get("identity_name") or parsed_crops.get("identity_relation")
-            origin_crop_rel = parsed_crops.get("origin_domicile")
+            for k, v in parsed_crops.items():
+                if isinstance(v, str) and v:
+                    crop_url_by_key[str(k)] = v
     except Exception:
-        identity_crop_rel = None
-        origin_crop_rel = None
+        crop_url_by_key = {}
 
-    id_path = media_rel_to_path(identity_crop_rel) if identity_crop_rel else None
-    orig_path = media_rel_to_path(origin_crop_rel) if origin_crop_rel else None
+    sections_to_stack: list[tuple[str, Path, str]] = []
+    for key_aliases, banner_label in _CENSUS_COMPOSITE_SECTIONS:
+        for alias in key_aliases:
+            rel_u = crop_url_by_key.get(alias)
+            if rel_u:
+                p = media_rel_to_path(rel_u)
+                if p and p.exists():
+                    sections_to_stack.append((banner_label, p, rel_u))
+                    break
 
-    if id_path and id_path.exists() and orig_path and orig_path.exists():
-        comp_name = re.sub(r"_identity_name(\.\w+)$", r"_extract_composite\1", id_path.name)
-        if comp_name == id_path.name:
+    if not sections_to_stack:
+        for key_aliases, banner_label in _MATRIKA_COMPOSITE_SECTIONS:
+            for alias in key_aliases:
+                rel_u = crop_url_by_key.get(alias)
+                if rel_u:
+                    p = media_rel_to_path(rel_u)
+                    if p and p.exists():
+                        sections_to_stack.append((banner_label, p, rel_u))
+                        break
+
+    if not sections_to_stack:
+        l_path = media_rel_to_path(row.left_crop_path) if row.left_crop_path else None
+        r_path = media_rel_to_path(row.right_crop_path) if row.right_crop_path else None
+        if l_path and l_path.exists() and row.left_crop_path:
+            sections_to_stack.append(("LEFT HALF (Lava strana riadku)", l_path, row.left_crop_path))
+        if r_path and r_path.exists() and row.right_crop_path:
+            sections_to_stack.append(("RIGHT HALF (Prava strana riadku)", r_path, row.right_crop_path))
+
+    if len(sections_to_stack) >= 2:
+        first_path = sections_to_stack[0][1]
+        first_rel = sections_to_stack[0][2]
+        comp_name = re.sub(
+            r"_(?:identity_name|identity_relation|date_name|left)(\.\w+)$",
+            r"_extract_composite\1",
+            first_path.name,
+        )
+        if comp_name == first_path.name:
             comp_name = f"row_{int(row.row_index or 0):02d}_extract_composite.jpg"
-        comp_path = id_path.parent / comp_name
+        comp_path = first_path.parent / comp_name
         comp_rel = (
-            re.sub(r"_identity_name(\.\w+)$", r"_extract_composite\1", identity_crop_rel)
-            if identity_crop_rel and "_identity_name" in identity_crop_rel
+            re.sub(
+                r"_(?:identity_name|identity_relation|date_name|left)(\.\w+)$",
+                r"_extract_composite\1",
+                first_rel,
+            )
+            if re.search(r"_(?:identity_name|identity_relation|date_name|left)\.\w+$", first_rel)
             else f"/media/crops/{comp_path.parent.name}/{comp_name}"
         )
-        if not comp_path.exists():
-            try:
-                from PIL import Image, ImageDraw
+        try:
+            from PIL import Image, ImageDraw
 
-                im_id = Image.open(id_path).convert("RGB")
-                im_orig = Image.open(orig_path).convert("RGB")
-                banner_h = 24
-                gap_h = 8
-                out_w = max(im_id.width, im_orig.width)
-                out_h = banner_h + im_id.height + gap_h + banner_h + im_orig.height
+            banner_h = 24
+            gap_h = 8
+            dims: list[tuple[int, int]] = []
+            for _, p_sec, _ in sections_to_stack:
+                with Image.open(p_sec) as im_probe:
+                    dims.append(im_probe.size)
+            out_w = max(w for w, _ in dims)
+            out_h = sum(banner_h + h for _, h in dims) + gap_h * (len(dims) - 1)
+
+            needs_build = not comp_path.exists()
+            if not needs_build:
+                try:
+                    with Image.open(comp_path) as existing_im:
+                        if existing_im.size != (out_w, out_h):
+                            needs_build = True
+                except Exception:
+                    needs_build = True
+
+            if needs_build:
                 canvas = Image.new("RGB", (out_w, out_h), (250, 248, 242))
                 draw = ImageDraw.Draw(canvas)
-                draw.rectangle([(0, 0), (out_w, banner_h)], fill=(38, 45, 58))
-                draw.text(
-                    (8, 5),
-                    "COLS 1-5: Priezvisko, Meno, Pomer k hlave domacnosti",
-                    fill=(255, 255, 255),
-                )
-                canvas.paste(im_id, (0, banner_h))
-                y2 = banner_h + im_id.height + gap_h
-                draw.rectangle([(0, y2), (out_w, y2 + banner_h)], fill=(38, 45, 58))
-                draw.text(
-                    (8, y2 + 5),
-                    "COLS 11-14: Rodisko a) Obec, b) Okres, c) Krajina | Pristahovanie | Domovska prislusnost",
-                    fill=(255, 255, 255),
-                )
-                canvas.paste(im_orig, (0, y2 + banner_h))
+                cur_y = 0
+                for banner_text, p_sec, _ in sections_to_stack:
+                    with Image.open(p_sec) as raw_im:
+                        im_rgb = raw_im.convert("RGB")
+                    draw.rectangle([(0, cur_y), (out_w, cur_y + banner_h)], fill=(38, 45, 58))
+                    draw.text((8, cur_y + 5), banner_text, fill=(255, 255, 255))
+                    canvas.paste(im_rgb, (0, cur_y + banner_h))
+                    cur_y += banner_h + im_rgb.height + gap_h
                 canvas.save(comp_path, format="JPEG", quality=92)
-            except Exception:
-                return id_path, identity_crop_rel
-        if comp_path.exists():
-            return comp_path, comp_rel
+            if comp_path.exists():
+                return comp_path, comp_rel
+        except Exception:
+            return first_path, first_rel
 
-    if id_path and id_path.exists():
-        return id_path, identity_crop_rel
-
-    if orig_path and orig_path.exists():
-        return orig_path, origin_crop_rel
+    if len(sections_to_stack) == 1:
+        return sections_to_stack[0][1], sections_to_stack[0][2]
 
     for fallback_rel in (row.stitched_crop_path, row.left_crop_path):
         if fallback_rel:

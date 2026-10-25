@@ -619,6 +619,9 @@ def evaluate_census_row_deterministic(
         row.raw_ocr_right,
         row.raw_ocr_combined,
     )
+    if not has_ditto and bool(row.has_ditto_marks):
+        has_ditto = True
+        ditto_notes.append("znak opakovania (ditto //) z vizuálnej extrakcie")
 
     # Pick targeted cell crop (prefer extract_composite or identity_name over stitched_crop_path)
     cells = json.loads(row.cell_crops_json or "[]")

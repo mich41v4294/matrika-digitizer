@@ -253,12 +253,12 @@ const STAGE_DESCRIPTORS: Array<{
 }> = [
   {
     key: "ocr",
-    titleSk: "ocr — Čítanie rukopisu (OCR)",
-    titleEn: "ocr — Handwriting Recognition (OCR)",
+    titleSk: "ocr — Hlavičky hárkov, tabuľky prehľadov & voliteľné OCR riadkov",
+    titleEn: "ocr — Sheet Headers, Overview Tables & Optional Row OCR",
     subtitleSk:
-      "Vizuálne čítanie riadkov a buniek (predvolene: Local AI · glm-ocr-g32-mixed_4_8-mlx)",
+      "GLM-OCR vždy číta hlavičku hárku a tabuľky prehľadov obvodov (textové OCR riadkov sa dá preskočiť nižšie)",
     subtitleEn:
-      "Visual line and cell transcription (default: Local AI · glm-ocr-g32-mixed_4_8-mlx)",
+      "GLM-OCR always reads sheet headers and overview tables (per-row text OCR can be skipped below)",
     defaultLocalModel: "glm-ocr-g32-mixed_4_8-mlx",
     defaultFreellmModel: "gpt-4o-mini",
   },
@@ -269,22 +269,22 @@ const STAGE_DESCRIPTORS: Array<{
     titleEn:
       "decision — Readability Confidence Check (church registers only; bypassed for census)",
     subtitleSk:
-      "Rozhodovanie o istote prečítania v cirkevných matrikách (sčítacie hárky 1930/1940 idú priamo z Cell OCR → Extract)",
+      "Rozhodovanie o istote prečítania v cirkevných matrikách (sčítacie hárky 1930/1940 idú priamo do Extract)",
     subtitleEn:
-      "Confidence triage for church register rows (1930/1940 census sheets go directly from Cell OCR → Extract)",
+      "Confidence triage for church register rows (1930/1940 census sheets go directly to Extract)",
     defaultLocalModel: "d1-3b-mlx",
     defaultFreellmModel: "gpt-4o-mini",
   },
   {
     key: "extract",
     titleSk:
-      "extract — Vizuálna extrakcia údajov + 100 km register obcí + konsenzus (LLM Extract)",
+      "extract — Priama vizuálna extrakcia z 5 výrezov stĺpcov (1–24) + 100 km register obcí",
     titleEn:
-      "extract — Structured Fact Extraction + 100 km Gazetteer + Surname Consensus (LLM Extract)",
+      "extract — Direct Visual Extraction from 5 Column Crops (1–24) + 100 km Gazetteer",
     subtitleSk:
-      "Priama extrakcia z výrezu buniek (row_XX_extract_composite.jpg) + 100 km register obcí + konsenzus priezviska v domácnosti",
+      "Priama extrakcia zo zloženého výrezu 5 skupín stĺpcov (row_XX_extract_composite.jpg, stĺpce 1–24) bez OCR nápovied + konsenzus domácnosti",
     subtitleEn:
-      "Direct extraction from composite cell crops + 100 km municipality gazetteer + household surname consensus",
+      "Direct extraction from 5-band stacked column crops (row_XX_extract_composite.jpg, Cols 1–24) without OCR hints + household consensus",
     defaultLocalModel: "underdog-saluki-27b-1.0",
     defaultFreellmModel: "gpt-4o-mini",
   },
@@ -1457,6 +1457,33 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
               {isAllFreellmPresetActive && <Check className="w-3.5 h-3.5" />}
               <span>
                 {lang === "sk" ? "Všetko cez Cloud API" : "All via Cloud API"}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="debug-skip-row-ocr-toggle"
+              onClick={() => toggleFlag("skip_row_ocr")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer border inline-flex items-center gap-1.5 ${
+                featureFlags.skip_row_ocr
+                  ? "bg-emerald-500 text-stone-950 border-emerald-400 shadow"
+                  : "bg-stone-900 hover:bg-stone-800 text-stone-200 border-stone-700"
+              }`}
+              title={
+                lang === "sk"
+                  ? "Použiť GLM-OCR na hlavičku a tabuľky prehľadov, preskočiť textové OCR riadkov a poslať 5-pásmový výrez stĺpcov priamo do Extract modelu bez OCR nápovied"
+                  : "Use GLM-OCR for headers and overview tables, skip row text OCR, and send 5-band column crops directly to Extract model without OCR hints"
+              }
+            >
+              {featureFlags.skip_row_ocr && <Check className="w-3.5 h-3.5" />}
+              <span>
+                {featureFlags.skip_row_ocr
+                  ? lang === "sk"
+                    ? "Priamy Extract bez OCR riadkov: ZAP (GLM-OCR iba pre hlavičku a tabuľky)"
+                    : "Direct Extract (Skip Row OCR): ON (GLM-OCR for header & tables only)"
+                  : lang === "sk"
+                  ? "Priamy Extract bez OCR riadkov: VYP (Spúšťať aj OCR riadkov)"
+                  : "Direct Extract (Skip Row OCR): OFF (Run row OCR too)"}
               </span>
             </button>
           </div>

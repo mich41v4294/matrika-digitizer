@@ -13,6 +13,7 @@ export interface FeatureFlags {
   census_multi_byt: boolean;
   census_surname_consensus: boolean;
   census_overview_sheets: boolean;
+  skip_row_ocr: boolean;
   hover_row_zoom: boolean;
   manual_scan_zoom: boolean;
   admin_debug_overlay: boolean;
@@ -33,6 +34,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   census_multi_byt: true,
   census_surname_consensus: true,
   census_overview_sheets: true,
+  skip_row_ocr: true,
   hover_row_zoom: true,
   manual_scan_zoom: true,
   admin_debug_overlay: false,
@@ -147,6 +149,20 @@ export const FUNCTIONAL_FLAG_DESCRIPTORS: FeatureFlagDescriptor[] = [
       "Podpora pre hárky prehľadov sčítacích obvodov, zoznam domov a prepínanie typu hárku",
     descriptionEn:
       "Support for enumeration district overview sheets, house directories, and sheet-type switching",
+    category: "functional",
+  },
+  {
+    key: "skip_row_ocr",
+    shortLabelSk: "Preskočiť textové OCR riadkov",
+    shortLabelEn: "Skip row text OCR",
+    labelSk:
+      "Preskočiť textové OCR riadkov a posielať výrezy buniek priamo do Extract modelu (bez OCR nápovied)",
+    labelEn:
+      "Skip row text OCR and send column crops directly to Extract model (without OCR hints)",
+    descriptionSk:
+      "Použije GLM-OCR iba na hlavičky hárkov a tabuľky prehľadov obvodov; pri riadkoch osôb preskočí textové OCR a pošle zložený výrez všetkých 5 skupín stĺpcov (stĺpce 1–24) priamo do vizuálneho Extract modelu bez OCR nápovied",
+    descriptionEn:
+      "Uses GLM-OCR only for sheet headers and overview tables; skips row text OCR on person rows and sends the 5-band column crop composite (Cols 1–24) straight to the Extract VLM without OCR hints",
     category: "functional",
   },
   {

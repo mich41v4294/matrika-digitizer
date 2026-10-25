@@ -243,13 +243,15 @@ async def process_single_scan_pipeline(
     run_mcp: bool = True,
     watchlist_filter: str | None = None,
     finalize_idle: bool = True,
+    skip_row_ocr: bool | None = None,
 ) -> dict[str, Any]:
     """
     Runs the stage-batched pipeline on a single scan:
     Stage 1: OpenCV Layout & Row Slicing
-    Stage 2: All GLM-OCR calls (header + rows) while glm-ocr stays warm in VRAM
-    Stage 3: All d1-3b-mlx decision/triage calls while d1-3b-mlx stays warm
-    Stage 4: All underdog-saluki-27b-1.0 extraction calls while saluki stays warm
+    Stage 2: GLM-OCR header recognition (always runs so header image is not fed to Extract),
+             plus per-row GLM-OCR when `skip_row_ocr` is False
+    Stage 3: d1-3b-mlx decision/triage calls (when `skip_row_ocr` is False and church matrika)
+    Stage 4: Structured extraction calls (with 5-band column crop composite)
     Stage 5: FamilySearch MCP place + record matching
     """
     t0 = time.perf_counter()
@@ -257,6 +259,11 @@ async def process_single_scan_pipeline(
         scan = session.get(ScanImage, scan_id)
         if not scan:
             raise ValueError(f"Scan {scan_id} not found")
+        eff_skip_row_ocr = (
+            bool(settings.get_feature_flags().get("skip_row_ocr", True))
+            if skip_row_ocr is None
+            else bool(skip_row_ocr)
+        )
         parent_sh = session.get(CensusSheet, scan.census_sheet_id) if scan.census_sheet_id else None
         sheet_ctx = _sheet_context_dict(parent_sh, fallback_label=scan.filename)
         if finalize_idle and scan.census_sheet_id and parent_sh and parent_sh.sheet_type in ("overview", "municipal_overview"):
@@ -327,7 +334,7 @@ async def process_single_scan_pipeline(
             target_rows = rows[:max_rows] if max_rows else rows
             total_target = len(target_rows)
 
-            # STAGE 2: GLM-OCR Batch
+            # STAGE 2: GLM-OCR Header (always runs with glm-ocr) + optional Row OCR
             await ws_manager.broadcast(
                 "state",
                 {
@@ -339,8 +346,16 @@ async def process_single_scan_pipeline(
                     "current_row_index": 0,
                     "total_rows": total_target,
                     "progress_pct": 22,
-                    "message_sk": f"Čítam záhlavie a rukopis pomocou {settings.model_ocr} ({total_target} riadkov)...",
-                    "message_en": f"Running GLM-OCR batch on header + {total_target} rows...",
+                    "message_sk": (
+                        f"Čítam záhlavie pomocou {settings.model_ocr} (textové OCR riadkov sa preskakuje)..."
+                        if eff_skip_row_ocr
+                        else f"Čítam záhlavie a rukopis pomocou {settings.model_ocr} ({total_target} riadkov)..."
+                    ),
+                    "message_en": (
+                        f"Reading header via {settings.model_ocr} (skipping row text OCR)..."
+                        if eff_skip_row_ocr
+                        else f"Running GLM-OCR batch on header + {total_target} rows..."
+                    ),
                 },
             )
             await run_ocr_for_scan_header(session, scan)
@@ -360,23 +375,32 @@ async def process_single_scan_pipeline(
                         "detected_year": scan.detected_year,
                         "detected_type": scan.detected_type,
                     }
-            for idx, row in enumerate(target_rows, start=1):
-                await ws_manager.broadcast(
-                    "state",
-                    {
-                        **sheet_ctx,
-                        "active_stage": "ocr",
-                        "active_model": settings.model_ocr,
-                        "current_scan_id": scan.id,
-                        "current_row_id": row.id,
-                        "current_row_index": idx,
-                        "total_rows": total_target,
-                        "progress_pct": 25 + int(25 * idx / max(1, total_target)),
-                        "message_sk": f"OCR čítanie riadku {idx}/{total_target} ({sheet_ctx['current_sheet_label'] or scan.filename})...",
-                        "message_en": f"GLM-OCR row {idx}/{total_target} ({sheet_ctx['current_sheet_label'] or scan.filename})...",
-                    },
-                )
-                await run_ocr_for_row(session, scan, row)
+
+            if not eff_skip_row_ocr:
+                for idx, row in enumerate(target_rows, start=1):
+                    await ws_manager.broadcast(
+                        "state",
+                        {
+                            **sheet_ctx,
+                            "active_stage": "ocr",
+                            "active_model": settings.model_ocr,
+                            "current_scan_id": scan.id,
+                            "current_row_id": row.id,
+                            "current_row_index": idx,
+                            "total_rows": total_target,
+                            "progress_pct": 25 + int(25 * idx / max(1, total_target)),
+                            "message_sk": f"OCR čítanie riadku {idx}/{total_target} ({sheet_ctx['current_sheet_label'] or scan.filename})...",
+                            "message_en": f"GLM-OCR row {idx}/{total_target} ({sheet_ctx['current_sheet_label'] or scan.filename})...",
+                        },
+                    )
+                    await run_ocr_for_row(session, scan, row)
+            else:
+                for row in target_rows:
+                    row.raw_ocr_left = None
+                    row.raw_ocr_right = None
+                    row.raw_ocr_combined = None
+                    row.record_type = scan.detected_type
+                    session.add(row)
 
             scan.status = "ocr_done"
             session.add(scan)
@@ -384,10 +408,10 @@ async def process_single_scan_pipeline(
 
             is_census = bool(scan.detected_type == "census" or scan.census_sheet_id is not None)
 
-            # STAGE 3: Decision Model (d1-3b-mlx) Batch — ONLY for 19th-century church matrikas!
-            # Census sheets skip d1-3b-mlx completely and go straight from Cell OCR -> Census Extraction
-            # (with composite cell crop + 100km gazetteer + household reconciliation).
-            if not is_census:
+            # STAGE 3: Decision Model (d1-3b-mlx) Batch — ONLY for 19th-century church matrikas when row OCR ran!
+            # Census sheets (and direct visual extraction with skip_row_ocr=True) skip d1-3b-mlx completely
+            # and go straight to Extraction (with 5-band composite cell crop + 100km gazetteer + household reconciliation).
+            if not is_census and not eff_skip_row_ocr:
                 prev_ocr = None
                 for idx, row in enumerate(target_rows, start=1):
                     await ws_manager.broadcast(
@@ -433,15 +457,20 @@ async def process_single_scan_pipeline(
                         "current_row_id": row.id,
                         "current_row_index": idx,
                         "total_rows": total_target,
-                        "progress_pct": 70 + int(18 * idx / max(1, total_target)),
+                        "progress_pct": (30 if eff_skip_row_ocr else 70)
+                        + int((58 if eff_skip_row_ocr else 18) * idx / max(1, total_target)),
                         "message_sk": f"Extrakcia mien, obcí a poznámok ({settings.model_extract}) – riadok {idx}/{total_target}...",
                         "message_en": f"Extracting structured facts row {idx}/{total_target}...",
                     },
                 )
                 if is_census:
-                    fact = await run_census_extraction_for_row(session, scan, row, prev_fact)
+                    fact = await run_census_extraction_for_row(
+                        session, scan, row, prev_fact, skip_row_ocr=eff_skip_row_ocr
+                    )
                 else:
-                    fact = await run_extraction_for_row(session, scan, row, prev_fact)
+                    fact = await run_extraction_for_row(
+                        session, scan, row, prev_fact, skip_row_ocr=eff_skip_row_ocr
+                    )
                 if fact is not None:
                     prev_fact = fact
                     extracted_facts.append((fact, row))
@@ -607,17 +636,23 @@ async def process_batch_stage_queued(
     max_rows_per_scan: int | None = None,
     run_mcp: bool = True,
     only_undone: bool = True,
+    skip_row_ocr: bool | None = None,
 ) -> dict[str, Any]:
     """
     Strictly stage-batches an entire multi-image Batch across ALL not-done scans:
     1. All pending scans -> OpenCV Layout Slicing
-    2. All pending scans -> GLM-OCR (no model swap during entire OCR phase!)
-    3. All pending scans -> d1-3b-mlx Decision Model (no model swap during entire triage phase!)
-    4. All pending scans -> underdog-saluki-27b-1.0 Extractor (no model swap during entire extraction phase!)
+    2. All pending scans -> GLM-OCR (header always runs; row OCR runs when skip_row_ocr=False)
+    3. All pending scans -> d1-3b-mlx Decision Model (when skip_row_ocr=False on church matrikas)
+    4. All pending scans -> Extractor (no model swap during entire extraction phase!)
     5. All pending scans -> familysearch-mcp Matching
     """
     t0 = time.perf_counter()
     with Session(engine) as session:
+        eff_skip_row_ocr = (
+            bool(settings.get_feature_flags().get("skip_row_ocr", True))
+            if skip_row_ocr is None
+            else bool(skip_row_ocr)
+        )
         batch = session.get(Batch, batch_id)
         if not batch:
             raise ValueError(f"Batch {batch_id} not found")
@@ -713,7 +748,7 @@ async def process_batch_stage_queued(
 
             total_batch_rows = max(1, sum(len(r_list) for r_list in scan_rows_map.values()))
 
-            # Phase 2: All GLM-OCR calls across all pending scans
+            # Phase 2: GLM-OCR calls across all pending scans (header always runs; row OCR runs if not eff_skip_row_ocr)
             batch.status = "ocr_stage"
             session.add(batch)
             session.commit()
@@ -722,6 +757,7 @@ async def process_batch_stage_queued(
                 target_rows = scan_rows_map[s.id]
                 if (
                     only_undone
+                    and not eff_skip_row_ocr
                     and s.status in ("ocr_done", "triaged")
                     and target_rows
                     and all(bool(r.raw_ocr_combined) for r in target_rows)
@@ -730,37 +766,46 @@ async def process_batch_stage_queued(
                     continue
                 if not (only_undone and s.header_raw_ocr):
                     await run_ocr_for_scan_header(session, s)
-                for idx_r, r in enumerate(target_rows, start=1):
-                    ocr_row_counter += 1
-                    if only_undone and r.raw_ocr_combined and r.status in (
-                        "ocr_done",
-                        "triaged",
-                        "auto_accepted",
-                        "extracted",
-                        "matched",
-                    ):
-                        continue
-                    await ws_manager.broadcast(
-                        "state",
-                        {
-                            "active_stage": "ocr",
-                            "active_model": settings.model_ocr,
-                            "current_scan_id": s.id,
-                            "current_row_id": r.id,
-                            "current_row_index": idx_r,
-                            "total_rows": len(target_rows),
-                            "progress_pct": 20 + int(30 * ocr_row_counter / total_batch_rows),
-                            "message_sk": f"[Dávka OCR {idx_s}/{len(scans)}] {s.filename} – riadok {idx_r}/{len(target_rows)}",
-                            "message_en": f"[Batch OCR {idx_s}/{len(scans)}] {s.filename} – row {idx_r}/{len(target_rows)}",
-                        },
-                    )
-                    await run_ocr_for_row(session, s, r)
+                if not eff_skip_row_ocr:
+                    for idx_r, r in enumerate(target_rows, start=1):
+                        ocr_row_counter += 1
+                        if only_undone and r.raw_ocr_combined and r.status in (
+                            "ocr_done",
+                            "triaged",
+                            "auto_accepted",
+                            "extracted",
+                            "matched",
+                        ):
+                            continue
+                        await ws_manager.broadcast(
+                            "state",
+                            {
+                                "active_stage": "ocr",
+                                "active_model": settings.model_ocr,
+                                "current_scan_id": s.id,
+                                "current_row_id": r.id,
+                                "current_row_index": idx_r,
+                                "total_rows": len(target_rows),
+                                "progress_pct": 20 + int(30 * ocr_row_counter / total_batch_rows),
+                                "message_sk": f"[Dávka OCR {idx_s}/{len(scans)}] {s.filename} – riadok {idx_r}/{len(target_rows)}",
+                                "message_en": f"[Batch OCR {idx_s}/{len(scans)}] {s.filename} – row {idx_r}/{len(target_rows)}",
+                            },
+                        )
+                        await run_ocr_for_row(session, s, r)
+                else:
+                    ocr_row_counter += len(target_rows)
+                    for r in target_rows:
+                        r.raw_ocr_left = None
+                        r.raw_ocr_right = None
+                        r.raw_ocr_combined = None
+                        r.record_type = s.detected_type
+                        session.add(r)
                 if s.status not in ("triaged", "extracted", "matched"):
                     s.status = "ocr_done"
                 session.add(s)
                 session.commit()
 
-            # Phase 3: All d1-3b-mlx calls across non-census church matrika scans
+            # Phase 3: All d1-3b-mlx calls across non-census church matrika scans (when row OCR ran)
             batch.status = "decision_stage"
             session.add(batch)
             session.commit()
@@ -771,7 +816,7 @@ async def process_batch_stage_queued(
                     dec_row_counter += len(target_rows)
                     continue
                 s_is_census = bool(s.detected_type == "census" or s.census_sheet_id is not None)
-                if s_is_census:
+                if s_is_census or eff_skip_row_ocr:
                     for r in target_rows:
                         r.decision_action = "auto_accept"
                         r.decision_confidence = 0.95
@@ -805,7 +850,7 @@ async def process_batch_stage_queued(
                 session.add(s)
                 session.commit()
 
-            # Phase 4: All underdog-saluki-27b-1.0 calls across all pending scans
+            # Phase 4: All extraction calls across all pending scans
             batch.status = "extract_stage"
             session.add(batch)
             session.commit()
@@ -833,9 +878,13 @@ async def process_batch_stage_queued(
                         },
                     )
                     if s_is_census:
-                        fact = await run_census_extraction_for_row(session, s, r, prev_fact)
+                        fact = await run_census_extraction_for_row(
+                            session, s, r, prev_fact, skip_row_ocr=eff_skip_row_ocr
+                        )
                     else:
-                        fact = await run_extraction_for_row(session, s, r, prev_fact)
+                        fact = await run_extraction_for_row(
+                            session, s, r, prev_fact, skip_row_ocr=eff_skip_row_ocr
+                        )
                     if fact is not None:
                         prev_fact = fact
                         all_facts.append((fact, r))

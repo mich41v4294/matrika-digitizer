@@ -1408,6 +1408,7 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
             scan_arg: ScanImage,
             row_arg: RecordRow,
             prev_fact: PersonFact | None = None,
+            **kwargs: object,
         ) -> PersonFact:
             pf = PersonFact(
                 row_id=row_arg.id or 0,
@@ -1426,10 +1427,187 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
             patch("backend.app.pipeline.orchestrator.run_ocr_for_row", side_effect=fake_run_ocr_for_row),
             patch("backend.app.pipeline.orchestrator.run_census_extraction_for_row", side_effect=fake_census_extract),
         ):
-            batch_res = asyncio.run(process_batch_stage_queued(batch_id, run_mcp=False))
+            batch_res = asyncio.run(
+                process_batch_stage_queued(batch_id, run_mcp=False, skip_row_ocr=False)
+            )
             self.assertEqual(batch_res["scans_processed"], 1)
             self.assertEqual(batch_res["scans_skipped"], 1)
             self.assertEqual(ocr_called_scan_ids, [sc_todo_id])
+
+    def test_skip_row_ocr_direct_visual_extract_with_5_crop_composite_and_header_ocr(self) -> None:
+        import asyncio
+        from unittest.mock import patch
+        from PIL import Image
+        from sqlmodel import select
+        from backend.app.config import settings
+        from backend.app.db.models import RecordRow, ScanImage
+        from backend.app.pipeline.ai_client import ai_client
+        from backend.app.pipeline.ocr_stage import resolve_row_extraction_crop
+        from backend.app.pipeline.orchestrator import process_single_scan_pipeline
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            settings, "crops_dir", Path(tmp_dir) / "crops"
+        ), patch(
+            "backend.app.pipeline.ocr_stage.settings.crops_dir", Path(tmp_dir) / "crops"
+        ):
+            tmp_path = Path(tmp_dir)
+            img = np.full((1600, 2400, 3), 240, dtype=np.uint8)
+            for i in range(5):
+                y = 440 + i * 95
+                cv2.line(img, (60, y), (2340, y), (25, 25, 25), 3)
+                if 1 <= i <= 2:
+                    cv2.putText(
+                        img,
+                        f"{i} Kovac Jan hlava 1892",
+                        (140, y - 28),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.85,
+                        (15, 15, 15),
+                        2,
+                    )
+            scan_path = tmp_path / "cair-direct01_front.jpg"
+            cv2.imwrite(str(scan_path), img)
+
+            test_engine = create_engine("sqlite:///:memory:")
+            SQLModel.metadata.create_all(test_engine)
+            ensure_fts_schema(test_engine)
+
+            with Session(test_engine) as session:
+                sheet = CensusSheet(
+                    slovakiana_key="cair-direct01",
+                    census_year=1930,
+                    district="Trnava",
+                    municipality="Horné Zelenice",
+                    house_number="12",
+                    sheet_type="household",
+                )
+                session.add(sheet)
+                session.commit()
+                session.refresh(sheet)
+
+                scan = ScanImage(
+                    census_sheet_id=sheet.id,
+                    page_side="front",
+                    filename="cair-direct01_front.jpg",
+                    original_path=str(scan_path),
+                    detected_year="1930",
+                    detected_type="census",
+                    status="uploaded",
+                )
+                session.add(scan)
+                session.commit()
+                session.refresh(scan)
+                scan_id = scan.id or 1
+
+            recorded_calls: list[dict[str, object]] = []
+
+            async def fake_chat_completion(**kwargs: object) -> dict[str, object]:
+                recorded_calls.append(dict(kwargs))
+                stage = str(kwargs.get("stage") or "")
+                if stage == "ocr_header":
+                    return {
+                        "content": "Sčítací hárok | Obec Horné Zelenice | Dom č. 12",
+                        "parsed": {},
+                    }
+                row_id_val = int(kwargs.get("row_id") or 1)
+                if row_id_val == 1:
+                    return {
+                        "content": "{}",
+                        "parsed": {
+                            "apartment_number": "1",
+                            "person_row_number": "1",
+                            "surname_raw": "Kováč",
+                            "given_name_raw": "Ján",
+                            "relation_to_head": "hlava domácnosti",
+                            "sex": "M",
+                            "birth_date_raw": "14. III. 1892",
+                            "birth_year": 1892,
+                            "marital_status": "ženatý",
+                            "birth_place_municipality": "Horné Zelenice",
+                            "birth_place_district": "Hlohovec",
+                            "birth_place_country": "Slovensko",
+                            "religion": "rím. kat.",
+                            "occupation": "roľník",
+                        },
+                    }
+                return {
+                    "content": "{}",
+                    "parsed": {
+                        "apartment_number": "1",
+                        "person_row_number": "2",
+                        "surname_raw": "Kováčová",
+                        "maiden_surname": "Vargová",
+                        "given_name_raw": "Mária",
+                        "relation_to_head": "manželka",
+                        "sex": "F",
+                        "birth_date_raw": "5. V. 1896",
+                        "birth_year": 1896,
+                        "marital_status": "vydatá",
+                        "birth_place_municipality": "//",
+                        "birth_place_district": "//",
+                        "birth_place_country": "//",
+                        "religion": "//",
+                        "occupation": "v domácnosti",
+                    },
+                }
+
+            with (
+                patch("backend.app.pipeline.orchestrator.engine", test_engine),
+                patch.object(ai_client, "chat_completion", side_effect=fake_chat_completion),
+            ):
+                res = asyncio.run(
+                    process_single_scan_pipeline(
+                        scan_id,
+                        run_mcp=False,
+                        finalize_idle=False,
+                        skip_row_ocr=True,
+                    )
+                )
+
+            self.assertEqual(res["persons_count"], 2)
+            stages_called = [str(c.get("stage")) for c in recorded_calls]
+            # Header OCR runs with glm-ocr, while row OCR (ocr_left / ocr_right) is completely skipped!
+            self.assertIn("ocr_header", stages_called)
+            self.assertNotIn("ocr_left", stages_called)
+            self.assertNotIn("ocr_right", stages_called)
+
+            extract_calls = [c for c in recorded_calls if c.get("stage") == "extract"]
+            self.assertEqual(len(extract_calls), 2)
+            for ec in extract_calls:
+                prompt_str = str(ec.get("prompt") or "")
+                self.assertNotIn("Pre-parsed hints:", prompt_str)
+                self.assertNotIn("OCR text:", prompt_str)
+                img_p = ec.get("image_path")
+                self.assertIsNotNone(img_p)
+                self.assertTrue(str(img_p).endswith("_extract_composite.jpg"))
+                self.assertTrue(Path(str(img_p)).exists())
+
+            with Session(test_engine) as session:
+                rows = list(
+                    session.exec(
+                        select(RecordRow)
+                        .where(RecordRow.scan_id == scan_id)
+                        .order_by(RecordRow.row_index.asc())
+                    ).all()
+                )
+                self.assertEqual(len(rows), 2)
+                comp_p, _ = resolve_row_extraction_crop(rows[0])
+                self.assertIsNotNone(comp_p)
+                with Image.open(str(comp_p)) as comp_im:
+                    # 5 stacked bands + 5 banners -> height > 250px
+                    self.assertGreater(comp_im.height, 250)
+                facts = list(
+                    session.exec(
+                        select(PersonFact)
+                        .where(PersonFact.scan_id == scan_id)
+                        .order_by(PersonFact.id.asc())
+                    ).all()
+                )
+                self.assertEqual(len(facts), 2)
+                self.assertEqual(facts[0].surname_raw, "Kováč")
+                self.assertEqual(facts[1].surname_raw, "Kováčová")
+                self.assertEqual(facts[1].mother_maiden_surname, "Vargová")
+                self.assertEqual(facts[1].birth_place_municipality, "Horné Zelenice")
 
     def test_municipal_overview_sheet_detection_extraction_and_district_joining(self) -> None:
         import asyncio

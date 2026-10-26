@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 
 from backend.app.config import settings
 from backend.app.db.models import CensusSheet, PersonFact, QuestionItem, RecordRow, ScanImage, WorkflowTrace
+from backend.app.db.session import ensure_session_write_unlocked, safe_session_commit
 from backend.app.pipeline.ai_client import ai_client
 from backend.app.pipeline.lexicon import (
     VILLAGE_MAP,
@@ -742,7 +743,7 @@ def evaluate_census_row_deterministic(
         session.add(trace)
 
     if commit:
-        session.commit()
+        safe_session_commit(session)
     return {
         "action": action,
         "confidence": confidence,
@@ -780,6 +781,7 @@ async def run_decision_for_row(
         "Zhodnoťte čitateľnosť rukopisu a vráťte iba JSON objekt."
     )
 
+    ensure_session_write_unlocked(session)
     res = await ai_client.chat_completion(
         stage="decision",
         model=settings.model_decision,
@@ -847,7 +849,7 @@ async def run_decision_for_row(
     )
     row.status = "needs_human" if action == "ask_human" else "triaged"
     session.add(row)
-    session.commit()
+    safe_session_commit(session)
 
     if action == "ask_human":
         existing_q = session.exec(
@@ -883,7 +885,7 @@ async def run_decision_for_row(
             existing_q.candidates_json = json.dumps(candidates[:4], ensure_ascii=False)
             existing_q.raw_ocr_snippet = raw_combined[:400]
             session.add(existing_q)
-        session.commit()
+        safe_session_commit(session)
 
     return {
         "action": action,

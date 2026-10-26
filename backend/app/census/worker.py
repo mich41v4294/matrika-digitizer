@@ -25,7 +25,7 @@ from backend.app.db.models import (
     ScanImage,
     utcnow,
 )
-from backend.app.db.session import engine
+from backend.app.db.session import engine, ensure_session_write_unlocked, safe_session_commit
 from backend.app.pipeline.lexicon import (
     canonical_municipality_display,
     canonical_municipality_key,
@@ -562,14 +562,17 @@ async def _run_catalog_harvest_job_inner(
         }
     except Exception as exc:
         if finalize_job:
-            with Session(engine) as session:
-                job = session.get(CensusDownloadJob, job_id)
-                if job:
-                    job.status = "error"
-                    job.error_message = str(exc)
-                    job.updated_at = utcnow()
-                    session.add(job)
-                    session.commit()
+            try:
+                with Session(engine) as session:
+                    job = session.get(CensusDownloadJob, job_id)
+                    if job:
+                        job.status = "error"
+                        job.error_message = str(exc)
+                        job.updated_at = utcnow()
+                        session.add(job)
+                        safe_session_commit(session)
+            except Exception:
+                pass
             await ws_manager.broadcast(
                 "state",
                 {
@@ -681,15 +684,18 @@ async def _download_and_process_single_census_sheet_wrapped(
     except Exception as exc:
         slovakiana_key = None
         sheet_label = str(sheet_id)
-        with Session(engine) as err_session:
-            err_sheet = err_session.get(CensusSheet, sheet_id)
-            if err_sheet:
-                slovakiana_key = err_sheet.slovakiana_key
-                sheet_label = f"{err_sheet.municipality or ''} č. {err_sheet.house_number or err_sheet.sheet_number or slovakiana_key}".strip()
-                err_sheet.download_status = "error"
-                err_sheet.error_message = str(exc)[:500]
-                err_session.add(err_sheet)
-                err_session.commit()
+        try:
+            with Session(engine) as err_session:
+                err_sheet = err_session.get(CensusSheet, sheet_id)
+                if err_sheet:
+                    slovakiana_key = err_sheet.slovakiana_key
+                    sheet_label = f"{err_sheet.municipality or ''} č. {err_sheet.house_number or err_sheet.sheet_number or slovakiana_key}".strip()
+                    err_sheet.download_status = "error"
+                    err_sheet.error_message = str(exc)[:500]
+                    err_session.add(err_sheet)
+                    safe_session_commit(err_session)
+        except Exception:
+            pass
         await ws_manager.broadcast(
             "sheet_updated",
             {
@@ -1207,31 +1213,40 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
             )
         except Exception as exc:
             failed += 1
-            with Session(engine) as session:
-                sh = session.get(CensusSheet, sheet.id)
-                if sh:
-                    sh.download_status = "error"
-                    sh.error_message = str(exc)
-                    session.add(sh)
-                    session.commit()
+            try:
+                with Session(engine) as session:
+                    sh = session.get(CensusSheet, sheet.id)
+                    if sh:
+                        sh.download_status = "error"
+                        sh.error_message = str(exc)[:500]
+                        session.add(sh)
+                        safe_session_commit(session)
+            except Exception:
+                pass
 
+        try:
+            with Session(engine) as session:
+                job = session.get(CensusDownloadJob, job_id)
+                if job:
+                    job.completed_items = processed
+                    job.failed_items = failed
+                    job.updated_at = utcnow()
+                    session.add(job)
+                    safe_session_commit(session)
+        except Exception:
+            pass
+
+    was_not_paused = _ACTIVE_JOB_FLAGS.get(job_id, True)
+    try:
         with Session(engine) as session:
             job = session.get(CensusDownloadJob, job_id)
             if job:
-                job.completed_items = processed
-                job.failed_items = failed
+                job.status = "completed" if was_not_paused else "paused"
                 job.updated_at = utcnow()
                 session.add(job)
-                session.commit()
-
-    was_not_paused = _ACTIVE_JOB_FLAGS.get(job_id, True)
-    with Session(engine) as session:
-        job = session.get(CensusDownloadJob, job_id)
-        if job:
-            job.status = "completed" if was_not_paused else "paused"
-            job.updated_at = utcnow()
-            session.add(job)
-            session.commit()
+                safe_session_commit(session)
+    except Exception:
+        pass
 
     _ACTIVE_JOB_FLAGS.pop(job_id, None)
     _ACTIVE_JOB_RUNTIME.pop(job_id, None)

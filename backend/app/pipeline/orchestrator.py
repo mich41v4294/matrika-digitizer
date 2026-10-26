@@ -20,7 +20,7 @@ from backend.app.db.models import (
     ScanImage,
     WorkflowTrace,
 )
-from backend.app.db.session import engine
+from backend.app.db.session import engine, ensure_session_write_unlocked, safe_session_commit
 from backend.app.mcp.familysearch_client import fs_mcp_manager
 from backend.app.pipeline.census_layout import (
     detect_is_municipal_overview_sheet,
@@ -726,10 +726,14 @@ async def _process_single_scan_pipeline_inner(
                 "detected_type": scan.detected_type,
             }
         except Exception as exc:
-            scan.status = "error"
-            scan.error_message = str(exc)[:500]
-            session.add(scan)
-            session.commit()
+            try:
+                session.rollback()
+                scan.status = "error"
+                scan.error_message = str(exc)[:500]
+                session.add(scan)
+                safe_session_commit(session)
+            except Exception:
+                pass
             err_sk = f"Chyba pri spracovaní {scan.filename}: {exc}"
             err_en = f"Error processing {scan.filename}: {exc}"
             await ws_manager.broadcast(
@@ -1200,9 +1204,13 @@ async def _process_batch_stage_queued_inner(
                 "facts_extracted": len(all_facts),
             }
         except Exception as exc:
-            batch.status = "error"
-            session.add(batch)
-            session.commit()
+            try:
+                session.rollback()
+                batch.status = "error"
+                session.add(batch)
+                safe_session_commit(session)
+            except Exception:
+                pass
             err_sk = f"Chyba pri spracovaní dávky '{batch.name}': {exc}"
             err_en = f"Error processing batch '{batch.name}': {exc}"
             await ws_manager.broadcast(
@@ -1310,14 +1318,22 @@ async def _process_census_sheet_pipeline_wrapped(
             overview_only=overview_only,
         )
     except Exception as exc:
-        with Session(engine) as err_session:
-            err_sheet = err_session.get(CensusSheet, sheet_id)
-            sheet_ctx = _sheet_context_dict(err_sheet)
-            if err_sheet:
-                err_sheet.download_status = "error"
-                err_sheet.error_message = str(exc)[:500]
-                err_session.add(err_sheet)
-                err_session.commit()
+        sheet_ctx: dict[str, Any] = {
+            "current_sheet_id": sheet_id,
+            "current_slovakiana_key": None,
+            "current_sheet_label": str(sheet_id),
+        }
+        try:
+            with Session(engine) as err_session:
+                err_sheet = err_session.get(CensusSheet, sheet_id)
+                sheet_ctx = _sheet_context_dict(err_sheet)
+                if err_sheet:
+                    err_sheet.download_status = "error"
+                    err_sheet.error_message = str(exc)[:500]
+                    err_session.add(err_sheet)
+                    safe_session_commit(err_session)
+        except Exception:
+            pass
         err_sk = f"Chyba pri spracovaní hárku ({sheet_ctx.get('current_sheet_label') or sheet_id}): {exc}"
         err_en = f"Error processing census sheet ({sheet_ctx.get('current_sheet_label') or sheet_id}): {exc}"
         await ws_manager.broadcast(

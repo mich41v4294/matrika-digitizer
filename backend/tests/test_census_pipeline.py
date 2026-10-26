@@ -3438,6 +3438,166 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 ["cair-owner-h7", "cair-owner-h8"],
             )
 
+    def test_overview_extraction_does_not_deadlock_sqlite_with_trace_persistence(self) -> None:
+        """
+        Regression test: When extracting an overview sheet (or municipal overview sheet) on a
+        file-backed SQLite database, `session` must never hold an uncommitted autoflushed write
+        transaction while `ai_client.chat_completion` persists `WorkflowTrace` in a separate
+        thread/session (`sqlite3.OperationalError: database is locked`).
+        """
+        import asyncio
+        import tempfile
+        from unittest.mock import patch
+        import cv2
+        import numpy as np
+        from sqlalchemy import event
+        from backend.app.config import settings
+        from backend.app.db.models import CensusOverviewHouse, ScanImage, WorkflowTrace
+        from backend.app.db.session import _set_sqlite_pragma
+        from backend.app.pipeline.ai_client import ai_client
+        from backend.app.pipeline.extraction_stage import extract_census_overview_sheet
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            db_file = tmp_path / "lock_regression.db"
+            crops_dir = tmp_path / "crops"
+            crops_dir.mkdir(parents=True, exist_ok=True)
+            scan_path = tmp_path / "ov_front.jpg"
+
+            w, h = 1600, 1200
+            synth_img = np.full((h, w, 3), 245, dtype=np.uint8)
+            cv2.line(synth_img, (40, 420), (w - 40, 420), (15, 15, 15), 6)
+            for r_i in range(1, 4):
+                y_line = 420 + r_i * 60
+                cv2.line(synth_img, (40, y_line), (w - 40, y_line), (70, 70, 70), 2)
+            for r_i in range(2):
+                ry = 420 + r_i * 60 + 38
+                hn = r_i + 1
+                cv2.putText(synth_img, f"{hn}. Topolcany {hn}", (int(w * 0.06), ry), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (10, 10, 10), 2)
+                cv2.putText(synth_img, f"Jan Kovac {hn}", (int(w * 0.48), ry), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (10, 10, 10), 3)
+                cv2.putText(synth_img, "1  4", (int(w * 0.74), ry), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (10, 10, 10), 2)
+            cv2.imwrite(str(scan_path), synth_img)
+
+            # Use a short 1-second timeout so any self-deadlock between `session` and `_persist_trace` fails immediately
+            file_engine = create_engine(
+                f"sqlite:///{db_file}",
+                connect_args={"check_same_thread": False, "timeout": 1},
+            )
+            event.listen(file_engine, "connect", _set_sqlite_pragma)
+            SQLModel.metadata.create_all(file_engine)
+            ensure_fts_schema(file_engine)
+
+            with Session(file_engine) as session:
+                sheet = CensusSheet(
+                    id=408,
+                    slovakiana_key="cair-lock-408",
+                    census_year=1930,
+                    district="Topoľčany",
+                    municipality="topoľčany",  # Lowercase triggers canonical_municipality_display update on `sheet`!
+                    sheet_type="overview",
+                    download_status="downloaded",
+                    has_images=True,
+                )
+                session.add(sheet)
+                session.commit()
+
+                front_scan = ScanImage(
+                    batch_id=1,
+                    census_sheet_id=408,
+                    page_side="front",
+                    filename="cair-lock-408_front.jpg",
+                    original_path=str(scan_path),
+                    detected_year="1930",
+                    detected_type="census",
+                    status="uploaded",
+                )
+                session.add(front_scan)
+                session.commit()
+                session.refresh(front_scan)
+                sheet.front_scan_id = front_scan.id
+                session.add(sheet)
+                session.commit()
+
+            class _FakeResp:
+                status_code = 200
+
+                def raise_for_status(self) -> None:
+                    pass
+
+                def json(self) -> dict[str, object]:
+                    # Return a garbled owner on table recognition so the `extract` LLM stage is also invoked!
+                    return {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": '{"ordinal_number": "1", "settlement_name": "Topoľčany", "house_number": "1", "is_inhabited": true, "owner_name": "Ján Kováč", "household_count": 1, "present_persons_count": 4}'
+                                }
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+                    }
+
+            class _FakeHttpClient:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                async def post(self, *args: object, **kwargs: object) -> _FakeResp:
+                    self.calls += 1
+                    payload = kwargs.get("json") or {}
+                    msgs = payload.get("messages") if isinstance(payload, dict) else []
+                    is_extract = any(
+                        isinstance(m, dict) and m.get("role") == "system" and "Prehľad sčítacieho obvodu" in str(m.get("content") or "")
+                        for m in (msgs or [])
+                    )
+                    if not is_extract:
+                        class _OcrResp(_FakeResp):
+                            def json(self) -> dict[str, object]:
+                                return {
+                                    "choices": [
+                                        {
+                                            "message": {
+                                                "content": "<table><tr><td>1.</td><td>Topoľčany</td><td>1</td><td>obývaný</td><td>—</td><td>1</td><td>4</td></tr></table>"
+                                            }
+                                        }
+                                    ],
+                                    "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+                                }
+                        return _OcrResp()
+                    return _FakeResp()
+
+            with (
+                patch("backend.app.pipeline.ai_client.engine", file_engine),
+                patch.object(ai_client, "_get_http_client", return_value=_FakeHttpClient()),
+                patch.object(settings, "crops_dir", crops_dir),
+                patch("backend.app.pipeline.ocr_stage.settings.crops_dir", crops_dir),
+            ):
+                with Session(file_engine) as session:
+                    sh = session.get(CensusSheet, 408)
+                    sc = session.get(ScanImage, sh.front_scan_id) if sh else None
+                    assert sh is not None and sc is not None
+                    houses = asyncio.run(
+                        extract_census_overview_sheet(
+                            session,
+                            sh,
+                            sc,
+                            None,
+                            force_district_overview=True,
+                        )
+                    )
+                    self.assertGreaterEqual(len(houses), 1)
+
+                with Session(file_engine) as session:
+                    sh_after = session.get(CensusSheet, 408)
+                    self.assertIsNotNone(sh_after)
+                    self.assertEqual(sh_after.download_status, "extracted")  # type: ignore[union-attr]
+                    traces = session.exec(select(WorkflowTrace)).all()
+                    self.assertGreater(len(traces), 0)
+                    ov_rows = session.exec(
+                        select(CensusOverviewHouse).where(CensusOverviewHouse.census_sheet_id == 408)
+                    ).all()
+                    self.assertGreaterEqual(len(ov_rows), 1)
+            file_engine.dispose()
+
 
 if __name__ == "__main__":
     unittest.main()

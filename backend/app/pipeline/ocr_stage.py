@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 
 from backend.app.config import settings
 from backend.app.db.models import RecordRow, ScanImage
+from backend.app.db.session import ensure_session_write_unlocked, safe_session_commit
 from backend.app.pipeline.ai_client import ai_client
 from backend.app.pipeline.census_layout import (
     detect_is_municipal_overview_sheet,
@@ -310,6 +311,7 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
         sheet and (sheet.sheet_type in ("overview", "municipal_overview") or not sheet.house_number)
     )
     hdr_prompt = "Text Recognition:" if is_overview_or_unnumbered else "Table Recognition:"
+    ensure_session_write_unlocked(session)
     res = await ai_client.chat_completion(
         stage="ocr_header",
         model=settings.model_ocr,
@@ -387,10 +389,11 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
             persist_report=False,
         )
     session.add(scan)
-    session.commit()
+    safe_session_commit(session)
 
 
 async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> dict[str, Any]:
+    ensure_session_write_unlocked(session)
     left_path = media_rel_to_path(row.left_crop_path)
     right_path = media_rel_to_path(row.right_crop_path)
 
@@ -594,5 +597,5 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
     from backend.app.pipeline.feedback import reset_ocr_feedback
 
     reset_ocr_feedback(session, row_id=row.id, commit=False, persist_report=False)
-    session.commit()
+    safe_session_commit(session)
     return {"left": left_text, "right": right_text}

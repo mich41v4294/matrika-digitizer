@@ -18,7 +18,7 @@ settings.ensure_dirs()
 sqlite_url = f"sqlite:///{settings.db_path}"
 engine = create_engine(
     sqlite_url,
-    connect_args={"check_same_thread": False, "timeout": 30},
+    connect_args={"check_same_thread": False, "timeout": 60},
 )
 
 
@@ -47,6 +47,7 @@ def _set_sqlite_pragma(dbapi_connection: Any, _connection_record: Any) -> None:
         except Exception:
             pass
     try:
+        cursor.execute("PRAGMA busy_timeout=60000;")
         cursor.execute("PRAGMA synchronous=NORMAL;")
         cursor.execute("PRAGMA temp_store=MEMORY;")
         cursor.execute("PRAGMA cache_size=-64000;")
@@ -54,6 +55,60 @@ def _set_sqlite_pragma(dbapi_connection: Any, _connection_record: Any) -> None:
     except Exception:
         pass
     cursor.close()
+
+
+def ensure_session_write_unlocked(session: Session | None) -> None:
+    """
+    Ensures `session` is not holding an uncommitted SQLite write transaction (`in_transaction == True`)
+    before an `await` or out-of-session write (such as `ai_client._persist_trace()` or `fs_mcp_manager.call_tool()`).
+    Prevents self-deadlocking `sqlite3.OperationalError: database is locked` when SQLAlchemy autoflush
+    pushed pending changes to SQLite prior to an async network/model call.
+    """
+    if session is None:
+        return
+    try:
+        if session.new or session.dirty or session.deleted:
+            session.commit()
+            return
+        if session.in_transaction():
+            conn = session.connection()
+            raw_conn = getattr(getattr(conn, "connection", None), "dbapi_connection", None)
+            if raw_conn is not None and getattr(raw_conn, "in_transaction", False):
+                session.commit()
+    except Exception:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+
+
+def safe_session_commit(
+    session: Session,
+    *,
+    retries: int = 5,
+    base_delay_sec: float = 0.15,
+) -> bool:
+    """
+    Commits `session` with automatic retry/backoff on transient `sqlite3.OperationalError: database is locked`.
+    Returns True if the commit succeeded, or raises the final exception if all retries fail.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max(1, retries)):
+        try:
+            session.commit()
+            return True
+        except Exception as exc:
+            last_exc = exc
+            if "database is locked" not in str(exc).lower() or attempt == retries - 1:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+                raise
+            time.sleep(base_delay_sec * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc
+    return False
 
 
 _SAFE_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {

@@ -20,6 +20,7 @@ from backend.app.db.models import (
     ScanImage,
     WorkflowTrace,
 )
+from backend.app.db.session import ensure_session_write_unlocked, safe_session_commit
 from backend.app.pipeline.ai_client import ai_client
 from backend.app.pipeline.ocr_stage import media_rel_to_path, resolve_row_extraction_crop
 from backend.app.pipeline.census_layout import (
@@ -702,7 +703,7 @@ async def run_extraction_for_row(
         extract_image_path, extract_image_rel = await asyncio.to_thread(
             resolve_row_extraction_crop, row
         )
-
+        ensure_session_write_unlocked(session)
         res = await ai_client.chat_completion(
             stage="extract",
             model=settings.model_extract,
@@ -797,7 +798,7 @@ async def run_extraction_for_row(
 
     reset_ocr_feedback(session, row_id=row.id, person_fact_id=fact.id, commit=False, persist_report=False)
     index_person_fact(session, fact)
-    session.commit()
+    safe_session_commit(session)
     session.refresh(fact)
     return fact
 
@@ -1771,7 +1772,7 @@ async def run_census_extraction_for_row(
             extract_image_path, extract_image_rel = await asyncio.to_thread(
                 resolve_row_extraction_crop, row
             )
-
+            ensure_session_write_unlocked(session)
             res = await ai_client.chat_completion(
                 stage="extract",
                 model=settings.model_extract,
@@ -2220,7 +2221,7 @@ async def run_census_extraction_for_row(
 
     reset_ocr_feedback(session, row_id=row.id, person_fact_id=fact.id, commit=False, persist_report=False)
     index_person_fact(session, fact)
-    session.commit()
+    safe_session_commit(session)
     session.refresh(fact)
     return fact
 
@@ -6006,6 +6007,7 @@ async def _extract_census_overview_sheet_locked(
         sheet.municipality = canonical_municipality_display(sheet.municipality) or sheet.municipality
         sheet.municipality_folded = canonical_municipality_key(sheet.municipality)
         session.add(sheet)
+        safe_session_commit(session)
     muni_canon = canonical_municipality_key(sheet.municipality)
     candidate_sheets = session.exec(
         select(CensusSheet).where(
@@ -6126,6 +6128,7 @@ async def _extract_census_overview_sheet_locked(
             if cached_h and ("prehľad" in cached_h.lower() or "prehlad" in cached_h.lower() or "komisár" in cached_h.lower() or "komisar" in cached_h.lower()):
                 h_text = html_table_to_pipe_text(cached_h)
             elif h_path and h_path.exists():
+                ensure_session_write_unlocked(session)
                 res_h = await ai_client.chat_completion(
                     stage="ocr_header",
                     model=settings.model_ocr,
@@ -6210,6 +6213,7 @@ async def _extract_census_overview_sheet_locked(
             if cached_row_ocr and can_reuse_row_cache:
                 combined_ocr = cached_row_ocr
             elif l_path and l_path.exists():
+                ensure_session_write_unlocked(session)
                 res_l = await ai_client.chat_completion(
                     stage="ocr_left",
                     model=settings.model_ocr,
@@ -6255,6 +6259,7 @@ async def _extract_census_overview_sheet_locked(
                     right_ocr = cached_r_ocr
                 else:
                     # Use Text Recognition on the focused Cols 6..8 (Owner + Counts) crop first
+                    ensure_session_write_unlocked(session)
                     res_r = await ai_client.chat_completion(
                         stage="ocr_right",
                         model=settings.model_ocr,
@@ -6267,6 +6272,7 @@ async def _extract_census_overview_sheet_locked(
                     )
                     right_ocr = html_table_to_pipe_text(res_r["content"]).strip(" |")
                 if not right_ocr and r_path and r_path.exists():
+                    ensure_session_write_unlocked(session)
                     res_rt = await ai_client.chat_completion(
                         stage="ocr_right",
                         model=settings.model_ocr,
@@ -6279,6 +6285,7 @@ async def _extract_census_overview_sheet_locked(
                     )
                     right_ocr = html_table_to_pipe_text(res_rt["content"]).strip(" |")
                 if not right_ocr and l_path and l_path.exists():
+                    ensure_session_write_unlocked(session)
                     res_txt = await ai_client.chat_completion(
                         stage="ocr_left",
                         model=settings.model_ocr,
@@ -6376,7 +6383,7 @@ async def _extract_census_overview_sheet_locked(
 
         parsed: dict[str, Any] = {}
         if (not heur.get("owner_name") and not heur.get("has_owner_ditto")) or _is_garbled_or_english_owner_ocr(heur.get("owner_name")):
-            session.commit()
+            ensure_session_write_unlocked(session)
             skip_row_text_ocr = bool(settings.get_feature_flags().get("skip_row_ocr", True))
             ov_r_path = media_rel_to_path(r_info.right_crop_rel) if getattr(r_info, "right_crop_rel", None) else None
             ov_l_path = media_rel_to_path(r_info.left_crop_rel) if getattr(r_info, "left_crop_rel", None) else None
@@ -7252,6 +7259,7 @@ async def _extract_census_municipal_overview_sheet_locked(
         sheet.municipality = canonical_municipality_display(sheet.municipality) or sheet.municipality
         sheet.municipality_folded = canonical_municipality_key(sheet.municipality)
         session.add(sheet)
+        safe_session_commit(session)
 
     raw_ocr_items: list[tuple[int, int, int, ScanImage, Any, RecordRow, str]] = []
     all_scan_record_rows: list[RecordRow] = []
@@ -7361,6 +7369,7 @@ async def _extract_census_municipal_overview_sheet_locked(
                 else {"revisor_name": None}
             )
             if (not h_text or not meta.get("revisor_name")) and h_path and h_path.exists():
+                ensure_session_write_unlocked(session)
                 res_h = await ai_client.chat_completion(
                     stage="ocr_header",
                     model=settings.model_ocr,
@@ -7438,6 +7447,7 @@ async def _extract_census_municipal_overview_sheet_locked(
             if cached_row_ocr and can_reuse_row_cache:
                 combined_ocr = cached_row_ocr
             elif l_path and l_path.exists():
+                ensure_session_write_unlocked(session)
                 res_l = await ai_client.chat_completion(
                     stage="ocr_left",
                     model=settings.model_ocr,
@@ -7451,6 +7461,7 @@ async def _extract_census_municipal_overview_sheet_locked(
                 combined_ocr = html_table_to_pipe_text(res_l["content"]).strip(" |")
 
             if not combined_ocr and r_path and r_path.exists():
+                ensure_session_write_unlocked(session)
                 res_r = await ai_client.chat_completion(
                     stage="ocr_right",
                     model=settings.model_ocr,
@@ -7549,7 +7560,7 @@ async def _extract_census_municipal_overview_sheet_locked(
             or heur.get("houses_inhabited") is None
             or heur.get("present_persons_count") is None
         ):
-            session.commit()
+            ensure_session_write_unlocked(session)
             prompt = (
                 f"Transcribe row #{seq_district_idx + 1} of Obecný prehľad (Municipality: {sheet.municipality or 'Unknown'}).\n"
                 f"Heuristic hints: obvod={heur.get('obvod_number')}, commissioner={heur.get('commissioner_name')}, "

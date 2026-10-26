@@ -837,7 +837,7 @@ class FamilySearchMcpManager:
         duration_ms = int((finished - started).total_seconds() * 1000)
 
         try:
-            from backend.app.db.session import engine
+            from backend.app.db.session import engine, safe_session_commit
 
             with Session(engine) as db:
                 trace = WorkflowTrace(
@@ -852,7 +852,7 @@ class FamilySearchMcpManager:
                     duration_ms=duration_ms,
                 )
                 db.add(trace)
-                db.commit()
+                safe_session_commit(db)
         except Exception:
             pass
 
@@ -1106,6 +1106,8 @@ class FamilySearchMcpManager:
         default_country = "Czechoslovakia" if is_census else "Hungary"
         year_int = int(fact.event_year or (1930 if is_census else 1884))
 
+        from backend.app.db.session import ensure_session_write_unlocked, safe_session_commit
+
         place_res: dict[str, Any] = {}
         if place_query:
             cached_q = (_load_regional_places_cache().get("queries") or {}).get(
@@ -1119,6 +1121,7 @@ class FamilySearchMcpManager:
                     if any(c in place_query.lower() for c in ("hungary", "czechoslovakia", "slovakia", "slovensko"))
                     else f"{place_query}, {default_country}"
                 )
+                ensure_session_write_unlocked(session)
                 place_res = await self.call_tool(
                     "search_places_at_date",
                     {"name": query_with_country, "year": year_int},
@@ -1231,6 +1234,7 @@ class FamilySearchMcpManager:
         search_res: dict[str, Any] | None = None
         harvest_res: dict[str, Any] | None = None
         best: dict[str, Any] | None = None
+        ensure_session_write_unlocked(session)
         token_valid, _ = await self.ensure_valid_token()
         should_query_records = token_valid and self._should_query_mcp_records()
         search_had_auth_error = False
@@ -1258,6 +1262,7 @@ class FamilySearchMcpManager:
                 search_args["spouse_given"] = spouse_given
             if spouse_surname:
                 search_args["spouse_surname"] = spouse_surname
+            ensure_session_write_unlocked(session)
             search_res = await self.call_tool(
                 "search_records",
                 search_args,
@@ -1286,6 +1291,7 @@ class FamilySearchMcpManager:
                 results if isinstance(results, list) else None
             )
             if not is_census and not search_had_auth_error and fs_name_cache_size(area_key, year_int) < 15:
+                ensure_session_write_unlocked(session)
                 harvest_res = await self.call_tool(
                     "search_records",
                     {
@@ -1442,6 +1448,8 @@ class FamilySearchMcpManager:
                 session=session,
             )
 
+        from backend.app.db.session import ensure_session_write_unlocked, safe_session_commit
+
         try:
             household = session.exec(
                 select(CensusHousehold).where(CensusHousehold.census_sheet_id == sheet.id)
@@ -1456,6 +1464,7 @@ class FamilySearchMcpManager:
                 if isinstance(cached_q, list) and cached_q:
                     place_res = {"places": cached_q}
                 else:
+                    ensure_session_write_unlocked(session)
                     place_res = await self.call_tool(
                         "search_places_at_date",
                         {"name": f"{place_query}, Czechoslovakia", "year": sheet.census_year},
@@ -1570,6 +1579,7 @@ class FamilySearchMcpManager:
                         search_args["spouse_given"] = spouse_given
                     if spouse_surname:
                         search_args["spouse_surname"] = spouse_surname
+                    ensure_session_write_unlocked(session)
                     search_res = await self.call_tool(
                         "search_records",
                         search_args,

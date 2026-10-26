@@ -18,7 +18,7 @@ from sqlmodel import Session
 
 from backend.app.config import settings
 from backend.app.db.models import WorkflowTrace
-from backend.app.db.session import engine
+from backend.app.db.session import engine, safe_session_commit
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -952,27 +952,30 @@ class LocalAIClient:
         parsed_json_str = json.dumps(parsed, ensure_ascii=False)
 
         def _persist_trace() -> int | None:
-            with Session(engine) as session:
-                trace = WorkflowTrace(
-                    scan_id=scan_id,
-                    row_id=row_id,
-                    stage=stage,
-                    model_or_tool=f"{provider}:{active_model}",
-                    prompt_text=prompt_text_final,
-                    image_path=image_rel_url,
-                    reasoning_content=reasoning,
-                    response_text=content,
-                    parsed_json=parsed_json_str,
-                    status=status,
-                    duration_ms=duration_ms,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                )
-                session.add(trace)
-                session.commit()
-                session.refresh(trace)
-                return trace.id
+            try:
+                with Session(engine) as session:
+                    trace = WorkflowTrace(
+                        scan_id=scan_id,
+                        row_id=row_id,
+                        stage=stage,
+                        model_or_tool=f"{provider}:{active_model}",
+                        prompt_text=prompt_text_final,
+                        image_path=image_rel_url,
+                        reasoning_content=reasoning,
+                        response_text=content,
+                        parsed_json=parsed_json_str,
+                        status=status,
+                        duration_ms=duration_ms,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        reasoning_tokens=reasoning_tokens,
+                    )
+                    session.add(trace)
+                    safe_session_commit(session)
+                    session.refresh(trace)
+                    return trace.id
+            except Exception:
+                return None
 
         trace_id = await asyncio.to_thread(_persist_trace)
 

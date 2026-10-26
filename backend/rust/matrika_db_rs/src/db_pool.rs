@@ -58,10 +58,11 @@ impl Drop for PooledConnection {
 }
 
 fn configure_new_connection(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.busy_timeout(Duration::from_secs(30))?;
+    conn.busy_timeout(Duration::from_secs(60))?;
     conn.set_prepared_statement_cache_capacity(128);
     let _ = conn.execute_batch(
-        "PRAGMA synchronous=NORMAL;
+        "PRAGMA busy_timeout=60000;
+         PRAGMA synchronous=NORMAL;
          PRAGMA temp_store=MEMORY;
          PRAGMA cache_size=-64000;
          PRAGMA mmap_size=0;",

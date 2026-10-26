@@ -84,6 +84,7 @@ from .shape import (
     relatives,
     search_hits,
     source_descriptions,
+    tree_search_hits,
     waypoints,
 )
 
@@ -2144,6 +2145,154 @@ async def get_collection(
             "id": cid,
             "coverage": collection_descriptions(payload),
             "links": links(found[0]),
+        }
+    except Exception as exc:  # noqa: BLE001 - surfaced as structured error
+        return _error(exc)
+
+
+@_tree_tool
+async def search_tree_persons(
+    given: str = Field(default="", description="Given name(s) of the person sought in the Family Tree."),
+    surname: str = Field(
+        default="",
+        description="Surname of the person sought in the Family Tree (required by FamilySearch Tree Search).",
+    ),
+    alternate_surnames: list[str] = Field(
+        default=[],
+        description="Optional alternate surnames (e.g. masculine stem without -ová or maiden surname) searched via q.surname.1, q.surname.2.",
+    ),
+    sex: str = Field(default="", description="Male or Female."),
+    birth_year: int | None = Field(default=None, description="Approximate birth or christening year."),
+    birth_year_span: int = Field(
+        default=2,
+        description="Years +/- around birth_year for q.birthLikeDate.from / .to (0-10).",
+    ),
+    birth_place: str = Field(default="", description="Birth or christening place."),
+    death_year: int | None = Field(default=None, description="Approximate death or burial year."),
+    death_place: str = Field(default="", description="Death or burial place."),
+    marriage_year: int | None = Field(default=None, description="Approximate marriage year."),
+    marriage_place: str = Field(default="", description="Marriage place."),
+    residence_year: int | None = Field(default=None, description="Approximate residence year."),
+    residence_place: str = Field(default="", description="Residence place."),
+    spouse_given: str = Field(default="", description="Spouse's given name(s)."),
+    spouse_surname: str = Field(default="", description="Spouse's surname."),
+    father_given: str = Field(default="", description="Father's given name(s)."),
+    father_surname: str = Field(default="", description="Father's surname."),
+    mother_given: str = Field(default="", description="Mother's given name(s)."),
+    mother_surname: str = Field(default="", description="Mother's maiden surname."),
+    exact: bool = Field(
+        default=False,
+        description="Require exact name and place matching (.exact=on).",
+    ),
+    count: int = Field(default=20, description="Maximum tree persons to return (1-100)."),
+    offset: int = Field(default=0, description="Results to skip (0-4999)."),
+) -> dict:
+    """Search the FamilySearch shared Family Tree (`/platform/tree/search`) for person profiles.
+
+    Unlike `search_records` (which searches indexed historical documents and returns
+    `1:1:` record persona ARKs), this tool searches actual FamilySearch Family Tree
+    person profiles (`4:1:XXXX-YYY`, e.g. `LD9Q-GJ7`), whose profile URL is
+    `https://www.familysearch.org/tree/person/XXXX-YYY`.
+    """
+    try:
+        clean_surname = surname.strip()
+        clean_alts = [s.strip() for s in (alternate_surnames or []) if s and s.strip() and s.strip() != clean_surname]
+        if not clean_surname and clean_alts:
+            clean_surname = clean_alts.pop(0)
+        if not clean_surname:
+            return {
+                "error": "surname_required",
+                "message": "FamilySearch Tree Person Search (/platform/tree/search) requires a surname (q.surname).",
+            }
+        if not 0 <= offset <= SEARCH_OFFSET_MAX:
+            return {
+                "error": "offset_out_of_range",
+                "message": f"offset must be 0 to {SEARCH_OFFSET_MAX}.",
+            }
+
+        params: dict[str, Any] = {}
+        clean_given = given.strip()
+        if clean_given:
+            params["q.givenName"] = clean_given
+            if exact:
+                params["q.givenName.exact"] = "on"
+        params["q.surname"] = clean_surname
+        if exact:
+            params["q.surname.exact"] = "on"
+
+        seen_surnames = {clean_surname.lower()}
+        card_idx = 1
+        for alt_s in clean_alts:
+            if alt_s.lower() in seen_surnames or card_idx > 3:
+                continue
+            seen_surnames.add(alt_s.lower())
+            if clean_given:
+                params[f"q.givenName.{card_idx}"] = clean_given
+            params[f"q.surname.{card_idx}"] = alt_s
+            card_idx += 1
+
+        sex_clean = sex.strip().lower()
+        if sex_clean in ("m", "male", "muž", "muz"):
+            params["q.sex"] = "Male"
+        elif sex_clean in ("f", "female", "žena", "zena"):
+            params["q.sex"] = "Female"
+
+        if birth_year is not None:
+            span = max(0, min(10, int(birth_year_span)))
+            params["q.birthLikeDate.from"] = f"+{int(birth_year) - span}"
+            params["q.birthLikeDate.to"] = f"+{int(birth_year) + span}"
+        if birth_place.strip():
+            params["q.birthLikePlace"] = birth_place.strip()
+            if exact:
+                params["q.birthLikePlace.exact"] = "on"
+
+        if death_year is not None:
+            params["q.deathLikeDate.from"] = f"+{int(death_year) - 2}"
+            params["q.deathLikeDate.to"] = f"+{int(death_year) + 2}"
+        if death_place.strip():
+            params["q.deathLikePlace"] = death_place.strip()
+
+        if marriage_year is not None:
+            params["q.marriageLikeDate.from"] = f"+{int(marriage_year) - 2}"
+            params["q.marriageLikeDate.to"] = f"+{int(marriage_year) + 2}"
+        if marriage_place.strip():
+            params["q.marriageLikePlace"] = marriage_place.strip()
+
+        if residence_place.strip():
+            params["q.residencePlace"] = residence_place.strip()
+        if residence_year is not None:
+            params["q.residenceDate.from"] = f"+{int(residence_year) - 1}"
+            params["q.residenceDate.to"] = f"+{int(residence_year) + 1}"
+
+        if father_given.strip():
+            params["q.fatherGivenName"] = father_given.strip()
+        if father_surname.strip():
+            params["q.fatherSurname"] = father_surname.strip()
+        if mother_given.strip():
+            params["q.motherGivenName"] = mother_given.strip()
+        if mother_surname.strip():
+            params["q.motherSurname"] = mother_surname.strip()
+        if spouse_given.strip():
+            params["q.spouseGivenName"] = spouse_given.strip()
+        if spouse_surname.strip():
+            params["q.spouseSurname"] = spouse_surname.strip()
+
+        params["count"] = max(1, min(int(count), 100))
+        if offset > 0:
+            params["offset"] = int(offset)
+
+        client = await state.client_()
+        payload = await client.get(
+            "/platform/tree/search",
+            accept=GEDCOMX_ATOM_JSON,
+            params=params,
+        )
+        hits = tree_search_hits(payload)
+        return {
+            "returned": len(hits),
+            "total": payload.get("results"),
+            "query_sent": params,
+            "results": hits,
         }
     except Exception as exc:  # noqa: BLE001 - surfaced as structured error
         return _error(exc)

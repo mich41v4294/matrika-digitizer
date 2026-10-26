@@ -115,6 +115,7 @@ interface FsMatchItem {
   match_status?: string;
   reviewed_by_user?: boolean;
   fs_person_id: string | null;
+  fs_record_ark?: string | null;
   selected_fs_person_ids?: string[];
   candidates?: FsMatchCandidate[];
   fs_person_name: string | null;
@@ -235,27 +236,11 @@ const FS_ID_TOKEN_RE = /\b([A-Z0-9]{4}-[A-Z0-9]{3,4})\b/g;
 
 function getFsIdClickthruUrl(
   fsId: string,
-  candidate?: { fs_url?: string | null; fs_record_ark?: string | null } | null
+  _candidate?: { fs_url?: string | null; fs_record_ark?: string | null } | null,
+  _fallbackRecordArk?: string | null
 ): string {
   const cleanId = String(fsId || "").trim().toUpperCase();
-  if (candidate?.fs_record_ark) {
-    const cleanArk = String(candidate.fs_record_ark).trim();
-    if (cleanArk.startsWith("https://")) return cleanArk;
-    if (cleanArk.includes("ark:/61903/")) {
-      return `https://www.familysearch.org/ark:/61903/${cleanArk.split("ark:/61903/")[1]}`;
-    }
-    if (/^\d+:\d+:/.test(cleanArk)) {
-      return `https://www.familysearch.org/ark:/61903/${cleanArk}`;
-    }
-  }
-  if (
-    candidate?.fs_url &&
-    candidate.fs_url.startsWith("https://") &&
-    !candidate.fs_url.includes("/search/record/results")
-  ) {
-    return candidate.fs_url;
-  }
-  return `https://www.familysearch.org/tree/person/details/${encodeURIComponent(cleanId)}`;
+  return `https://www.familysearch.org/tree/person/${encodeURIComponent(cleanId)}`;
 }
 
 function renderTextWithFsIdLinks(
@@ -1643,7 +1628,11 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                   <div className="flex flex-wrap items-center gap-1.5">
                     {selectedIds.map((pid) => {
                       const candForPid = candidatesById.get(pid.toUpperCase());
-                      const pidHref = getFsIdClickthruUrl(pid, candForPid);
+                      const pidHref = getFsIdClickthruUrl(
+                        pid,
+                        candForPid,
+                        pid === m.fs_person_id ? m.fs_record_ark : null
+                      );
                       return (
                         <a
                           key={pid}

@@ -166,10 +166,32 @@ REDACTED_NOTE = (
 
 
 _FS_PID_RE = re.compile(r"\b([A-Za-z0-9]{4}-[A-Za-z0-9]{3,4})\b")
+_RECORD_ARK_PREFIX_RE = re.compile(r"(?:ark:/61903/)?[123]:\d+:", re.IGNORECASE)
+_DISPLAY_NAME_FORM_RE = re.compile(r"nameForms\[0\]=([^,]+)")
 
 
-def extract_fs_identifier(entry: dict | None = None, *fallbacks: Any) -> str | None:
-    """Extract a canonical ``XXXX-YYY`` FamilySearch identifier from a person or hit."""
+def _clean_display_name(raw_name: Any) -> str | None:
+    if not raw_name:
+        return None
+    s = str(raw_name).strip()
+    if s.startswith("type=") and "nameForms[0]=" in s:
+        m = _DISPLAY_NAME_FORM_RE.search(s)
+        if m:
+            return m.group(1).strip() or None
+    return s or None
+
+
+def _clean_display_gender(raw_gender: Any) -> str | None:
+    if not raw_gender:
+        return None
+    s = str(raw_gender).strip()
+    if s.startswith("type="):
+        s = s.split("type=", 1)[1].split(",", 1)[0].strip()
+    return s or None
+
+
+def extract_tree_person_id(entry: dict | None = None, *fallbacks: Any) -> str | None:
+    """Extract a canonical ``XXXX-YYY`` FamilySearch Tree Person ID (`4:1:`), rejecting `1:1:`/`2:2:` record ARKs."""
     candidates: list[str] = []
     if isinstance(entry, dict):
         idents = entry.get("identifiers")
@@ -179,21 +201,43 @@ def extract_fs_identifier(entry: dict | None = None, *fallbacks: Any) -> str | N
                     candidates.extend(str(v) for v in vals if v)
                 elif vals:
                     candidates.append(str(vals))
+        person_link = ((entry.get("links") or {}).get("person") or {})
+        if isinstance(person_link, dict) and person_link.get("href"):
+            candidates.append(str(person_link["href"]))
         raw_id = str(entry.get("id") or "").strip()
-        if raw_id and not re.match(r"^[pr]_\d+$", raw_id, flags=re.IGNORECASE):
+        if (
+            raw_id
+            and raw_id != "primaryPerson"
+            and not re.match(r"^[pr]_\d+$", raw_id, flags=re.IGNORECASE)
+        ):
             candidates.append(raw_id)
     for fb in fallbacks:
         if fb:
             candidates.append(str(fb).strip())
     for raw in candidates:
+        if _RECORD_ARK_PREFIX_RE.search(raw):
+            continue
         cleaned = raw
-        if "ark:/61903/" in cleaned:
-            cleaned = cleaned.split("ark:/61903/", 1)[1]
-        cleaned = re.sub(r"^\d+:\d+:", "", cleaned.split("?", 1)[0].split("#", 1)[0].strip("/"))
+        if "ark:/61903/4:1:" in cleaned:
+            cleaned = cleaned.split("ark:/61903/4:1:", 1)[1]
+        elif "/tree/persons/" in cleaned:
+            cleaned = cleaned.split("/tree/persons/", 1)[1]
+        elif "/tree/person/details/" in cleaned:
+            cleaned = cleaned.split("/tree/person/details/", 1)[1]
+        elif "/tree/person/" in cleaned:
+            cleaned = cleaned.split("/tree/person/", 1)[1]
+        cleaned = cleaned.split("?", 1)[0].split("#", 1)[0].strip("/")
+        if cleaned.startswith("4:1:"):
+            cleaned = cleaned[4:]
+        if cleaned == "primaryPerson" or re.match(r"^[pr]_\d+$", cleaned, flags=re.IGNORECASE):
+            continue
         m = _FS_PID_RE.search(cleaned)
         if m:
             return m.group(1).upper()
     return None
+
+
+extract_fs_identifier = extract_tree_person_id
 
 
 def person(entry: dict) -> dict:
@@ -217,15 +261,12 @@ def person(entry: dict) -> dict:
     all_names = names(entry)
     facts = [fact(f) for f in entry.get("facts") or []]
     display = entry.get("display") or {}
-    fs_id = extract_fs_identifier(entry)
-    raw_id = entry.get("id")
-    eff_id = fs_id if (fs_id and (not raw_id or str(raw_id).startswith("p_"))) else (raw_id or fs_id)
     out = {
-        "id": eff_id,
-        "fs_id": fs_id or eff_id,
-        "name": person_name(entry) or display.get("name"),
+        "id": entry.get("id"),
+        "name": person_name(entry) or _clean_display_name(display.get("name")),
         "names": all_names,
-        "sex": humanize((entry.get("gender") or {}).get("type")) or display.get("gender"),
+        "sex": humanize((entry.get("gender") or {}).get("type"))
+        or _clean_display_gender(display.get("gender")),
         "lifespan": display.get("lifespan"),
         "living": entry.get("living"),
         "facts": facts,
@@ -519,16 +560,11 @@ def search_hits(payload: dict) -> list[dict]:
         principal = next((p for p in people if p.get("principal")), people[0])
         others = [person_name(p) for p in people if p is not principal]
         shaped_person = person(principal)
-        fs_id = extract_fs_identifier(principal, item.get("id"), shaped_person.get("id"))
-        if fs_id:
-            shaped_person["fs_id"] = fs_id
-            shaped_person["person_id"] = fs_id
-            if not shaped_person.get("id") or str(shaped_person.get("id")).startswith("p_"):
-                shaped_person["id"] = fs_id
         entry = {
             "score": item.get("score"),
             "confidence": item.get("confidence"),
             "ark": item.get("id"),
+            "id_kind": "record",
             **shaped_person,
         }
         entry.update(_hit_collection(content))
@@ -537,6 +573,119 @@ def search_hits(payload: dict) -> list[dict]:
             # Who else the record names. Often the reason it is the right
             # record.
             entry["also_on_this_record"] = named
+        out.append(entry)
+    return out
+
+
+def tree_search_hits(payload: dict) -> list[dict]:
+    """Flatten a ``GET /platform/tree/search`` GEDCOM X Atom response into Tree Person hits.
+
+    Each entry in ``/platform/tree/search`` represents a person in the
+    FamilySearch Shared Family Tree (`4:1:XXXX-YYY`), along with embedded
+    immediate relatives (parents, spouses, children) and relationships.
+    """
+    out: list[dict] = []
+    for item in payload.get("entries") or []:
+        if not isinstance(item, dict):
+            continue
+        content = (item.get("content") or {}).get("gedcomx") or {}
+        people = [p for p in content.get("persons") or [] if isinstance(p, dict)]
+        entry_id = str(item.get("id") or "").strip()
+        item_person_href = ((item.get("links") or {}).get("person") or {}).get("href")
+        principal = next(
+            (p for p in people if p.get("id") == entry_id or p.get("principal")),
+            people[0] if people else {},
+        )
+        person_id = extract_tree_person_id(principal, entry_id, item_person_href)
+        if not person_id:
+            continue
+
+        shaped_person = person(principal) if principal else {"id": person_id, "name": None, "names": [], "sex": None, "lifespan": None, "living": None, "facts": []}
+        display = (principal.get("display") or {}) if isinstance(principal, dict) else {}
+        existing_fact_types = {str(f.get("type") or "").lower() for f in shaped_person.get("facts") or [] if isinstance(f, dict)}
+        if (display.get("birthDate") or display.get("birthPlace")) and "birth" not in existing_fact_types:
+            shaped_person.setdefault("facts", []).append(
+                {
+                    "type": "Birth",
+                    "value": None,
+                    "date": display.get("birthDate"),
+                    "place": display.get("birthPlace"),
+                }
+            )
+        if (display.get("deathDate") or display.get("deathPlace")) and "death" not in existing_fact_types:
+            shaped_person.setdefault("facts", []).append(
+                {
+                    "type": "Death",
+                    "value": None,
+                    "date": display.get("deathDate"),
+                    "place": display.get("deathPlace"),
+                }
+            )
+
+        rels = relatives(content, person_id) if people else {"parents": [], "spouses": [], "children": [], "siblings": []}
+        parents = rels.get("parents") or []
+        spouses = rels.get("spouses") or []
+        children = rels.get("children") or []
+        father_name = next(
+            (
+                p.get("name")
+                for p in parents
+                if str(p.get("sex") or "").lower().startswith("m") and p.get("name")
+            ),
+            None,
+        )
+        mother_name = next(
+            (
+                p.get("name")
+                for p in parents
+                if str(p.get("sex") or "").lower().startswith("f") and p.get("name")
+            ),
+            None,
+        )
+        spouse_name = next((p.get("name") for p in spouses if p.get("name")), None)
+
+        other_names: list[str] = []
+        for p in people:
+            if p is principal or p.get("id") == person_id:
+                continue
+            nm = person_name(p) or _clean_display_name((p.get("display") or {}).get("name"))
+            if nm and nm not in other_names:
+                other_names.append(nm)
+
+        raw_score = item.get("score")
+        raw_conf = item.get("confidence")
+        norm_score: float | None = None
+        if isinstance(raw_score, (int, float)):
+            if 0.0 < float(raw_score) <= 1.0:
+                norm_score = float(raw_score)
+            elif isinstance(raw_conf, (int, float)) and 1 <= float(raw_conf) <= 5:
+                norm_score = round(0.70 + (float(raw_conf) / 5.0) * 0.28, 2)
+            else:
+                norm_score = 0.90
+
+        entry = {
+            **shaped_person,
+            "id": person_id,
+            "person_id": person_id,
+            "fs_person_id": person_id,
+            "fs_id": person_id,
+            "id_kind": "tree_person",
+            "ark": f"4:1:{person_id}",
+            "fs_url": f"https://www.familysearch.org/tree/person/{person_id}",
+            "score": norm_score if norm_score is not None else raw_score,
+            "raw_score": raw_score,
+            "confidence": raw_conf,
+            "father_name": father_name,
+            "mother_name": mother_name,
+            "spouse_name": spouse_name,
+            "relatives": {
+                "parents": parents,
+                "spouses": spouses,
+                "children": children,
+            },
+        }
+        if other_names:
+            entry["also_on_this_record"] = other_names
         out.append(entry)
     return out
 

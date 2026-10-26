@@ -26,7 +26,9 @@ from backend.app.mcp.familysearch_client import (
     _build_candidate_fs_url,
     _ensure_split_spouse_in_fs_url,
     _format_fact_person_label,
+    _has_sufficient_identity_for_fs_match,
     _is_nameless_fact,
+    _normalize_record_ark,
     apply_candidate_selection_to_match,
     build_action_packet_and_new_items,
     build_census_action_packet,
@@ -158,18 +160,22 @@ def _hydrate_candidates_for_match(
     if not raw_candidates and isinstance(action_packet.get("candidates"), list):
         raw_candidates = list(action_packet["candidates"])
 
+    had_mcp_search = False
     if not raw_candidates and m.raw_mcp_results_json and m.raw_mcp_results_json != "{}":
         try:
             raw_mcp = json.loads(m.raw_mcp_results_json)
-            rec_search = raw_mcp.get("record_search") if isinstance(raw_mcp, dict) else None
+            if isinstance(raw_mcp, dict) and "record_search" in raw_mcp and "tree_search" not in raw_mcp:
+                return [], []
+            tree_search = raw_mcp.get("tree_search") if isinstance(raw_mcp, dict) else None
+            if isinstance(tree_search, dict):
+                had_mcp_search = True
             hits = (
                 (
-                    rec_search.get("results")
-                    or rec_search.get("matches")
-                    or rec_search.get("persons")
-                    or rec_search.get("records")
+                    tree_search.get("results")
+                    or tree_search.get("matches")
+                    or tree_search.get("persons")
                 )
-                if isinstance(rec_search, dict)
+                if isinstance(tree_search, dict)
                 else None
             )
             if isinstance(hits, list) and hits:
@@ -183,7 +189,10 @@ def _hydrate_candidates_for_match(
         except Exception:
             pass
 
-    primary_id = normalize_fs_identifier(m.fs_person_id) or str(m.fs_person_id or "").strip()
+    if had_mcp_search and not raw_candidates:
+        return [], []
+
+    primary_id = normalize_fs_identifier(m.fs_person_id)
     person_display = (
         action_packet.get("person_name_display")
         or f"{fact.given_name_sk or fact.given_name_raw or '?'} {fact.surname_raw or fact.surname_normalized or '?'}".strip()
@@ -193,15 +202,16 @@ def _hydrate_candidates_for_match(
 
     normalized_cands: list[dict[str, Any]] = []
     seen_cids: set[str] = set()
-    for idx_c, c in enumerate(raw_candidates):
+    for c in raw_candidates:
         if not isinstance(c, dict):
             continue
-        cid = normalize_fs_identifier(c, fallback_seed=f"{c.get('name') or idx_c}")
+        cid = normalize_fs_identifier(c)
         if not cid or cid in seen_cids:
             continue
         seen_cids.add(cid)
-        c_ark = str(c.get("fs_record_ark") or c.get("ark") or "").strip() or None
-        c_url = str(c.get("fs_url") or "").strip() or _build_candidate_fs_url(cid, c_ark, fixed_fs_url)
+        raw_c_ark = c.get("fs_record_ark") or c.get("ark")
+        c_ark = _normalize_record_ark(raw_c_ark, cid, is_record_hit=bool(raw_c_ark))
+        c_url = _build_candidate_fs_url(cid, c_ark, fixed_fs_url)
         normalized_cands.append(
             {
                 "fs_person_id": cid,
@@ -230,13 +240,14 @@ def _hydrate_candidates_for_match(
             f"Matka: {fact.mother_name}" if fact.mother_name else None,
             f"Manžel/ka: {fact.spouse_name}" if fact.spouse_name else None,
         ]
+        m_ark = _normalize_record_ark(m.fs_record_ark, primary_id, is_record_hit=bool(m.fs_record_ark))
         normalized_cands.insert(
             0,
             {
                 "fs_person_id": primary_id,
                 "fs_id": primary_id,
-                "fs_record_ark": m.fs_record_ark,
-                "fs_url": _build_candidate_fs_url(primary_id, m.fs_record_ark, fixed_fs_url),
+                "fs_record_ark": m_ark,
+                "fs_url": _build_candidate_fs_url(primary_id, m_ark, fixed_fs_url),
                 "name": str(person_display),
                 "sex": fact.sex,
                 "lifespan": f"*{birth_year}" if birth_year else None,
@@ -284,6 +295,7 @@ def _hydrate_candidates_for_match(
 
 @router.get("/matches")
 def list_fs_matches(session: SessionDep, scan_id: int | None = None) -> dict[str, Any]:
+    cleanup_unmatched_familysearch_rows(session)
     stmt = (
         select(FamilySearchMatch)
         .where(
@@ -358,7 +370,7 @@ def list_fs_matches(session: SessionDep, scan_id: int | None = None) -> dict[str
     items: list[dict[str, Any]] = []
     for m in matches:
         fact = facts_by_id.get(m.person_fact_id)
-        if fact is None or _is_nameless_fact(fact):
+        if fact is None or not _has_sufficient_identity_for_fs_match(fact):
             continue
 
         sheet = sheets_by_id.get(fact.census_sheet_id) if fact.census_sheet_id else None
@@ -420,6 +432,8 @@ def list_fs_matches(session: SessionDep, scan_id: int | None = None) -> dict[str
             fixed_fs_url=fixed_fs_url,
             std_place=std_place,
         )
+        if not candidates or not selected_fs_person_ids:
+            continue
         primary_fs_id = selected_fs_person_ids[0] if selected_fs_person_ids else normalize_fs_identifier(m.fs_person_id)
         action_packet["candidates"] = candidates
         action_packet["selected_fs_person_ids"] = selected_fs_person_ids

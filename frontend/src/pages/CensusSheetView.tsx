@@ -340,6 +340,7 @@ interface CensusPersonMember {
     id: number;
     match_status: string;
     fs_person_id?: string | null;
+    fs_record_ark?: string | null;
     selected_fs_person_ids?: string[];
     fs_url: string | null;
     confidence_score: number;
@@ -5224,7 +5225,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                   ))}
                                   {m.fs_match?.fs_person_id ? (
                                     <a
-                                      href={`https://www.familysearch.org/tree/person/details/${encodeURIComponent(
+                                      href={`https://www.familysearch.org/tree/person/${encodeURIComponent(
                                         m.fs_match.fs_person_id.trim().toUpperCase()
                                       )}`}
                                       target="_blank"
@@ -5281,7 +5282,7 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                               ))}
                               {m.fs_match?.fs_person_id ? (
                                 <a
-                                  href={`https://www.familysearch.org/tree/person/details/${encodeURIComponent(
+                                  href={`https://www.familysearch.org/tree/person/${encodeURIComponent(
                                     m.fs_match.fs_person_id.trim().toUpperCase()
                                   )}`}
                                   target="_blank"

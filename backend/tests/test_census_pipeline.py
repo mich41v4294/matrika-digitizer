@@ -1020,22 +1020,114 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 fs_mcp_manager._cached_auth_status = None
                 fs_mcp_manager._cached_auth_ts = 0.0
 
-            # 8. Verify tightened FamilySearch matching, XXXX-YYY candidate identifiers, and multi-candidate selection
+            # 8. Verify tightened FamilySearch Tree Person matching, XXXX-YYY person identifiers (rejecting 1:1: record ARKs), and multi-candidate selection
             from backend.app.mcp.familysearch_client import (
                 evaluate_fs_match_candidates,
                 is_valid_fs_identifier,
                 normalize_fs_identifier,
             )
+            from familysearch_mcp.shape import tree_search_hits
 
+            # Record ARKs (1:1:, 2:2:, etc.) must be REJECTED because they are Record IDs, not Tree Person IDs
             self.assertEqual(
-                normalize_fs_identifier({"id": "p_9876543", "ark": "ark:/61903/1:1:NY3G-24D"}),
-                "NY3G-24D",
+                normalize_fs_identifier({"id": "p_9876543", "ark": "ark:/61903/1:1:KD3B-QWW"}),
+                "",
             )
+            self.assertEqual(
+                normalize_fs_identifier("https://www.familysearch.org/ark:/61903/1:1:KD3B-QWW"),
+                "",
+            )
+            # Tree Person IDs (4:1:, /tree/person/, /cs/tree/person/, /platform/tree/persons/) MUST be extracted as XXXX-YYY
             self.assertEqual(
                 normalize_fs_identifier("https://www.familysearch.org/ark:/61903/4:1:k2zp-vy1?context=details"),
                 "K2ZP-VY1",
             )
-            self.assertTrue(is_valid_fs_identifier("KWCJ-4N2"))
+            self.assertEqual(
+                normalize_fs_identifier("https://www.familysearch.org/cs/tree/person/LD9Q-GJ7"),
+                "LD9Q-GJ7",
+            )
+            self.assertTrue(is_valid_fs_identifier("LD9Q-GJ7"))
+
+            # Verify shaping of GET /platform/tree/search GEDCOM X Atom JSON response
+            sample_tree_search_payload = {
+                "results": 1,
+                "entries": [
+                    {
+                        "id": "LD9Q-GJ7",
+                        "score": 0.95,
+                        "links": {
+                            "person": {
+                                "href": "https://api.familysearch.org/platform/tree/persons/LD9Q-GJ7"
+                            }
+                        },
+                        "content": {
+                            "gedcomx": {
+                                "persons": [
+                                    {
+                                        "id": "LD9Q-GJ7",
+                                        "gender": {"type": "http://gedcomx.org/Male"},
+                                        "identifiers": {
+                                            "http://gedcomx.org/Persistent": [
+                                                "https://familysearch.org/ark:/61903/4:1:LD9Q-GJ7"
+                                            ]
+                                        },
+                                        "names": [
+                                            {
+                                                "type": "http://gedcomx.org/BirthName",
+                                                "nameForms": [{"fullText": "Joannes Kováč"}],
+                                            }
+                                        ],
+                                        "facts": [
+                                            {
+                                                "type": "http://gedcomx.org/Birth",
+                                                "date": {"original": "1890"},
+                                                "place": {"original": "Horný Čepeň, Czechoslovakia"},
+                                            }
+                                        ],
+                                        "display": {
+                                            "name": "type=BirthName,nameForms[0]=Joannes Kováč,pref=null",
+                                            "gender": "type=Male",
+                                            "lifespan": "1890–1962",
+                                        },
+                                    },
+                                    {
+                                        "id": "LD9Q-111",
+                                        "gender": {"type": "http://gedcomx.org/Male"},
+                                        "names": [{"nameForms": [{"fullText": "Jozef Kováč"}]}],
+                                    },
+                                    {
+                                        "id": "LD9Q-222",
+                                        "gender": {"type": "http://gedcomx.org/Female"},
+                                        "names": [{"nameForms": [{"fullText": "Mária Vargová"}]}],
+                                    },
+                                ],
+                                "relationships": [
+                                    {
+                                        "type": "http://gedcomx.org/ParentChild",
+                                        "person1": {"resourceId": "LD9Q-111"},
+                                        "person2": {"resourceId": "LD9Q-GJ7"},
+                                    },
+                                    {
+                                        "type": "http://gedcomx.org/ParentChild",
+                                        "person1": {"resourceId": "LD9Q-222"},
+                                        "person2": {"resourceId": "LD9Q-GJ7"},
+                                    },
+                                ],
+                            }
+                        },
+                    }
+                ],
+            }
+            shaped_tree_hits = tree_search_hits(sample_tree_search_payload)
+            self.assertEqual(len(shaped_tree_hits), 1)
+            self.assertEqual(shaped_tree_hits[0]["fs_person_id"], "LD9Q-GJ7")
+            self.assertEqual(shaped_tree_hits[0]["ark"], "4:1:LD9Q-GJ7")
+            self.assertEqual(
+                shaped_tree_hits[0]["fs_url"],
+                "https://www.familysearch.org/tree/person/LD9Q-GJ7",
+            )
+            self.assertEqual(shaped_tree_hits[0]["father_name"], "Jozef Kováč")
+            self.assertEqual(shaped_tree_hits[0]["mother_name"], "Mária Vargová")
 
             test_fact = PersonFact(
                 id=999901,
@@ -1055,25 +1147,28 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 mother_name="Mária Vargová",
             )
             raw_hits = [
-                # Valid candidate 1: Latin equivalent Joannes Kováč, born 1890, local persona id p_101 but ARK has XXXX-YYY
-                {
-                    "id": "p_101",
-                    "ark": "ark:/61903/1:1:NY3G-24D",
-                    "name": "Joannes Kováč",
-                    "sex": "Male",
-                    "lifespan": "1890–1962",
-                    "facts": [{"type": "Birth", "date": "1890", "place": "Horný Čepeň, Czechoslovakia"}],
-                    "also_on_this_record": ["Jozef Kováč", "Mária Vargová"],
-                    "score": 0.95,
-                },
-                # Valid candidate 2: Ján Kováč, born 1891 (diff=1 <= 3), tree ID K2ZP-VY1
+                # Valid Tree Person candidate 1: LD9Q-GJ7 from /platform/tree/search
+                shaped_tree_hits[0],
+                # Valid Tree Person candidate 2: Ján Kováč, born 1891 (diff=1 <= 3), tree ID K2ZP-VY1
                 {
                     "id": "K2ZP-VY1",
+                    "ark": "4:1:K2ZP-VY1",
+                    "id_kind": "tree_person",
                     "name": "Ján Kováč",
                     "sex": "Male",
                     "lifespan": "1891–Deceased",
                     "facts": [{"type": "Birth", "date": "1891", "place": "Horný Čepeň, Trnava, Slovakia"}],
                     "score": 0.90,
+                },
+                # Invalid candidate 0: Historical Record Persona (1:1:KD3B-QWW) -> MUST be rejected (not a Tree Person!)
+                {
+                    "id": "KD3B-QWW",
+                    "ark": "ark:/61903/1:1:KD3B-QWW",
+                    "id_kind": "record",
+                    "name": "Joannes Kováč",
+                    "sex": "Male",
+                    "facts": [{"type": "Birth", "date": "1890", "place": "Horný Čepeň, Czechoslovakia"}],
+                    "score": 0.99,
                 },
                 # Invalid candidate A: Wrong surname (Novák) -> MUST be rejected
                 {
@@ -1116,6 +1211,15 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                     "facts": [{"type": "Birth", "date": "1890", "place": "Pittsburgh, Pennsylvania, United States"}],
                     "score": 0.95,
                 },
+                # Invalid candidate F: Cyrillic name (Стефан Лайкин) -> MUST be rejected
+                {
+                    "id": "6G5G-CZ2",
+                    "ark": "1:1:6G5G-CZ2",
+                    "name": "Стефан Лайкин",
+                    "sex": "Male",
+                    "facts": [{"type": "Birth", "date": "1890", "place": "Horný Čepeň"}],
+                    "score": 0.98,
+                },
             ]
             evaluated = evaluate_fs_match_candidates(
                 test_fact,
@@ -1124,10 +1228,50 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 is_census=True,
             )
             eval_ids = [c["fs_person_id"] for c in evaluated]
-            self.assertEqual(eval_ids, ["NY3G-24D", "K2ZP-VY1"])
+            self.assertEqual(eval_ids, ["LD9Q-GJ7", "K2ZP-VY1"])
+            self.assertEqual(evaluated[0]["fs_record_ark"], "4:1:LD9Q-GJ7")
+            self.assertEqual(
+                evaluated[0]["fs_url"],
+                "https://www.familysearch.org/tree/person/LD9Q-GJ7",
+            )
             for cand in evaluated:
                 self.assertTrue(is_valid_fs_identifier(cand["fs_person_id"]))
                 self.assertEqual(cand["fs_id"], cand["fs_person_id"])
+
+            # Verify Mária Tomanová (*1923, Horný Čepeň) rejects Toman Mária (KD3B-QWW) with missing/wrong birth year
+            tomanova_fact = PersonFact(
+                id=999902,
+                row_id=created_row_ids[0] if created_row_ids else 0,
+                scan_id=0,
+                record_type="census",
+                event_year=1930,
+                birth_or_event_date="14. Júl 1923",
+                birth_year_est=1923,
+                given_name_raw="Mária",
+                given_name_sk="Mária",
+                surname_raw="Tomanová",
+                surname_normalized="Tomanová",
+                sex="F",
+                village_raw="Horný Čepeň",
+                village_sk="Horný Čepeň",
+                birth_place_municipality="Horný Čepeň",
+            )
+            tomanova_eval = evaluate_fs_match_candidates(
+                tomanova_fact,
+                [
+                    {
+                        "id": "KD3B-QWW",
+                        "ark": "1:1:KD3B-QWW",
+                        "name": "Toman Mária",
+                        "sex": "Female",
+                        "facts": [{"type": "Baptism", "date": "1878", "place": "Hungary"}],
+                        "score": 0.92,
+                    }
+                ],
+                place_std="Horný Čepeň, Trnava, Slovensko",
+                is_census=True,
+            )
+            self.assertEqual(tomanova_eval, [])
 
             # Test multi-selection API on m_valid
             m_valid_id = created_match_ids[0] if created_match_ids else 0

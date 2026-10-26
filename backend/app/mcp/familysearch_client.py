@@ -51,7 +51,11 @@ ALLOWED_FS_ENV_KEYS: frozenset[str] = frozenset(
 )
 
 FS_IDENTIFIER_RE: re.Pattern[str] = re.compile(r"\b([A-Za-z0-9]{4}-[A-Za-z0-9]{3,4})\b")
-_FS_BASE32_ALPHABET: str = "0123456789BCDFGHJKLMNPQRSTVWXZ"
+_RECORD_ARK_RE: re.Pattern[str] = re.compile(r"(?:ark:/61903/)?[123]:\d+:", re.IGNORECASE)
+_TREE_PERSON_URL_RE: re.Pattern[str] = re.compile(
+    r"(?:ark:/61903/4:1:|/platform/tree/persons/|/(?:[a-z]{2}/)?tree/person/(?:details/|about/|vitals/|sources/|memories/|timeline/)?)([A-Za-z0-9]{4}-[A-Za-z0-9]{3,4})\b",
+    re.IGNORECASE,
+)
 
 _FOREIGN_COUNTRIES_REJECT: tuple[str, ...] = (
     "united states",
@@ -78,6 +82,57 @@ _FOREIGN_COUNTRIES_REJECT: tuple[str, ...] = (
 )
 
 
+_HISTORICAL_VILLAGE_EQUIVALENTS: dict[str, tuple[str, ...]] = {
+    "horny cepen": ("horny cepen", "felso csopony", "felsocsopony", "csopony", "cepen", "cegsen"),
+    "dolny cepen": ("dolny cepen", "also csopony", "alsocsopony", "csopony", "cepen"),
+    "stredny cepen": ("stredny cepen", "csopony", "cepen"),
+    "cegsen": ("horny cepen", "felso csopony", "felsocsopony", "csopony", "cepen"),
+    "surovce": ("surovce", "velke surovce", "male surovce", "nagy sur", "nagysur", "kis sur", "kissur", "sur"),
+    "velke surovce": ("velke surovce", "surovce", "nagy sur", "nagysur"),
+    "male surovce": ("male surovce", "surovce", "kis sur", "kissur"),
+    "valtasur": ("valtasur", "valtov sur", "valta sur"),
+    "valtov sur": ("valtov sur", "valtasur", "valta sur"),
+    "varov sur": ("varov sur", "varra sur", "varrasur"),
+    "zemiansky sur": ("zemiansky sur", "zemianske sady", "nemes sur", "nemessur"),
+    "zemianske sady": ("zemianske sady", "zemiansky sur", "nemes sur", "nemessur"),
+    "sered": ("sered", "szered"),
+    "trnava": ("trnava", "nagyszombat"),
+    "hlohovec": ("hlohovec", "galgocz", "galgoc"),
+    "galanta": ("galanta", "galanthai"),
+    "pavlice": ("pavlice", "pald"),
+    "dvorniky": ("dvorniky", "udvarnok"),
+    "klacany": ("klacany", "kelecseny"),
+    "trakovice": ("trakovice", "karkocz", "karkoc"),
+}
+
+_REGIONAL_COUNTY_TOKENS: tuple[str, ...] = (
+    "trnava",
+    "nagyszombat",
+    "sered",
+    "szered",
+    "galanta",
+    "hlohovec",
+    "galgoc",
+    "galgocz",
+    "piestany",
+    "nitra",
+    "nyitra",
+    "pozsony",
+    "bratislava",
+    "presporok",
+    "pressburg",
+    "trencin",
+    "trencsen",
+    "topolcany",
+    "pezinok",
+    "senec",
+    "komarom",
+    "komarno",
+    "bars",
+    "tekov",
+)
+
+
 def is_valid_fs_identifier(val: Any) -> bool:
     """Return True if `val` is a canonical FamilySearch identifier in `XXXX-YYY` format."""
     if not val or not isinstance(val, str):
@@ -85,83 +140,81 @@ def is_valid_fs_identifier(val: Any) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9]{4}-[A-Za-z0-9]{3,4}", val.strip()))
 
 
-def _derive_deterministic_fs_id(seed: str) -> str:
-    digest = hashlib.sha256(seed.encode("utf-8", errors="ignore")).digest()
-    chars = [_FS_BASE32_ALPHABET[b % len(_FS_BASE32_ALPHABET)] for b in digest[:7]]
-    return f"{''.join(chars[:4])}-{''.join(chars[4:7])}"
-
-
 def normalize_fs_identifier(raw_val: Any, fallback_seed: str | None = None) -> str:
     """
-    Extract and normalize a FamilySearch person/record candidate identifier into `XXXX-YYY` format
-    (e.g. `KWCZ-001`, `KWCJ-4N2`, `NY3G-24D`).
-    Returns `""` when `raw_val` is empty/None and no `fallback_seed` is provided.
+    Extract and normalize a genuine FamilySearch Tree Person identifier (`4:1:XXXX-YYY`)
+    into `XXXX-YYY` format (e.g. `LD9Q-GJ7`, `KWCZ-001`, `KWCJ-4N2`).
+    Strictly rejects FamilySearch Historical Record / Persona / Artifact ARKs (`1:1:`, `1:2:`, `2:1:`, `2:2:`, `3:1:`)
+    and never fabricates fake IDs — returns `""` when no valid Tree Person `XXXX-YYY` identifier is present.
     """
-    candidates: list[str] = []
-    has_non_empty_source = False
+    _ = fallback_seed
+    explicit_tree_candidates: list[str] = []
+    generic_candidates: list[str] = []
 
     if isinstance(raw_val, dict):
-        for key in (
-            "fs_id",
-            "fs_person_id",
-            "person_id",
-            "ark",
-            "fs_record_ark",
-            "record_ark",
-            "match_id",
-            "id",
-            "fs_url",
-            "url",
-        ):
-            v = raw_val.get(key)
-            if v is not None and str(v).strip():
-                s_val = str(v).strip()
-                if key == "id" and re.match(r"^[pr]_\d+$", s_val, flags=re.IGNORECASE):
-                    continue
-                candidates.append(s_val)
-                has_non_empty_source = True
+        is_record_entry = str(raw_val.get("id_kind") or "").lower() == "record"
+        for ark_key in ("ark", "fs_record_ark", "record_ark", "match_id"):
+            ark_v = str(raw_val.get(ark_key) or "").strip()
+            if ark_v and _RECORD_ARK_RE.search(ark_v):
+                is_record_entry = True
+
         idents = raw_val.get("identifiers")
         if isinstance(idents, dict):
             for vals in idents.values():
                 if isinstance(vals, list):
                     for item in vals:
                         if item and str(item).strip():
-                            candidates.append(str(item).strip())
-                            has_non_empty_source = True
+                            explicit_tree_candidates.append(str(item).strip())
                 elif vals and str(vals).strip():
-                    candidates.append(str(vals).strip())
-                    has_non_empty_source = True
+                    explicit_tree_candidates.append(str(vals).strip())
+
+        links_obj = raw_val.get("links")
+        if isinstance(links_obj, dict):
+            person_link = links_obj.get("person")
+            if isinstance(person_link, dict) and person_link.get("href"):
+                explicit_tree_candidates.append(str(person_link["href"]).strip())
+            elif isinstance(person_link, str) and person_link.strip():
+                explicit_tree_candidates.append(person_link.strip())
+
+        for url_key in ("fs_url", "url", "ark", "fs_record_ark"):
+            uv = str(raw_val.get(url_key) or "").strip()
+            if uv and not _RECORD_ARK_RE.search(uv):
+                m_tree = _TREE_PERSON_URL_RE.search(uv)
+                if m_tree:
+                    explicit_tree_candidates.append(m_tree.group(1).upper())
+
+        if not is_record_entry:
+            for key in ("fs_person_id", "person_id", "fs_id", "id"):
+                v = raw_val.get(key)
+                if v is not None and str(v).strip():
+                    s_val = str(v).strip()
+                    if s_val == "primaryPerson" or re.match(r"^[pr]_\d+$", s_val, flags=re.IGNORECASE):
+                        continue
+                    if _RECORD_ARK_RE.search(s_val):
+                        continue
+                    generic_candidates.append(s_val)
     elif raw_val is not None:
         s_val = str(raw_val).strip()
-        if s_val:
-            candidates.append(s_val)
-            has_non_empty_source = True
+        if (
+            s_val
+            and s_val != "primaryPerson"
+            and not re.match(r"^[pr]_\d+$", s_val, flags=re.IGNORECASE)
+            and not _RECORD_ARK_RE.search(s_val)
+        ):
+            generic_candidates.append(s_val)
 
-    for cand in candidates:
-        cleaned = cand
-        if "ark:/61903/" in cleaned:
-            cleaned = cleaned.split("ark:/61903/", 1)[1]
-        elif "/tree/person/details/" in cleaned:
-            cleaned = cleaned.split("/tree/person/details/", 1)[1]
-        cleaned = cleaned.split("?", 1)[0].split("#", 1)[0].strip("/")
-        cleaned = re.sub(r"^\d+:\d+:", "", cleaned)
-        m = FS_IDENTIFIER_RE.search(cleaned)
-        if m:
-            return m.group(1).upper()
-
-    for cand in candidates:
-        if re.match(r"^[pr]_\d+$", cand, flags=re.IGNORECASE):
+    for cand in explicit_tree_candidates + generic_candidates:
+        if _RECORD_ARK_RE.search(cand):
             continue
-        cleaned = cand.split("?", 1)[0].split("#", 1)[0].rsplit("/", 1)[-1]
-        cleaned = re.sub(r"^\d+:\d+:", "", cleaned)
-        alnum = re.sub(r"[^A-Za-z0-9]", "", cleaned).upper()
-        if len(alnum) >= 7:
-            return f"{alnum[:4]}-{alnum[4:7]}"
+        m_url = _TREE_PERSON_URL_RE.search(cand)
+        if m_url:
+            return m_url.group(1).upper()
+        cleaned = cand.split("?", 1)[0].split("#", 1)[0].strip("/")
+        if cleaned.upper().startswith("4:1:"):
+            cleaned = cleaned[4:]
+        if is_valid_fs_identifier(cleaned):
+            return cleaned.upper()
 
-    if fallback_seed and str(fallback_seed).strip():
-        return _derive_deterministic_fs_id(str(fallback_seed).strip())
-    if has_non_empty_source and candidates:
-        return _derive_deterministic_fs_id(candidates[0])
     return ""
 
 
@@ -296,10 +349,111 @@ def _strip_feminine_surname_suffix(surname: str | None) -> str:
     return folded
 
 
+def _has_non_latin_script(text: str | None) -> bool:
+    """Return True if `text` contains Cyrillic, Greek, Arabic, Hebrew, or CJK characters."""
+    if not text:
+        return False
+    return bool(re.search(r"[\u0370-\u03FF\u0400-\u052F\u0590-\u06FF\u4E00-\u9FFF]", str(text)))
+
+
+def _extract_candidate_name_parts(full_name: str | None) -> tuple[list[str], list[str]]:
+    """
+    Extract candidate `(given_names, surnames)` from a FamilySearch display name,
+    handling both Western (`Given Surname`) and Hungarian/Eastern (`Surname Given`) orders.
+    """
+    if not full_name:
+        return [], []
+    parts = [p.strip(" ,.;/()[]\"'") for p in str(full_name).split() if p and p not in ("-", "—")]
+    parts = [p for p in parts if _is_valid_name_token(p)]
+    if not parts:
+        return [], []
+    if len(parts) == 1:
+        if is_known_given_name(parts[0]) or resolve_given_name_canonical_id(parts[0]):
+            return [parts[0]], []
+        return [], [parts[0]]
+
+    givens: list[str] = [" ".join(parts[:-1])]
+    surnames: list[str] = [parts[-1]]
+
+    # Check Hungarian / Eastern order: "Surname GivenName" (e.g. "Kovács János", "Toman Mária")
+    first_is_given = bool(is_known_given_name(parts[0]) or resolve_given_name_canonical_id(parts[0]))
+    last_is_given = bool(is_known_given_name(parts[-1]) or resolve_given_name_canonical_id(parts[-1]))
+    if last_is_given and not first_is_given:
+        east_giv = " ".join(parts[1:])
+        east_sur = parts[0]
+        if east_giv not in givens:
+            givens.append(east_giv)
+        if east_sur not in surnames:
+            surnames.append(east_sur)
+    return givens, surnames
+
+
+def _expand_place_tokens(raw_places: list[Any]) -> tuple[set[str], set[str]]:
+    """
+    Returns `(village_tokens, county_tokens)` from a list of place strings, expanding
+    historical Slovak/Hungarian village aliases (e.g. `Horný Čepeň` <-> `Felső-Csöpöny`).
+    """
+    village_tokens: set[str] = set()
+    county_tokens: set[str] = set()
+    ignored = {
+        "slovensko",
+        "slovakia",
+        "czechoslovakia",
+        "ceskoslovensko",
+        "hungary",
+        "uhorsko",
+        "madarsko",
+        "austria",
+        "europe",
+        "obec",
+        "okres",
+        "krajina",
+    }
+
+    for rp in raw_places:
+        if not rp or not str(rp).strip():
+            continue
+        raw_str = str(rp).strip()
+        v_sk, v_hu, _ = normalize_village(raw_str)
+        segments = [seg.strip() for seg in re.split(r"[,/|()]+", raw_str) if seg.strip()]
+        first_seg = segments[0] if segments else raw_str
+        first_clean = re.sub(r"^(?:obec|okres|krajina|okr\.)\s+", "", first_clean := first_seg, flags=re.IGNORECASE).strip()
+        first_clean = re.sub(r"\b(?:dom\s*)?č\.?\s*\d+.*$", "", first_clean, flags=re.IGNORECASE).strip()
+
+        for cand_v in (v_sk, v_hu, first_clean):
+            if not cand_v:
+                continue
+            folded = fold_text_diacritics(cand_v).lower().strip(" .-")
+            folded = re.sub(r"^h\.\s*", "horny ", folded)
+            folded = re.sub(r"^d\.\s*", "dolny ", folded)
+            if len(folded) < 3 or folded in ignored:
+                continue
+            village_tokens.add(folded)
+            for eq in _HISTORICAL_VILLAGE_EQUIVALENTS.get(folded, ()):
+                village_tokens.add(eq)
+            # Also add core stem without directional prefix (e.g. "horny cepen" -> "cepen")
+            core = re.sub(
+                r"^(?:horny|dolny|stredny|velky|velke|maly|male|felso|also|nagy|kis)\s+",
+                "",
+                folded,
+            ).strip()
+            if len(core) >= 4 and core not in ignored:
+                village_tokens.add(core)
+                for eq in _HISTORICAL_VILLAGE_EQUIVALENTS.get(core, ()):
+                    village_tokens.add(eq)
+
+        full_folded = fold_text_diacritics(raw_str).lower()
+        for c_tok in _REGIONAL_COUNTY_TOKENS:
+            if re.search(rf"\b{re.escape(c_tok)}\b", full_folded):
+                county_tokens.add(c_tok)
+
+    return village_tokens, county_tokens
+
+
 def _score_surname_match(fact: PersonFact, cand_surnames: list[str]) -> float:
     """
     Strictly score candidate surname(s) against `fact` surnames (married, normalized, maiden, candidates).
-    Returns `0.0` if no surname reaches the tightened threshold (`>= 0.82`).
+    Returns `0.0` if no surname reaches the tightened threshold (`>= 0.85`).
     """
     fact_primary = [
         s.strip()
@@ -313,6 +467,8 @@ def _score_surname_match(fact: PersonFact, cand_surnames: list[str]) -> float:
 
     best_score = 0.0
     for c_sur in valid_cand_surnames:
+        if _has_non_latin_script(c_sur):
+            continue
         c_fold = fold_text_diacritics(c_sur).lower()
         c_stem = _strip_feminine_surname_suffix(c_sur)
         c_skel = _phonetic_skeleton(c_stem or c_sur)
@@ -327,9 +483,9 @@ def _score_surname_match(fact: PersonFact, cand_surnames: list[str]) -> float:
                 _paleographic_similarity(f_sur, c_sur),
                 _paleographic_similarity(f_stem, c_stem) if (f_stem and c_stem) else 0.0,
             )
-            if c_skel and f_skel and c_skel == f_skel and sim >= 0.80:
-                best_score = max(best_score, max(0.88, sim))
-            elif sim >= 0.84:
+            if c_skel and f_skel and c_skel == f_skel and sim >= 0.85:
+                best_score = max(best_score, max(0.90, sim))
+            elif sim >= 0.88:
                 best_score = max(best_score, sim)
 
         for m_sur in fact_maiden:
@@ -343,18 +499,18 @@ def _score_surname_match(fact: PersonFact, cand_surnames: list[str]) -> float:
                     _paleographic_similarity(m_sur, c_sur),
                     _paleographic_similarity(m_stem, c_stem) if (m_stem and c_stem) else 0.0,
                 )
-                if c_skel and m_skel and c_skel == m_skel and sim >= 0.80:
-                    best_score = max(best_score, max(0.85, sim * 0.96))
-                elif sim >= 0.84:
+                if c_skel and m_skel and c_skel == m_skel and sim >= 0.85:
+                    best_score = max(best_score, max(0.86, sim * 0.96))
+                elif sim >= 0.88:
                     best_score = max(best_score, sim * 0.96)
 
-    return round(best_score, 3) if best_score >= 0.82 else 0.0
+    return round(best_score, 3) if best_score >= 0.85 else 0.0
 
 
 def _score_given_name_match(fact: PersonFact, cand_givens: list[str]) -> float:
     """
     Strictly score candidate given name(s) against `fact` given names (Slovak, Latin, Hungarian).
-    Returns `0.0` if no given name reaches the tightened threshold (`>= 0.82`).
+    Returns `0.0` if no given name reaches the tightened threshold (`>= 0.85`).
     """
     fact_givens = [
         g.strip()
@@ -383,6 +539,8 @@ def _score_given_name_match(fact: PersonFact, cand_givens: list[str]) -> float:
 
     best_score = 0.0
     for cg in valid_cand_givens:
+        if _has_non_latin_script(cg):
+            continue
         for c_tok in re.split(r"[\s,/()-]+", cg):
             c_clean = c_tok.strip(" .?")
             if not _is_valid_name_token(c_clean):
@@ -395,10 +553,10 @@ def _score_given_name_match(fact: PersonFact, cand_givens: list[str]) -> float:
                 return 1.0
             for f_tok in fact_tokens:
                 sim = _paleographic_similarity(f_tok, c_clean)
-                if sim >= 0.84:
+                if sim >= 0.86:
                     best_score = max(best_score, sim)
 
-    return round(best_score, 3) if best_score >= 0.82 else 0.0
+    return round(best_score, 3) if best_score >= 0.85 else 0.0
 
 
 def _extract_year_from_text(val: Any) -> int | None:
@@ -421,18 +579,61 @@ def _normalize_sex_code(val: Any) -> str | None:
     return None
 
 
-def _build_candidate_fs_url(fs_id: str, ark: str | None, fallback_search_url: str) -> str:
-    if ark:
-        clean_ark = str(ark).strip()
-        if clean_ark.startswith("https://"):
-            return clean_ark
-        if "ark:/61903/" in clean_ark:
-            tail = clean_ark.split("ark:/61903/", 1)[1]
-            return f"https://www.familysearch.org/ark:/61903/{tail}"
-        if re.match(r"^\d+:\d+:", clean_ark):
-            return f"https://www.familysearch.org/ark:/61903/{clean_ark}"
+def _build_alternate_surnames_for_tree_search(fact: PersonFact, primary_surname: str) -> list[str]:
+    """
+    Build up to 3 alternate surnames for FamilySearch Tree Person Search (`q.surname.1`, `q.surname.2`),
+    including the masculine/root stem of Slovak feminine surnames (e.g. `Tomanová` -> `Toman`)
+    and `mother_maiden_surname` (plus its stem).
+    """
+    alts: list[str] = []
+    seen = {primary_surname.strip().lower()} if primary_surname else set()
+
+    def _add(val: str | None) -> None:
+        if not val or not _is_valid_name_token(val):
+            return
+        c = str(val).strip(" ?—–-.,;/\"'()[]")
+        if len(c) >= 2 and c.lower() not in seen:
+            seen.add(c.lower())
+            alts.append(c)
+
+    def _strip_fem_preserve_case(s: str | None) -> str:
+        if not s:
+            return ""
+        clean = str(s).strip(" ?—–-.,;/\"'()[]")
+        for suf in ("ová", "ova", "ówna", "owna", "ovna"):
+            if len(clean) > len(suf) + 2 and clean.lower().endswith(suf):
+                return clean[: -len(suf)]
+        return ""
+
+    _add(_strip_fem_preserve_case(primary_surname))
+    if fact.mother_maiden_surname:
+        _add(fact.mother_maiden_surname)
+        _add(_strip_fem_preserve_case(fact.mother_maiden_surname))
+    for sc in fact.surname_candidates or []:
+        _add(sc)
+        _add(_strip_fem_preserve_case(sc))
+    return alts[:3]
+
+
+def _normalize_record_ark(raw_ark: Any, fs_id: str | None = None, *, is_record_hit: bool = False) -> str | None:
+    """
+    Normalizes a FamilySearch Tree Person persistent identifier (`4:1:XXXX-YYY`).
+    Rejects `1:1:` / `2:2:` / `3:1:` record ARKs so record IDs are never stored as person ARKs.
+    """
+    _ = is_record_hit
+    cleaned = str(raw_ark or "").strip()
+    if cleaned and _RECORD_ARK_RE.search(cleaned):
+        return None
+    if fs_id and is_valid_fs_identifier(fs_id):
+        return f"4:1:{fs_id.strip().upper()}"
+    return None
+
+
+def _build_candidate_fs_url(fs_id: str, ark: str | None = None, fallback_search_url: str = "") -> str:
+    """Return the direct FamilySearch Family Tree Person URL (`https://www.familysearch.org/tree/person/XXXX-YYY`)."""
+    _ = ark
     if is_valid_fs_identifier(fs_id):
-        return f"https://www.familysearch.org/tree/person/details/{fs_id.upper()}"
+        return f"https://www.familysearch.org/tree/person/{fs_id.strip().upper()}"
     return fallback_search_url
 
 
@@ -448,8 +649,13 @@ def evaluate_fs_match_candidates(
 ) -> list[dict[str, Any]]:
     """
     Tightly evaluates, filters, and ranks FamilySearch search/match hits against `fact`.
-    Every returned candidate has a validated `XXXX-YYY` FamilySearch identifier (`fs_person_id` / `fs_id`),
-    structured `what_agrees` / `what_differs`, and a tight confidence score (`>= 0.82`).
+    Every returned candidate has:
+    - a genuine `XXXX-YYY` FamilySearch identifier (`fs_person_id` / `fs_id`),
+    - an accurate `fs_record_ark` (`1:1:XXXX-YYY` for record personas) and direct `fs_url`,
+    - verified Latin-script given name & surname (`>= 0.85`),
+    - verified birth/christening year within `±2`/`±3` years when `target_birth_year` is known,
+    - verified village or regional county match (rejecting country-only or foreign matches),
+    - overall confidence score `>= 0.86`.
     """
     if not hits or not _has_sufficient_identity_for_fs_match(fact):
         return []
@@ -460,7 +666,10 @@ def evaluate_fs_match_candidates(
         if is_census
         else (fact.event_year if fact.record_type == "baptism" else (fact.birth_year_est or fact.event_year))
     )
-    max_year_diff = 2 if (not is_census and fact.record_type == "baptism") else 3
+    has_exact_birth_date = bool(
+        fact.birth_or_event_date and re.search(r"\b\d{1,2}\s*[\.\s]\s*[A-Za-zÁ-ž0-9]+", str(fact.birth_or_event_date))
+    )
+    max_year_diff = 2 if (not is_census or has_exact_birth_date) else 3
 
     fact_places_raw = [
         p
@@ -475,14 +684,7 @@ def evaluate_fs_match_candidates(
         )
         if p and str(p).strip()
     ]
-    fact_place_tokens: set[str] = set()
-    for fp in fact_places_raw:
-        v_sk, v_hu, _ = normalize_village(str(fp))
-        for part in (v_sk, v_hu, str(fp).split(",")[0]):
-            if part:
-                folded_p = fold_text_diacritics(part).lower().strip()
-                if len(folded_p) >= 3 and folded_p not in ("slovensko", "slovakia", "czechoslovakia", "hungary"):
-                    fact_place_tokens.add(folded_p)
+    fact_village_tokens, fact_county_tokens = _expand_place_tokens(fact_places_raw)
     fact_places_joined_lower = " ".join(str(p).lower() for p in fact_places_raw)
 
     father_giv, father_sur = _split_parent_name(fact.father_name, fact.surname_normalized or fact.surname_raw)
@@ -519,23 +721,16 @@ def evaluate_fs_match_candidates(
 
     candidates_by_id: dict[str, dict[str, Any]] = {}
 
-    for idx_hit, hit in enumerate(hits):
+    for hit in hits:
         if not isinstance(hit, dict):
             continue
 
-        # 1. Extract XXXX-YYY identifier
-        raw_id_present = any(
-            hit.get(k) and str(hit.get(k)).strip()
-            for k in ("fs_id", "fs_person_id", "person_id", "id", "ark", "match_id")
-        )
-        if not raw_id_present:
-            continue
-        seed_str = f"{hit.get('ark') or hit.get('id') or hit.get('name') or idx_hit}"
-        fs_id = normalize_fs_identifier(hit, fallback_seed=seed_str)
+        # 1. Extract genuine XXXX-YYY identifier (never fabricate hashes)
+        fs_id = normalize_fs_identifier(hit)
         if not fs_id:
             continue
 
-        # 2. Extract candidate names (primary + alternate name forms)
+        # 2. Extract candidate names (primary + alternate name forms) and reject non-Latin scripts (e.g. Cyrillic)
         cand_name_forms: list[str] = []
         if hit.get("name") and str(hit.get("name")).strip():
             cand_name_forms.append(str(hit["name"]).strip())
@@ -545,38 +740,49 @@ def evaluate_fs_match_candidates(
             elif isinstance(nf, str) and nf.strip():
                 cand_name_forms.append(nf.strip())
 
+        cand_name_forms = [nf for nf in cand_name_forms if not _has_non_latin_script(nf)]
+        if not cand_name_forms and not (hit.get("given_name") or hit.get("given") or hit.get("surname")):
+            continue
+
         cand_givens: list[str] = []
         cand_surnames: list[str] = []
         for nf_str in cand_name_forms:
-            g_part, s_part = _split_fs_display_name(nf_str)
-            if g_part:
-                cand_givens.append(g_part)
-            if s_part:
-                cand_surnames.append(s_part)
+            g_parts, s_parts = _extract_candidate_name_parts(nf_str)
+            for gp in g_parts:
+                if gp not in cand_givens:
+                    cand_givens.append(gp)
+            for sp in s_parts:
+                if sp not in cand_surnames:
+                    cand_surnames.append(sp)
         if hit.get("given_name") or hit.get("given"):
-            cand_givens.append(str(hit.get("given_name") or hit.get("given")))
+            gv = str(hit.get("given_name") or hit.get("given")).strip()
+            if not _has_non_latin_script(gv) and gv not in cand_givens:
+                cand_givens.append(gv)
         if hit.get("surname"):
-            cand_surnames.append(str(hit["surname"]))
+            sv = str(hit["surname"]).strip()
+            if not _has_non_latin_script(sv) and sv not in cand_surnames:
+                cand_surnames.append(sv)
 
         # 3. Gate: Sex compatibility
         cand_sex = _normalize_sex_code(hit.get("sex") or hit.get("gender"))
         if fact_sex and cand_sex and fact_sex != cand_sex:
             continue
 
-        # 4. Gate: Strict Surname & Given Name scoring
+        # 4. Gate: Strict Surname & Given Name scoring (>= 0.85 each)
         sur_score = _score_surname_match(fact, cand_surnames)
-        if sur_score < 0.82:
+        if sur_score < 0.85:
             continue
         giv_score = _score_given_name_match(fact, cand_givens)
-        if giv_score < 0.82:
+        if giv_score < 0.85:
             continue
 
-        # 5. Extract candidate facts (Birth, Christening, Death, Residence, etc.)
+        # 5. Extract candidate facts (Birth, Christening, Marriage, Death, Residence, etc.)
         cand_facts = hit.get("facts") if isinstance(hit.get("facts"), list) else []
         cand_birth_date: str | None = str(hit.get("birth_date") or "").strip() or None
         cand_birth_year: int | None = _extract_year_from_text(hit.get("birth_year") or cand_birth_date)
         cand_birth_place: str | None = str(hit.get("birth_place") or hit.get("place") or "").strip() or None
         cand_death_year: int | None = _extract_year_from_text(hit.get("death_year") or hit.get("death_date"))
+        cand_marriage_year: int | None = _extract_year_from_text(hit.get("marriage_year") or hit.get("marriage_date"))
         cand_residence_place: str | None = str(hit.get("residence_place") or "").strip() or None
         cand_lifespan: str | None = str(hit.get("lifespan") or "").strip() or None
 
@@ -603,17 +809,27 @@ def evaluate_fs_match_candidates(
             elif cf_type in ("death", "burial"):
                 if not cand_death_year:
                     cand_death_year = _extract_year_from_text(cf_date)
+            elif cf_type == "marriage":
+                if not cand_marriage_year:
+                    cand_marriage_year = _extract_year_from_text(cf_date)
             elif cf_type in ("residence", "census"):
                 if cf_place and not cand_residence_place:
                     cand_residence_place = cf_place
 
-        # 6. Gate: Death-before-census & Birth Year window
+        # 6. Gate: Strict Birth Year & Lifespan Consistency
         if is_census and cand_death_year and cand_death_year < (fact.event_year or 1930) - 1:
+            continue
+        if cand_birth_year and cand_death_year and cand_death_year < cand_birth_year:
+            continue
+        if target_birth_year and cand_marriage_year and cand_marriage_year < target_birth_year + 14:
             continue
 
         year_score = 0.85
         year_diff: int | None = None
-        if target_birth_year and cand_birth_year:
+        if target_birth_year:
+            # Strict requirement: when target_birth_year is known, candidate MUST have a matching birth/christening year
+            if cand_birth_year is None:
+                continue
             year_diff = abs(target_birth_year - cand_birth_year)
             if year_diff > max_year_diff:
                 continue
@@ -625,48 +841,8 @@ def evaluate_fs_match_candidates(
                 year_score = 0.86
             else:
                 year_score = 0.78
-        elif cand_facts and target_birth_year and not cand_birth_year:
-            year_score = 0.76
 
-        # 7. Gate: Place & Foreign-country check
-        cand_places_all = [p for p in (cand_birth_place, cand_residence_place) if p]
-        cand_places_lower = " ".join(cand_places_all).lower()
-        if cand_places_lower:
-            if any(
-                fc in cand_places_lower and fc not in fact_places_joined_lower
-                for fc in _FOREIGN_COUNTRIES_REJECT
-            ):
-                continue
-
-        place_score = 0.85
-        matched_place_str: str | None = None
-        if cand_places_all and fact_place_tokens:
-            cand_folded = fold_text_diacritics(" ".join(cand_places_all)).lower()
-            cand_v_sk, cand_v_hu, _ = normalize_village(cand_places_all[0].split(",")[0])
-            cand_norm_tokens = {
-                fold_text_diacritics(x).lower()
-                for x in (cand_v_sk, cand_v_hu, cand_places_all[0].split(",")[0])
-                if x
-            }
-            if (fact_place_tokens & cand_norm_tokens) or any(tok in cand_folded for tok in fact_place_tokens):
-                place_score = 1.0
-                matched_place_str = cand_places_all[0]
-            elif any(
-                max(_paleographic_similarity(ft, ct) for ct in cand_norm_tokens) >= 0.82
-                for ft in fact_place_tokens
-                if cand_norm_tokens
-            ):
-                place_score = 0.94
-                matched_place_str = cand_places_all[0]
-            elif any(
-                reg in cand_folded
-                for reg in ("trnava", "sered", "galanta", "hlohovec", "nitra", "nyitra", "pozsony", "trencin", "trencsen", "slovakia", "czechoslovakia", "hungary")
-            ):
-                place_score = 0.80
-            else:
-                place_score = 0.64
-
-        # 8. Gate: Relatives (Parents / Spouse) agreement & contradiction check
+        # 7. Gate: Relatives (Parents / Spouse) agreement & contradiction check
         rel_texts: list[str] = []
         for extra in hit.get("also_on_this_record") or []:
             if isinstance(extra, str) and extra.strip():
@@ -724,13 +900,60 @@ def evaluate_fs_match_candidates(
                 ):
                     continue
 
+        # 8. Gate: Strict Place & Foreign-country check
+        cand_places_all = [p for p in (cand_birth_place, cand_residence_place) if p and not _has_non_latin_script(p)]
+        cand_places_lower = " ".join(cand_places_all).lower()
+        if cand_places_lower:
+            if any(
+                fc in cand_places_lower and fc not in fact_places_joined_lower
+                for fc in _FOREIGN_COUNTRIES_REJECT
+            ):
+                continue
+
+        place_score = 0.0
+        matched_place_str: str | None = None
+        if fact_village_tokens:
+            if not cand_places_all:
+                # Candidate has no place at all: only allow if at least 2 relatives match
+                if len(matched_relatives) < 2:
+                    continue
+                place_score = 0.78
+            else:
+                cand_village_tokens, cand_county_tokens = _expand_place_tokens(cand_places_all)
+                cand_folded = fold_text_diacritics(" ".join(cand_places_all)).lower()
+                if (fact_village_tokens & cand_village_tokens) or any(
+                    tok in cand_folded for tok in fact_village_tokens if len(tok) >= 4
+                ):
+                    place_score = 1.0
+                    matched_place_str = cand_places_all[0]
+                elif cand_village_tokens and any(
+                    max(_paleographic_similarity(ft, ct) for ct in cand_village_tokens) >= 0.84
+                    for ft in fact_village_tokens
+                ):
+                    place_score = 0.94
+                    matched_place_str = cand_places_all[0]
+                elif cand_county_tokens and (
+                    (fact_county_tokens and (fact_county_tokens & cand_county_tokens))
+                    or (not fact_county_tokens and cand_county_tokens)
+                ):
+                    # Same county/district, different village: require exact year + strong name or matching relative
+                    if (year_diff == 0 and sur_score >= 0.95 and giv_score >= 0.95) or rel_bonus > 0:
+                        place_score = 0.82
+                    else:
+                        continue
+                else:
+                    # Place is in a completely different county or only says "Hungary"/"Slovakia"
+                    continue
+        else:
+            place_score = 0.85
+
         rel_bonus = min(0.08, rel_bonus)
         computed_score = 0.40 * sur_score + 0.30 * giv_score + 0.20 * year_score + 0.10 * place_score + rel_bonus
         raw_hit_score = hit.get("score") or hit.get("confidence")
         if isinstance(raw_hit_score, (int, float)) and 0.0 < float(raw_hit_score) <= 1.0:
-            computed_score = 0.75 * computed_score + 0.25 * float(raw_hit_score)
+            computed_score = 0.80 * computed_score + 0.20 * float(raw_hit_score)
         confidence = round(min(0.99, max(0.01, computed_score)), 2)
-        if confidence < 0.82:
+        if confidence < 0.86:
             continue
 
         cand_display_name = (
@@ -738,7 +961,15 @@ def evaluate_fs_match_candidates(
             if cand_name_forms
             else f"{fact.given_name_sk or fact.given_name_raw or '?'} {fact.surname_raw or '?'}"
         )
-        cand_ark = str(hit.get("ark") or hit.get("fs_record_ark") or "").strip() or None
+        raw_ark_val = hit.get("ark") or hit.get("fs_record_ark")
+        is_record_hit = bool(
+            raw_ark_val
+            or hit.get("id_kind") == "record"
+            or hit.get("collection")
+            or hit.get("collection_id")
+            or hit.get("also_on_this_record")
+        )
+        cand_ark = _normalize_record_ark(raw_ark_val, fs_id, is_record_hit=is_record_hit)
         cand_url = _build_candidate_fs_url(
             fs_id,
             cand_ark,
@@ -1320,26 +1551,126 @@ def build_action_packet_and_new_items(
 
 def cleanup_unmatched_familysearch_rows(session: Session) -> int:
     """
-    Removes any FamilySearchMatch rows where no actual FamilySearch person/record ID
-    (`fs_person_id`) was matched or where confidence_score <= 0.
+    Removes any FamilySearchMatch rows where:
+    - no valid `XXXX-YYY` FamilySearch ID (`fs_person_id`) is present or `confidence_score <= 0`,
+    - the matched name contains non-Latin script characters (e.g. Cyrillic `Стефан Лайкин`),
+    - the stored MCP `record_search` results fail the tightened `evaluate_fs_match_candidates` rules, or
+    - the row is a legacy unverified match with only `Meno v strome` and no verified birth year/place/candidates.
+    Also normalizes `fs_record_ark` (`1:1:XXXX-YYY`) and `candidates_json` on surviving rows.
     """
-    from sqlalchemy import func
-
-    unmatched = list(
-        session.exec(
-            select(FamilySearchMatch).where(
-                (FamilySearchMatch.fs_person_id.is_(None))  # type: ignore[union-attr]
-                | (func.trim(FamilySearchMatch.fs_person_id) == "")
-                | (FamilySearchMatch.confidence_score <= 0)
-            )
-        ).all()
-    )
-    if not unmatched:
+    all_matches = list(session.exec(select(FamilySearchMatch)).all())
+    if not all_matches:
         return 0
-    for m in unmatched:
-        session.delete(m)
-    session.commit()
-    return len(unmatched)
+
+    fact_ids = list({m.person_fact_id for m in all_matches if m.person_fact_id is not None})
+    facts_by_id = (
+        {f.id: f for f in session.exec(select(PersonFact).where(PersonFact.id.in_(fact_ids))).all()}
+        if fact_ids
+        else {}
+    )
+
+    deleted_count = 0
+    dirty_updated = False
+
+    for m in all_matches:
+        if m.fs_record_ark and _RECORD_ARK_RE.search(str(m.fs_record_ark)):
+            session.delete(m)
+            deleted_count += 1
+            continue
+
+        norm_pid = normalize_fs_identifier(m.fs_person_id)
+        if not norm_pid or not is_valid_fs_identifier(norm_pid) or (m.confidence_score or 0.0) <= 0:
+            session.delete(m)
+            deleted_count += 1
+            continue
+
+        if _has_non_latin_script(m.what_agrees_json) or _has_non_latin_script(m.summary_sk):
+            session.delete(m)
+            deleted_count += 1
+            continue
+
+        fact = facts_by_id.get(m.person_fact_id)
+        if fact is not None and not _has_sufficient_identity_for_fs_match(fact):
+            session.delete(m)
+            deleted_count += 1
+            continue
+
+        # Re-validate against stored MCP tree_search / record_search results when present
+        if fact is not None and m.raw_mcp_results_json and m.raw_mcp_results_json.strip() not in ("", "{}"):
+            try:
+                raw_mcp = json.loads(m.raw_mcp_results_json)
+            except Exception:
+                raw_mcp = None
+            if isinstance(raw_mcp, dict):
+                # Any match created from legacy `record_search` (Historical Records `1:1:`/`2:2:`) without `tree_search` is a Record ID, not a Tree Person ID!
+                if "record_search" in raw_mcp and "tree_search" not in raw_mcp:
+                    session.delete(m)
+                    deleted_count += 1
+                    continue
+                tree_search = raw_mcp.get("tree_search")
+                if isinstance(tree_search, dict):
+                    hits = (
+                        tree_search.get("results")
+                        or tree_search.get("matches")
+                        or tree_search.get("persons")
+                    )
+                    valid_cands = evaluate_fs_match_candidates(
+                        fact,
+                        hits if isinstance(hits, list) else None,
+                        place_std=fact.fs_place_standardized,
+                        is_census=(fact.record_type == "census"),
+                        session=session,
+                        default_fs_url=m.fs_url or "",
+                    )
+                    if not valid_cands:
+                        session.delete(m)
+                        deleted_count += 1
+                        continue
+                    prior_sel: list[str] = []
+                    try:
+                        prior_sel = json.loads(m.selected_fs_person_ids_json or "[]")
+                    except Exception:
+                        prior_sel = []
+                    apply_candidate_selection_to_match(
+                        m,
+                        valid_cands,
+                        selected_ids=prior_sel,
+                        fact=fact,
+                    )
+                    session.add(m)
+                    dirty_updated = True
+                    continue
+
+        # Check legacy unverified rows that only had `[{"field_sk": "Meno v strome", ...}]`
+        try:
+            agrees_list = json.loads(m.what_agrees_json or "[]")
+        except Exception:
+            agrees_list = []
+        if (
+            isinstance(agrees_list, list)
+            and len(agrees_list) == 1
+            and isinstance(agrees_list[0], dict)
+            and agrees_list[0].get("field_sk") == "Meno v strome"
+            and (not m.candidates_json or m.candidates_json.strip() in ("", "[]"))
+        ):
+            session.delete(m)
+            deleted_count += 1
+            continue
+
+        if m.fs_person_id != norm_pid:
+            m.fs_person_id = norm_pid
+            session.add(m)
+            dirty_updated = True
+        if m.fs_record_ark:
+            norm_ark = _normalize_record_ark(m.fs_record_ark, norm_pid, is_record_hit=True)
+            if norm_ark and norm_ark != m.fs_record_ark:
+                m.fs_record_ark = norm_ark
+                session.add(m)
+                dirty_updated = True
+
+    if deleted_count > 0 or dirty_updated:
+        session.commit()
+    return deleted_count
 
 
 class FamilySearchMcpManager:
@@ -2069,17 +2400,26 @@ class FamilySearchMcpManager:
                 else place_std
             )
             core_birth_year = int(fact.birth_year_est or year_int) if is_census else year_int
+            alt_surnames = _build_alternate_surnames_for_tree_search(fact, surname)
+            fact_sex_code = _normalize_sex_code(fact.sex)
             search_args: dict[str, Any] = {
                 "given": given,
                 "surname": surname,
                 "birth_place": core_birth_place,
                 "birth_year": core_birth_year,
-                "loose": False,
+                "birth_year_span": 3 if is_census else 2,
                 "count": 20,
             }
+            if alt_surnames:
+                search_args["alternate_surnames"] = alt_surnames
+            if fact_sex_code == "M":
+                search_args["sex"] = "Male"
+            elif fact_sex_code == "F":
+                search_args["sex"] = "Female"
             has_optional_relatives = False
             if is_census and place_std:
                 search_args["residence_place"] = place_std
+                search_args["residence_year"] = year_int
                 has_optional_relatives = True
             if spouse_given:
                 search_args["spouse_given"] = spouse_given
@@ -2090,6 +2430,9 @@ class FamilySearchMcpManager:
             if father_given:
                 search_args["father_given"] = father_given
                 has_optional_relatives = True
+            if father_surname:
+                search_args["father_surname"] = father_surname
+                has_optional_relatives = True
             if mother_given:
                 search_args["mother_given"] = mother_given
                 has_optional_relatives = True
@@ -2099,7 +2442,7 @@ class FamilySearchMcpManager:
 
             ensure_session_write_unlocked(session)
             search_res = await self.call_tool(
-                "search_records",
+                "search_tree_persons",
                 search_args,
                 stage="mcp_record",
                 scan_id=fact.scan_id,
@@ -2117,7 +2460,6 @@ class FamilySearchMcpManager:
                     search_res.get("results")
                     or search_res.get("matches")
                     or search_res.get("persons")
-                    or search_res.get("records")
                 )
                 if isinstance(search_res, dict) and not search_had_auth_error
                 else None
@@ -2128,17 +2470,24 @@ class FamilySearchMcpManager:
                 and not search_had_auth_error
                 and not self._is_call_tool_mocked()
             ):
+                fallback_args: dict[str, Any] = {
+                    "given": given,
+                    "surname": surname,
+                    "birth_place": core_birth_place,
+                    "birth_year": core_birth_year,
+                    "birth_year_span": 3,
+                    "count": 20,
+                }
+                if alt_surnames:
+                    fallback_args["alternate_surnames"] = alt_surnames
+                if fact_sex_code == "M":
+                    fallback_args["sex"] = "Male"
+                elif fact_sex_code == "F":
+                    fallback_args["sex"] = "Female"
                 ensure_session_write_unlocked(session)
                 fallback_res = await self.call_tool(
-                    "search_records",
-                    {
-                        "given": given,
-                        "surname": surname,
-                        "birth_place": core_birth_place,
-                        "birth_year": core_birth_year,
-                        "loose": False,
-                        "count": 20,
-                    },
+                    "search_tree_persons",
+                    fallback_args,
                     stage="mcp_record",
                     scan_id=fact.scan_id,
                     row_id=eff_row_id or None,
@@ -2149,32 +2498,11 @@ class FamilySearchMcpManager:
                         fallback_res.get("results")
                         or fallback_res.get("matches")
                         or fallback_res.get("persons")
-                        or fallback_res.get("records")
                     )
 
             harvested_surnames, harvested_given = extract_names_from_fs_hits(
                 results if isinstance(results, list) else None
             )
-            if not is_census and not search_had_auth_error and fs_name_cache_size(area_key, year_int) < 15:
-                ensure_session_write_unlocked(session)
-                harvest_res = await self.call_tool(
-                    "search_records",
-                    {
-                        "birth_place": place_std,
-                        "birth_year": year_int,
-                        "loose": False,
-                        "count": 50,
-                    },
-                    stage="mcp_record",
-                    scan_id=fact.scan_id,
-                    row_id=eff_row_id or None,
-                )
-                extra_hits = harvest_res.get("results") if isinstance(harvest_res, dict) else None
-                extra_s, extra_g = extract_names_from_fs_hits(
-                    extra_hits if isinstance(extra_hits, list) else None
-                )
-                harvested_surnames.extend(extra_s)
-                harvested_given.extend(extra_g)
             if not is_census and row is not None and (harvested_surnames or harvested_given):
                 record_observed_fs_names(area_key, year_int, harvested_surnames, harvested_given)
                 _apply_fs_name_matches_to_fact(fact, row, area_key, year_int)
@@ -2231,7 +2559,7 @@ class FamilySearchMcpManager:
         match.what_is_new_json = json.dumps(what_is_new, ensure_ascii=False)
         match.action_packet_json = json.dumps(action_packet, ensure_ascii=False)
         match.raw_mcp_results_json = json.dumps(
-            {"place_search": place_res, "record_search": search_res, "area_harvest": harvest_res},
+            {"place_search": place_res, "tree_search": search_res, "area_harvest": harvest_res},
             ensure_ascii=False,
         )
         apply_candidate_selection_to_match(
@@ -2450,28 +2778,39 @@ class FamilySearchMcpManager:
                 candidates: list[dict[str, Any]] = []
                 search_had_auth_error = False
                 if should_query_records and (given and surname):
+                    alt_surnames = _build_alternate_surnames_for_tree_search(fact, surname)
+                    fact_sex_code = _normalize_sex_code(fact.sex)
                     search_args: dict[str, Any] = {
                         "given": given,
                         "surname": surname,
                         "birth_place": birth_place or place_std,
                         "birth_year": int(birth_year or sheet.census_year),
+                        "birth_year_span": 3,
                         "residence_place": place_std,
-                        "loose": False,
+                        "residence_year": int(sheet.census_year),
                         "count": 20,
                     }
+                    if alt_surnames:
+                        search_args["alternate_surnames"] = alt_surnames
+                    if fact_sex_code == "M":
+                        search_args["sex"] = "Male"
+                    elif fact_sex_code == "F":
+                        search_args["sex"] = "Female"
                     if spouse_given:
                         search_args["spouse_given"] = spouse_given
                     if spouse_surname:
                         search_args["spouse_surname"] = spouse_surname
                     if father_given:
                         search_args["father_given"] = father_given
+                    if father_surname:
+                        search_args["father_surname"] = father_surname
                     if mother_given:
                         search_args["mother_given"] = mother_given
                     if mother_surname:
                         search_args["mother_surname"] = mother_surname
                     ensure_session_write_unlocked(session)
                     search_res = await self.call_tool(
-                        "search_records",
+                        "search_tree_persons",
                         search_args,
                         stage="mcp_record",
                         scan_id=fact.scan_id or sheet.front_scan_id,
@@ -2490,7 +2829,6 @@ class FamilySearchMcpManager:
                             search_res.get("results")
                             or search_res.get("matches")
                             or search_res.get("persons")
-                            or search_res.get("records")
                         )
                         if isinstance(search_res, dict) and not search_had_auth_error
                         else None
@@ -2500,17 +2838,24 @@ class FamilySearchMcpManager:
                         and not search_had_auth_error
                         and not self._is_call_tool_mocked()
                     ):
+                        fallback_args: dict[str, Any] = {
+                            "given": given,
+                            "surname": surname,
+                            "birth_place": birth_place or place_std,
+                            "birth_year": int(birth_year or sheet.census_year),
+                            "birth_year_span": 3,
+                            "count": 20,
+                        }
+                        if alt_surnames:
+                            fallback_args["alternate_surnames"] = alt_surnames
+                        if fact_sex_code == "M":
+                            fallback_args["sex"] = "Male"
+                        elif fact_sex_code == "F":
+                            fallback_args["sex"] = "Female"
                         ensure_session_write_unlocked(session)
                         fallback_res = await self.call_tool(
-                            "search_records",
-                            {
-                                "given": given,
-                                "surname": surname,
-                                "birth_place": birth_place or place_std,
-                                "birth_year": int(birth_year or sheet.census_year),
-                                "loose": False,
-                                "count": 20,
-                            },
+                            "search_tree_persons",
+                            fallback_args,
                             stage="mcp_record",
                             scan_id=fact.scan_id or sheet.front_scan_id,
                             row_id=fact.row_id,
@@ -2521,7 +2866,6 @@ class FamilySearchMcpManager:
                                 fallback_res.get("results")
                                 or fallback_res.get("matches")
                                 or fallback_res.get("persons")
-                                or fallback_res.get("records")
                             )
 
                     candidates = evaluate_fs_match_candidates(
@@ -2569,7 +2913,7 @@ class FamilySearchMcpManager:
                 match.what_is_new_json = json.dumps(what_is_new, ensure_ascii=False)
                 match.action_packet_json = json.dumps(action_packet, ensure_ascii=False)
                 match.raw_mcp_results_json = json.dumps(
-                    {"place_search": place_res, "record_search": search_res},
+                    {"place_search": place_res, "tree_search": search_res},
                     ensure_ascii=False,
                 )
                 apply_candidate_selection_to_match(

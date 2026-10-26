@@ -707,6 +707,14 @@ def init_db() -> None:
     if salvaged:
         _rebuild_fts_after_salvage()
 
+    try:
+        from backend.app.mcp.familysearch_client import cleanup_unmatched_familysearch_rows
+
+        with Session(engine) as session:
+            cleanup_unmatched_familysearch_rows(session)
+    except Exception:
+        pass
+
 
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:

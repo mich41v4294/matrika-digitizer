@@ -114,6 +114,7 @@ interface RecordItem {
   fs_match?: {
     id: number;
     fs_person_id?: string | null;
+    fs_record_ark?: string | null;
     fs_url?: string | null;
     match_status?: string;
   } | null;
@@ -1751,7 +1752,7 @@ export default function BooksOverview({
                   <div className="flex flex-wrap items-center gap-1.5">
                     {item.fs_match?.fs_person_id && (
                       <a
-                        href={`https://www.familysearch.org/tree/person/details/${encodeURIComponent(
+                        href={`https://www.familysearch.org/tree/person/${encodeURIComponent(
                           item.fs_match.fs_person_id.trim().toUpperCase()
                         )}`}
                         target="_blank"

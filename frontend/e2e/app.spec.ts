@@ -339,7 +339,7 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(candIdLink1).toBeVisible();
     await expect(candIdLink1).toHaveAttribute(
       "href",
-      /https:\/\/www\.familysearch\.org\/(tree\/person\/details\/KWCZ-001|ark:\/61903\/.*)/
+      "https://www.familysearch.org/tree/person/KWCZ-001"
     );
     await expect(page.getByTestId("fs-candidate-id-L4TR-882").first()).toBeVisible();
     await expect(page.getByTestId("fs-candidate-id-KWCZ-019").first()).toBeVisible();
@@ -349,7 +349,7 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(selBadge2).toBeVisible();
     await expect(selBadge2).toHaveAttribute(
       "href",
-      "https://www.familysearch.org/tree/person/details/L4TR-882"
+      "https://www.familysearch.org/tree/person/L4TR-882"
     );
     await expect(page.locator("body")).toContainText("Vybrané: 2 / 2");
 

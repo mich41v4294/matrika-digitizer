@@ -155,6 +155,10 @@ _SAFE_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "censushousehold": [
         ("dwelling_unit", "TEXT"),
     ],
+    "familysearchmatch": [
+        ("candidates_json", "TEXT DEFAULT '[]'"),
+        ("selected_fs_person_ids_json", "TEXT DEFAULT '[]'"),
+    ],
 }
 
 
@@ -369,7 +373,7 @@ def _sanitize_salvaged_value(col_name: str, val: Any, col_default: Any = None) -
             try:
                 json.loads(val)
             except Exception:
-                return "[]" if ("traces" in col_name or "crops" in col_name or "candidates" in col_name or "events" in col_name or "urls" in col_name) else "{}"
+                return "[]" if ("traces" in col_name or "crops" in col_name or "candidates" in col_name or "ids" in col_name or "events" in col_name or "urls" in col_name) else "{}"
     return val
 
 
@@ -497,7 +501,7 @@ def _read_salvageable_table_rows(
                 except Exception:
                     fallback_v = (
                         "[]"
-                        if c_name.endswith("_json") and ("crops" in c_name or "candidates" in c_name or "events" in c_name or "urls" in c_name)
+                        if c_name.endswith("_json") and ("crops" in c_name or "candidates" in c_name or "ids" in c_name or "events" in c_name or "urls" in c_name)
                         else ("{}" if c_name.endswith("_json") else col_defaults.get(c_name))
                     )
                     rescued_vals.append(fallback_v)

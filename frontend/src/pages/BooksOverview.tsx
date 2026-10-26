@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Download,
   Edit3,
+  ExternalLink,
   Eye,
   FileSpreadsheet,
   Play,
@@ -110,6 +111,12 @@ interface RecordItem {
   stitched_crop_url: string | null;
   scan_filename: string | null;
   scan_url?: string | null;
+  fs_match?: {
+    id: number;
+    fs_person_id?: string | null;
+    fs_url?: string | null;
+    match_status?: string;
+  } | null;
   ocr_feedback?: OcrFeedbackItem | null;
 }
 
@@ -1742,6 +1749,21 @@ export default function BooksOverview({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-1.5">
+                    {item.fs_match?.fs_person_id && (
+                      <a
+                        href={`https://www.familysearch.org/tree/person/details/${encodeURIComponent(
+                          item.fs_match.fs_person_id.trim().toUpperCase()
+                        )}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        title={`FamilySearch ID: ${item.fs_match.fs_person_id}`}
+                        className="px-2 py-0.5 rounded-full bg-emerald-900 hover:bg-emerald-800 text-emerald-100 font-mono font-bold text-xs inline-flex items-center gap-1 transition"
+                      >
+                        <span>FS ID: {item.fs_match.fs_person_id}</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                    )}
                     {(r.birth_or_event_date || r.baptism_or_burial_date) && (
                       <span className="px-2 py-0.5 rounded-full bg-stone-200 font-medium text-xs">
                         {r.birth_or_event_date || r.baptism_or_burial_date}

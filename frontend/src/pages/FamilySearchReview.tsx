@@ -73,6 +73,27 @@ interface ActionPacket {
   house_number?: string | null;
   sheet_number?: string | null;
   person_row_number?: string | number | null;
+  candidates?: FsMatchCandidate[];
+  selected_fs_person_ids?: string[];
+}
+
+interface FsMatchCandidate {
+  fs_person_id: string;
+  fs_id?: string;
+  fs_record_ark?: string | null;
+  fs_url?: string | null;
+  name: string;
+  sex?: string | null;
+  lifespan?: string | null;
+  birth_date?: string | null;
+  birth_year?: number | null;
+  birth_place?: string | null;
+  collection?: string | null;
+  relatives_summary?: string | null;
+  confidence_score: number;
+  what_agrees?: SummaryItem[];
+  what_differs?: SummaryItem[];
+  selected?: boolean;
 }
 
 interface FsMatchItem {
@@ -94,6 +115,8 @@ interface FsMatchItem {
   match_status?: string;
   reviewed_by_user?: boolean;
   fs_person_id: string | null;
+  selected_fs_person_ids?: string[];
+  candidates?: FsMatchCandidate[];
   fs_person_name: string | null;
   fs_url: string | null;
   confidence_score: number | null;
@@ -208,15 +231,85 @@ interface Props {
   refreshStatus?: () => void;
 }
 
-function renderSummaryItem(item: SummaryItem): React.ReactNode {
+const FS_ID_TOKEN_RE = /\b([A-Z0-9]{4}-[A-Z0-9]{3,4})\b/g;
+
+function getFsIdClickthruUrl(
+  fsId: string,
+  candidate?: { fs_url?: string | null; fs_record_ark?: string | null } | null
+): string {
+  const cleanId = String(fsId || "").trim().toUpperCase();
+  if (candidate?.fs_record_ark) {
+    const cleanArk = String(candidate.fs_record_ark).trim();
+    if (cleanArk.startsWith("https://")) return cleanArk;
+    if (cleanArk.includes("ark:/61903/")) {
+      return `https://www.familysearch.org/ark:/61903/${cleanArk.split("ark:/61903/")[1]}`;
+    }
+    if (/^\d+:\d+:/.test(cleanArk)) {
+      return `https://www.familysearch.org/ark:/61903/${cleanArk}`;
+    }
+  }
+  if (
+    candidate?.fs_url &&
+    candidate.fs_url.startsWith("https://") &&
+    !candidate.fs_url.includes("/search/record/results")
+  ) {
+    return candidate.fs_url;
+  }
+  return `https://www.familysearch.org/tree/person/details/${encodeURIComponent(cleanId)}`;
+}
+
+function renderTextWithFsIdLinks(
+  text: string,
+  candidatesById?: Map<string, FsMatchCandidate>
+): React.ReactNode {
+  if (!text) return text;
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  const regex = new RegExp(FS_ID_TOKEN_RE.source, "g");
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    const fsId = match[1];
+    const cand = candidatesById?.get(fsId);
+    const url = getFsIdClickthruUrl(fsId, cand);
+    parts.push(
+      <a
+        key={`${match.index}-${fsId}`}
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="font-mono font-bold underline decoration-dotted hover:text-amber-800 inline-flex items-center gap-0.5"
+        title={`FamilySearch ID: ${fsId}`}
+      >
+        {fsId}
+        <ExternalLink className="w-3 h-3 inline shrink-0" />
+      </a>
+    );
+    lastIndex = regex.lastIndex;
+  }
+  if (parts.length === 0) return text;
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+  return <>{parts}</>;
+}
+
+function renderSummaryItem(
+  item: SummaryItem,
+  candidatesById?: Map<string, FsMatchCandidate>
+): React.ReactNode {
   if (typeof item === "string") {
-    return item;
+    return renderTextWithFsIdLinks(item, candidatesById);
   }
   if (item && typeof item === "object") {
     if (item.field_sk && item.value) {
       return (
         <span>
-          <strong className="font-semibold">{item.field_sk}:</strong> {String(item.value)}
+          <strong className="font-semibold">{item.field_sk}:</strong>{" "}
+          {renderTextWithFsIdLinks(String(item.value), candidatesById)}
         </span>
       );
     }
@@ -224,7 +317,8 @@ function renderSummaryItem(item: SummaryItem): React.ReactNode {
       return (
         <span>
           <strong className="font-semibold">{item.field_sk}:</strong>{" "}
-          {String(item.matrika_val || "?")} vs. FS: {String(item.fs_val || "?")}
+          {renderTextWithFsIdLinks(String(item.matrika_val || "?"), candidatesById)} vs. FS:{" "}
+          {renderTextWithFsIdLinks(String(item.fs_val || "?"), candidatesById)}
         </span>
       );
     }
@@ -246,6 +340,8 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
   const [tokenInput, setTokenInput] = useState("");
   const [refreshingId, setRefreshingId] = useState<number | null>(null);
   const [reviewingId, setReviewingId] = useState<number | null>(null);
+  const [updatingCandMatchId, setUpdatingCandMatchId] = useState<number | null>(null);
+  const [customCandInputs, setCustomCandInputs] = useState<Record<number, string>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const prevRunningRef = useRef<boolean>(false);
   const prevMatchedCountRef = useRef<number>(0);
@@ -631,6 +727,97 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
     }
   };
 
+  const toggleCandidateSelection = async (matchId: number, candidateId: string) => {
+    setErrorMsg(null);
+    setUpdatingCandMatchId(matchId);
+    try {
+      const r = await fetch(`/api/familysearch/matches/${matchId}/candidates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ toggle_fs_person_id: candidateId }),
+      });
+      const resData = await r.json().catch(() => null);
+      if (!r.ok) {
+        setErrorMsg(
+          resData?.detail ||
+            (lang === "sk"
+              ? "Nepodarilo sa upraviť výber kandidátov."
+              : "Failed to update candidate selection.")
+        );
+        return;
+      }
+      if (resData) {
+        setMatches((prev) =>
+          prev.map((m) =>
+            m.id === matchId
+              ? {
+                  ...m,
+                  fs_person_id: resData.fs_person_id || m.fs_person_id,
+                  selected_fs_person_ids: resData.selected_fs_person_ids || m.selected_fs_person_ids,
+                  candidates: resData.candidates || m.candidates,
+                  match_status: resData.match_status || m.match_status,
+                  status: resData.match_status || m.status,
+                  confidence_score: resData.confidence_score ?? m.confidence_score,
+                  what_agrees: resData.what_agrees || m.what_agrees,
+                  what_differs: resData.what_differs || m.what_differs,
+                  explanation_sk: resData.explanation_sk || m.explanation_sk,
+                }
+              : m
+          )
+        );
+      }
+    } finally {
+      setUpdatingCandMatchId(null);
+    }
+  };
+
+  const addCustomCandidateId = async (matchId: number) => {
+    const rawId = (customCandInputs[matchId] || "").trim().toUpperCase();
+    if (!rawId) return;
+    setErrorMsg(null);
+    setUpdatingCandMatchId(matchId);
+    try {
+      const r = await fetch(`/api/familysearch/matches/${matchId}/candidates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ add_candidate_id: rawId }),
+      });
+      const resData = await r.json().catch(() => null);
+      if (!r.ok) {
+        setErrorMsg(
+          resData?.detail ||
+            (lang === "sk"
+              ? "Zadajte platné FamilySearch ID vo formáte XXXX-YYY (napr. KWCZ-001)."
+              : "Enter a valid FamilySearch ID in XXXX-YYY format (e.g. KWCZ-001).")
+        );
+        return;
+      }
+      setCustomCandInputs((prev) => ({ ...prev, [matchId]: "" }));
+      if (resData) {
+        setMatches((prev) =>
+          prev.map((m) =>
+            m.id === matchId
+              ? {
+                  ...m,
+                  fs_person_id: resData.fs_person_id || m.fs_person_id,
+                  selected_fs_person_ids: resData.selected_fs_person_ids || m.selected_fs_person_ids,
+                  candidates: resData.candidates || m.candidates,
+                  match_status: resData.match_status || m.match_status,
+                  status: resData.match_status || m.status,
+                  confidence_score: resData.confidence_score ?? m.confidence_score,
+                  what_agrees: resData.what_agrees || m.what_agrees,
+                  what_differs: resData.what_differs || m.what_differs,
+                  explanation_sk: resData.explanation_sk || m.explanation_sk,
+                }
+              : m
+          )
+        );
+      }
+    } finally {
+      setUpdatingCandMatchId(null);
+    }
+  };
+
   const toggleExpanded = (id: number) => {
     setExpandedIds((prev) => {
       const next = new Set(prev);
@@ -674,8 +861,14 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
             {lang === "sk" ? "Nová osoba" : "New Person"}
           </span>
         );
-      case "existing_needs_facts":
       case "multiple_candidates":
+        return (
+          <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-900 font-semibold text-xs flex items-center gap-1">
+            <AlertCircle className="w-3.5 h-3.5" />{" "}
+            {lang === "sk" ? "Viacero kandidátov" : "Multiple Candidates"}
+          </span>
+        );
+      case "existing_needs_facts":
         return (
           <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-900 font-semibold text-xs flex items-center gap-1">
             <AlertCircle className="w-3.5 h-3.5" />{" "}
@@ -1367,6 +1560,40 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                     ]
               ).filter((f) => String(f.val ?? "").trim() !== "");
 
+            const matchCandidates: FsMatchCandidate[] =
+              m.candidates && m.candidates.length > 0
+                ? m.candidates
+                : p.candidates && p.candidates.length > 0
+                ? p.candidates
+                : m.fs_person_id
+                ? [
+                    {
+                      fs_person_id: m.fs_person_id,
+                      fs_id: m.fs_person_id,
+                      fs_url: searchUrl,
+                      name: personDisplay,
+                      birth_date: birthDate,
+                      birth_place: birthPlaceModern || birthPlaceHist,
+                      confidence_score: m.confidence_score || 0.88,
+                      selected: true,
+                    },
+                  ]
+                : [];
+            const selectedIds: string[] =
+              m.selected_fs_person_ids && m.selected_fs_person_ids.length > 0
+                ? m.selected_fs_person_ids
+                : p.selected_fs_person_ids && p.selected_fs_person_ids.length > 0
+                ? p.selected_fs_person_ids
+                : m.fs_person_id
+                ? [m.fs_person_id]
+                : [];
+
+            const candidatesById = new Map<string, FsMatchCandidate>();
+            for (const c of matchCandidates) {
+              const cidKey = (c.fs_person_id || c.fs_id || "").trim().toUpperCase();
+              if (cidKey) candidatesById.set(cidKey, c);
+            }
+
             return (
               <div key={m.id} className="bg-white border border-stone-200 rounded-xl p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1414,9 +1641,36 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                   </div>
 
                   <div className="flex flex-wrap items-center gap-1.5">
-                    {m.fs_person_id && (
-                      <span className="px-2.5 py-1 rounded-full bg-emerald-900 text-emerald-100 font-mono font-bold text-xs">
-                        FS ID: {m.fs_person_id}
+                    {selectedIds.map((pid) => {
+                      const candForPid = candidatesById.get(pid.toUpperCase());
+                      const pidHref = getFsIdClickthruUrl(pid, candForPid);
+                      return (
+                        <a
+                          key={pid}
+                          href={pidHref}
+                          target="_blank"
+                          rel="noreferrer"
+                          data-testid={`fs-selected-id-badge-${pid}`}
+                          title={
+                            lang === "sk"
+                              ? `Otvoriť ${pid} vo FamilySearch`
+                              : `Open ${pid} in FamilySearch`
+                          }
+                          className="px-2.5 py-1 rounded-full bg-emerald-900 hover:bg-emerald-800 text-emerald-100 font-mono font-bold text-xs inline-flex items-center gap-1 transition"
+                        >
+                          <span>FS ID: {pid}</span>
+                          <ExternalLink className="w-3 h-3 shrink-0" />
+                        </a>
+                      );
+                    })}
+                    {matchCandidates.length > 1 && (
+                      <span
+                        data-testid={`fs-candidates-count-badge-${m.id}`}
+                        className="px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-950 font-semibold text-xs"
+                      >
+                        {lang === "sk"
+                          ? `Vybrané: ${selectedIds.length} / ${matchCandidates.length}`
+                          : `Selected: ${selectedIds.length} / ${matchCandidates.length}`}
                       </span>
                     )}
                     {statusBadge(m.match_status || m.status)}
@@ -1477,6 +1731,192 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                   </div>
                 </div>
 
+                {/* Possible Match Candidates Multi-Select Panel with XXXX-YYY Identifiers */}
+                {matchCandidates.length > 0 && (
+                  <div
+                    data-testid={`fs-candidates-panel-${m.id}`}
+                    className="bg-stone-50/90 border border-stone-200 rounded-xl p-3 space-y-2.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-bold text-stone-900">
+                          {lang === "sk"
+                            ? "Možné zhody – kandidáti vo FamilySearch (výber viacerých)"
+                            : "Possible Matches – FamilySearch Candidates (multi-select)"}
+                        </span>
+                        <span className="text-[11px] text-stone-600">
+                          {lang === "sk"
+                            ? "Kliknutím môžete vybrať jedného alebo viacerých kandidátov (XXXX-YYY)"
+                            : "Click to select one or multiple match candidates (XXXX-YYY)"}
+                        </span>
+                      </div>
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void addCustomCandidateId(m.id);
+                        }}
+                        className="flex items-center gap-1.5"
+                      >
+                        <input
+                          type="text"
+                          data-testid={`fs-add-candidate-input-${m.id}`}
+                          value={customCandInputs[m.id] || ""}
+                          onChange={(e) =>
+                            setCustomCandInputs((prev) => ({
+                              ...prev,
+                              [m.id]: e.target.value.toUpperCase(),
+                            }))
+                          }
+                          placeholder="XXXX-YYY"
+                          maxLength={9}
+                          className="w-28 px-2.5 py-1 rounded-md border border-stone-300 bg-white font-mono text-xs text-stone-900 uppercase"
+                        />
+                        <button
+                          type="submit"
+                          data-testid={`fs-add-candidate-btn-${m.id}`}
+                          disabled={
+                            updatingCandMatchId === m.id ||
+                            !(customCandInputs[m.id] || "").trim()
+                          }
+                          className="px-2.5 py-1 min-h-[28px] rounded-md bg-stone-800 hover:bg-stone-900 text-amber-300 font-semibold text-xs cursor-pointer disabled:opacity-50"
+                        >
+                          {lang === "sk" ? "+ Pridať ID" : "+ Add ID"}
+                        </button>
+                      </form>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {matchCandidates.map((cand) => {
+                        const cid = cand.fs_person_id || cand.fs_id || "";
+                        const isSelected = selectedIds.includes(cid) || Boolean(cand.selected);
+                        const scorePct = Math.round(
+                          Number(cand.confidence_score ?? m.confidence_score ?? 0.88) * 100
+                        );
+                        const candCopyKey = `${m.id}-cand-${cid}`;
+                        const candLink = getFsIdClickthruUrl(cid, cand);
+                        const isUpdatingThisMatch = updatingCandMatchId === m.id;
+                        return (
+                          <div
+                            key={cid}
+                            data-testid={`fs-candidate-card-${m.id}-${cid}`}
+                            className={`flex items-center justify-between gap-2.5 p-2.5 rounded-lg border transition ${
+                              isSelected
+                                ? "bg-emerald-50/90 border-emerald-500 text-stone-900 shadow-2xs"
+                                : "bg-white border-stone-200 hover:border-amber-400 text-stone-800"
+                            }`}
+                          >
+                            <div
+                              role="button"
+                              tabIndex={0}
+                              aria-disabled={isUpdatingThisMatch}
+                              data-testid={`fs-candidate-toggle-${m.id}-${cid}`}
+                              onClick={() => {
+                                if (!isUpdatingThisMatch) {
+                                  void toggleCandidateSelection(m.id, cid);
+                                }
+                              }}
+                              onKeyDown={(e) => {
+                                if (
+                                  !isUpdatingThisMatch &&
+                                  (e.key === "Enter" || e.key === " ")
+                                ) {
+                                  e.preventDefault();
+                                  void toggleCandidateSelection(m.id, cid);
+                                }
+                              }}
+                              className={`flex items-start gap-2.5 min-w-0 flex-1 text-left cursor-pointer ${
+                                isUpdatingThisMatch ? "opacity-50 pointer-events-none" : ""
+                              }`}
+                            >
+                              <span
+                                className={`mt-0.5 w-4 h-4 rounded flex items-center justify-center border shrink-0 ${
+                                  isSelected
+                                    ? "bg-emerald-700 border-emerald-700 text-white"
+                                    : "bg-white border-stone-400 text-transparent"
+                                }`}
+                              >
+                                <Check className="w-3 h-3" />
+                              </span>
+                              <div className="min-w-0 flex-1 space-y-0.5">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="font-bold text-xs sm:text-sm text-stone-900 truncate">
+                                    {cand.name || personDisplay}
+                                  </span>
+                                  <a
+                                    href={candLink}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    data-testid={`fs-candidate-id-${cid}`}
+                                    title={
+                                      lang === "sk"
+                                        ? `Otvoriť ${cid} vo FamilySearch`
+                                        : `Open ${cid} in FamilySearch`
+                                    }
+                                    className={`px-2 py-0.5 rounded font-mono font-bold text-[11px] inline-flex items-center gap-1 underline decoration-dotted transition ${
+                                      isSelected
+                                        ? "bg-emerald-900 hover:bg-emerald-800 text-emerald-100"
+                                        : "bg-stone-200 hover:bg-amber-200 text-stone-900"
+                                    }`}
+                                  >
+                                    <span>{cid}</span>
+                                    <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                                  </a>
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-semibold text-[11px]">
+                                    {scorePct}%
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-stone-600 truncate">
+                                  {[
+                                    cand.lifespan ||
+                                      (cand.birth_date ? `*${cand.birth_date}` : null),
+                                    cand.birth_place,
+                                    cand.relatives_summary,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" · ")}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => copyField(candCopyKey, cid)}
+                                title={
+                                  lang === "sk"
+                                    ? `Kopírovať FS ID (${cid})`
+                                    : `Copy FS ID (${cid})`
+                                }
+                                className="p-1.5 rounded-md bg-white hover:bg-stone-100 border border-stone-200 text-stone-700 cursor-pointer"
+                              >
+                                {copiedKey === candCopyKey ? (
+                                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                ) : (
+                                  <Copy className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                              <a
+                                href={candLink}
+                                target="_blank"
+                                rel="noreferrer"
+                                title={
+                                  lang === "sk"
+                                    ? `Otvoriť ${cid} vo FamilySearch`
+                                    : `Open ${cid} in FamilySearch`
+                                }
+                                className="p-1.5 rounded-md bg-white hover:bg-amber-50 border border-stone-200 text-amber-900"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                              </a>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
                   <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
                     <h3 className="font-bold text-emerald-950 text-xs sm:text-sm mb-1.5">
@@ -1484,7 +1924,7 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                     </h3>
                     <ul className="text-xs sm:text-sm text-emerald-950 space-y-1 list-disc list-inside leading-snug">
                       {(m.what_is_new || []).map((item, idx) => (
-                        <li key={idx}>{renderSummaryItem(item)}</li>
+                        <li key={idx}>{renderSummaryItem(item, candidatesById)}</li>
                       ))}
                     </ul>
                   </div>
@@ -1496,7 +1936,7 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                     {m.what_agrees && m.what_agrees.length > 0 ? (
                       <ul className="text-xs sm:text-sm text-stone-800 space-y-1 list-disc list-inside leading-snug">
                         {m.what_agrees.map((item, idx) => (
-                          <li key={idx}>{renderSummaryItem(item)}</li>
+                          <li key={idx}>{renderSummaryItem(item, candidatesById)}</li>
                         ))}
                       </ul>
                     ) : (
@@ -1515,7 +1955,7 @@ export default function FamilySearchReview({ lang = "sk", refreshStatus }: Props
                     {m.what_differs && m.what_differs.length > 0 ? (
                       <ul className="text-xs sm:text-sm text-rose-950 space-y-1 list-disc list-inside leading-snug">
                         {m.what_differs.map((item, idx) => (
-                          <li key={idx}>{renderSummaryItem(item)}</li>
+                          <li key={idx}>{renderSummaryItem(item, candidatesById)}</li>
                         ))}
                       </ul>
                     ) : (

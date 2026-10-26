@@ -1019,6 +1019,143 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
                 self.assertTrue(ok_tok_json["sync_enabled"])
                 fs_mcp_manager._cached_auth_status = None
                 fs_mcp_manager._cached_auth_ts = 0.0
+
+            # 8. Verify tightened FamilySearch matching, XXXX-YYY candidate identifiers, and multi-candidate selection
+            from backend.app.mcp.familysearch_client import (
+                evaluate_fs_match_candidates,
+                is_valid_fs_identifier,
+                normalize_fs_identifier,
+            )
+
+            self.assertEqual(
+                normalize_fs_identifier({"id": "p_9876543", "ark": "ark:/61903/1:1:NY3G-24D"}),
+                "NY3G-24D",
+            )
+            self.assertEqual(
+                normalize_fs_identifier("https://www.familysearch.org/ark:/61903/4:1:k2zp-vy1?context=details"),
+                "K2ZP-VY1",
+            )
+            self.assertTrue(is_valid_fs_identifier("KWCJ-4N2"))
+
+            test_fact = PersonFact(
+                id=999901,
+                row_id=created_row_ids[0] if created_row_ids else 0,
+                scan_id=0,
+                record_type="census",
+                event_year=1930,
+                birth_year_est=1890,
+                given_name_raw="Ján",
+                given_name_sk="Ján",
+                surname_raw="Kováč",
+                surname_normalized="Kováč",
+                sex="M",
+                village_raw="Horný Čepeň",
+                village_sk="Horný Čepeň",
+                father_name="Jozef Kováč",
+                mother_name="Mária Vargová",
+            )
+            raw_hits = [
+                # Valid candidate 1: Latin equivalent Joannes Kováč, born 1890, local persona id p_101 but ARK has XXXX-YYY
+                {
+                    "id": "p_101",
+                    "ark": "ark:/61903/1:1:NY3G-24D",
+                    "name": "Joannes Kováč",
+                    "sex": "Male",
+                    "lifespan": "1890–1962",
+                    "facts": [{"type": "Birth", "date": "1890", "place": "Horný Čepeň, Czechoslovakia"}],
+                    "also_on_this_record": ["Jozef Kováč", "Mária Vargová"],
+                    "score": 0.95,
+                },
+                # Valid candidate 2: Ján Kováč, born 1891 (diff=1 <= 3), tree ID K2ZP-VY1
+                {
+                    "id": "K2ZP-VY1",
+                    "name": "Ján Kováč",
+                    "sex": "Male",
+                    "lifespan": "1891–Deceased",
+                    "facts": [{"type": "Birth", "date": "1891", "place": "Horný Čepeň, Trnava, Slovakia"}],
+                    "score": 0.90,
+                },
+                # Invalid candidate A: Wrong surname (Novák) -> MUST be rejected
+                {
+                    "id": "BAD1-001",
+                    "name": "Ján Novák",
+                    "sex": "Male",
+                    "facts": [{"type": "Birth", "date": "1890", "place": "Horný Čepeň"}],
+                    "score": 0.99,
+                },
+                # Invalid candidate B: Wrong given name (Štefan) -> MUST be rejected
+                {
+                    "id": "BAD2-002",
+                    "name": "Štefan Kováč",
+                    "sex": "Male",
+                    "facts": [{"type": "Birth", "date": "1890", "place": "Horný Čepeň"}],
+                    "score": 0.99,
+                },
+                # Invalid candidate C: Birth year way off (1860 vs 1890) -> MUST be rejected
+                {
+                    "id": "BAD3-003",
+                    "name": "Ján Kováč",
+                    "sex": "Male",
+                    "facts": [{"type": "Birth", "date": "1860", "place": "Horný Čepeň"}],
+                    "score": 0.95,
+                },
+                # Invalid candidate D: Died before 1930 census (1890-1918) -> MUST be rejected
+                {
+                    "id": "BAD4-004",
+                    "name": "Ján Kováč",
+                    "sex": "Male",
+                    "lifespan": "1890–1918",
+                    "facts": [{"type": "Birth", "date": "1890", "place": "Horný Čepeň"}],
+                    "score": 0.95,
+                },
+                # Invalid candidate E: Foreign country (United States) -> MUST be rejected
+                {
+                    "id": "BAD5-005",
+                    "name": "Jan Kovac",
+                    "sex": "Male",
+                    "facts": [{"type": "Birth", "date": "1890", "place": "Pittsburgh, Pennsylvania, United States"}],
+                    "score": 0.95,
+                },
+            ]
+            evaluated = evaluate_fs_match_candidates(
+                test_fact,
+                raw_hits,
+                place_std="Horný Čepeň, Slovensko",
+                is_census=True,
+            )
+            eval_ids = [c["fs_person_id"] for c in evaluated]
+            self.assertEqual(eval_ids, ["NY3G-24D", "K2ZP-VY1"])
+            for cand in evaluated:
+                self.assertTrue(is_valid_fs_identifier(cand["fs_person_id"]))
+                self.assertEqual(cand["fs_id"], cand["fs_person_id"])
+
+            # Test multi-selection API on m_valid
+            m_valid_id = created_match_ids[0] if created_match_ids else 0
+            r_add_cand = client.post(
+                f"/api/familysearch/matches/{m_valid_id}/candidates",
+                json={"add_candidate_id": "NY3G-24D", "add_candidate_name": "Joannes Kováč"},
+            )
+            self.assertEqual(r_add_cand.status_code, 200)
+            add_cand_json = r_add_cand.json()
+            self.assertEqual(add_cand_json["selected_fs_person_ids"], ["KWCJ-4N2", "NY3G-24D"])
+            self.assertEqual(len(add_cand_json["candidates"]), 2)
+            self.assertEqual(add_cand_json["match_status"], "multiple_candidates")
+
+            # Toggle off NY3G-24D -> leaves KWCJ-4N2 selected
+            r_toggle_off = client.post(
+                f"/api/familysearch/matches/{m_valid_id}/candidates",
+                json={"toggle_fs_person_id": "NY3G-24D"},
+            )
+            self.assertEqual(r_toggle_off.status_code, 200)
+            self.assertEqual(r_toggle_off.json()["selected_fs_person_ids"], ["KWCJ-4N2"])
+
+            # Select both explicitly via selected_fs_person_ids
+            r_sel_both = client.post(
+                f"/api/familysearch/matches/{m_valid_id}/select-candidates",
+                json={"selected_fs_person_ids": ["KWCJ-4N2", "NY3G-24D"]},
+            )
+            self.assertEqual(r_sel_both.status_code, 200)
+            self.assertEqual(r_sel_both.json()["selected_fs_person_ids"], ["KWCJ-4N2", "NY3G-24D"])
         finally:
             from backend.app.db.session import delete_person_fact_cascade
             from sqlmodel import select as _sel

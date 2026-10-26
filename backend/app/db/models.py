@@ -422,7 +422,7 @@ class FamilySearchMatch(SQLModel, table=True):
     person_fact_id: int = Field(foreign_key="personfact.id", index=True)
     row_id: int = Field(foreign_key="recordrow.id", index=True)
     match_status: str = Field(default="unmatched", index=True)
-    # new_person, existing_needs_facts, confirmed_match, place_only
+    # new_person, existing_needs_facts, confirmed_match, multiple_candidates, place_only
     fs_person_id: Optional[str] = Field(default=None, index=True)
     fs_record_ark: Optional[str] = Field(default=None)
     fs_url: Optional[str] = Field(default=None)
@@ -431,6 +431,8 @@ class FamilySearchMatch(SQLModel, table=True):
     what_is_new_json: str = Field(default="[]")  # list of new facts to add to FS
     what_agrees_json: str = Field(default="[]")
     what_differs_json: str = Field(default="[]")
+    candidates_json: str = Field(default="[]")  # list of candidate matches with XXXX-YYY identifiers
+    selected_fs_person_ids_json: str = Field(default="[]")  # list of selected XXXX-YYY identifiers
     action_packet_json: str = Field(default="{}")  # compare_person or structured packet
     raw_mcp_results_json: str = Field(default="{}")
     reviewed_by_user: bool = Field(default=False, index=True)

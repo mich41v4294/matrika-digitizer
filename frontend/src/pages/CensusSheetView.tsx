@@ -339,6 +339,8 @@ interface CensusPersonMember {
   fs_match: {
     id: number;
     match_status: string;
+    fs_person_id?: string | null;
+    selected_fs_person_ids?: string[];
     fs_url: string | null;
     confidence_score: number;
     summary_sk: string | null;
@@ -5220,27 +5222,49 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                       </span>
                                     </div>
                                   ))}
-                                  {m.fs_match?.fs_url && (
+                                  {m.fs_match?.fs_person_id ? (
                                     <a
-                                      href={m.fs_match.fs_url}
+                                      href={`https://www.familysearch.org/tree/person/details/${encodeURIComponent(
+                                        m.fs_match.fs_person_id.trim().toUpperCase()
+                                      )}`}
                                       target="_blank"
                                       rel="noreferrer"
                                       onClick={(e) => e.stopPropagation()}
+                                      title={`FamilySearch ID: ${m.fs_match.fs_person_id}`}
                                       className="px-2 py-1 min-h-[28px] rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-semibold text-xs inline-flex items-center gap-1"
                                     >
                                       <Sparkles className="w-3 h-3 shrink-0" />
                                       <span>FamilySearch</span>
+                                      <span className="font-mono font-bold underline decoration-dotted">
+                                        {m.fs_match.fs_person_id}
+                                      </span>
                                       <ExternalLink className="w-3 h-3 shrink-0" />
                                     </a>
+                                  ) : (
+                                    m.fs_match?.fs_url && (
+                                      <a
+                                        href={m.fs_match.fs_url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="px-2 py-1 min-h-[28px] rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-semibold text-xs inline-flex items-center gap-1"
+                                      >
+                                        <Sparkles className="w-3 h-3 shrink-0" />
+                                        <span>FamilySearch</span>
+                                        <ExternalLink className="w-3 h-3 shrink-0" />
+                                      </a>
+                                    )
                                   )}
                                 </div>
                               )}
                             </div>
                           ) : (
                             <div className="flex flex-wrap items-center gap-1.5">
-                              {!m.local_matches?.length && !m.fs_match?.fs_url && (
-                                <span className="text-stone-600">—</span>
-                              )}
+                              {!m.local_matches?.length &&
+                                !m.fs_match?.fs_url &&
+                                !m.fs_match?.fs_person_id && (
+                                  <span className="text-stone-600">—</span>
+                                )}
                               {m.local_matches?.map((lm) => (
                                 <div
                                   key={lm.match.id}
@@ -5255,18 +5279,38 @@ export default function CensusSheetView({ lang, refreshStatus }: Props) {
                                   </span>
                                 </div>
                               ))}
-                              {m.fs_match?.fs_url && (
+                              {m.fs_match?.fs_person_id ? (
                                 <a
-                                  href={m.fs_match.fs_url}
+                                  href={`https://www.familysearch.org/tree/person/details/${encodeURIComponent(
+                                    m.fs_match.fs_person_id.trim().toUpperCase()
+                                  )}`}
                                   target="_blank"
                                   rel="noreferrer"
                                   onClick={(e) => e.stopPropagation()}
+                                  title={`FamilySearch ID: ${m.fs_match.fs_person_id}`}
                                   className="px-2 py-1 min-h-[28px] rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-semibold text-xs inline-flex items-center gap-1"
                                 >
                                   <Sparkles className="w-3 h-3 shrink-0" />
                                   <span>FamilySearch</span>
+                                  <span className="font-mono font-bold underline decoration-dotted">
+                                    {m.fs_match.fs_person_id}
+                                  </span>
                                   <ExternalLink className="w-3 h-3 shrink-0" />
                                 </a>
+                              ) : (
+                                m.fs_match?.fs_url && (
+                                  <a
+                                    href={m.fs_match.fs_url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="px-2 py-1 min-h-[28px] rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-semibold text-xs inline-flex items-center gap-1"
+                                  >
+                                    <Sparkles className="w-3 h-3 shrink-0" />
+                                    <span>FamilySearch</span>
+                                    <ExternalLink className="w-3 h-3 shrink-0" />
+                                  </a>
+                                )
                               )}
                             </div>
                           )}

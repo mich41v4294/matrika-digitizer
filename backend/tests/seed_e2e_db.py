@@ -1019,7 +1019,7 @@ def seed_isolated_database() -> None:
         session.add_all([ov_house1, ov_house2])
         session.flush()
 
-        # 8. Seed FamilySearchMatches (1 Matrika, 1 Census) with what_agrees, what_differs, what_is_new
+        # 8. Seed FamilySearchMatches (1 Matrika, 1 Census) with what_agrees, what_differs, what_is_new, and multiple candidates (XXXX-YYY)
         fsm1 = FamilySearchMatch(
             person_fact_id=fact1.id or 1,
             row_id=row1.id or 1,
@@ -1028,6 +1028,53 @@ def seed_isolated_database() -> None:
             fs_url="https://www.familysearch.org/search/record/results?q.givenName=J%C3%A1n&q.surname=Kov%C3%A1%C4%8D",
             confidence_score=0.91,
             summary_sk="Matrika pokrstených 1898 (Obec Testová č. 15): Joannes (Ján) Kováč",
+            selected_fs_person_ids_json=json.dumps(["KWCZ-001"], ensure_ascii=False),
+            candidates_json=json.dumps(
+                [
+                    {
+                        "fs_person_id": "KWCZ-001",
+                        "fs_id": "KWCZ-001",
+                        "name": "Joannes Kováč",
+                        "sex": "M",
+                        "lifespan": "1898–1964",
+                        "birth_date": "15.03.1898",
+                        "birth_year": 1898,
+                        "birth_place": "Obec Testová, Trnava, Slovakia",
+                        "relatives_summary": "Otec: Jozef Kováč, Matka: Mária Vargová",
+                        "confidence_score": 0.91,
+                        "what_agrees": [
+                            {"field_sk": "Meno a priezvisko", "value": "Ján Kováč (*1898)"},
+                            {"field_sk": "Rodičia", "value": "Jozef Kováč & Mária Vargová"},
+                        ],
+                        "what_differs": [
+                            {
+                                "field_sk": "Dátum narodenia",
+                                "matrika_val": "14.03.1898",
+                                "fs_val": "15.03.1898 (uvedený dátum krstu)",
+                            }
+                        ],
+                        "selected": True,
+                    },
+                    {
+                        "fs_person_id": "KWCZ-019",
+                        "fs_id": "KWCZ-019",
+                        "name": "Ján Kováč",
+                        "sex": "M",
+                        "lifespan": "*1898",
+                        "birth_date": "14.03.1898",
+                        "birth_year": 1898,
+                        "birth_place": "Obec Testová, Nyitra, Hungary",
+                        "relatives_summary": "Otec: Josephus Kováč",
+                        "confidence_score": 0.87,
+                        "what_agrees": [
+                            {"field_sk": "Meno a priezvisko", "value": "Ján Kováč (*1898) (KWCZ-019)"},
+                        ],
+                        "what_differs": [],
+                        "selected": False,
+                    },
+                ],
+                ensure_ascii=False,
+            ),
             what_agrees_json=json.dumps(
                 [
                     {"field_sk": "Meno a priezvisko", "value": "Ján Kováč (*1898)"},
@@ -1075,6 +1122,58 @@ def seed_isolated_database() -> None:
             fs_url="https://www.familysearch.org/search/record/results?q.givenName=J%C3%A1n&q.surname=Kov%C3%A1%C4%8D&q.residenceDate.from=1930",
             confidence_score=0.96,
             summary_sk="Sčítací hárok 1930 (Obec Testová, dom č. 15): Ján Kováč (hlava domácnosti)",
+            selected_fs_person_ids_json=json.dumps(["KWCZ-001"], ensure_ascii=False),
+            candidates_json=json.dumps(
+                [
+                    {
+                        "fs_person_id": "KWCZ-001",
+                        "fs_id": "KWCZ-001",
+                        "name": "Ján Kováč",
+                        "sex": "M",
+                        "lifespan": "1898–1964",
+                        "birth_date": "14.03.1898",
+                        "birth_year": 1898,
+                        "birth_place": "Obec Testová, Trnava, Slovensko",
+                        "relatives_summary": "Manželka: Mária Kováčová",
+                        "confidence_score": 0.96,
+                        "what_agrees": [
+                            {
+                                "field_sk": "Lokálna matrika (zhoda)",
+                                "value": "Joannes Kováč (baptism, rok 1898, dátum 14.03.1898) – skóre 0.96",
+                            }
+                        ],
+                        "what_differs": [
+                            {
+                                "field_sk": "Číslo domu v FS",
+                                "matrika_val": "Obec Testová č. 15",
+                                "fs_val": "Obec Testová (bez čísla domu)",
+                            }
+                        ],
+                        "selected": True,
+                    },
+                    {
+                        "fs_person_id": "L4TR-882",
+                        "fs_id": "L4TR-882",
+                        "name": "Ján Kováč",
+                        "sex": "M",
+                        "lifespan": "*1898",
+                        "birth_date": "1898",
+                        "birth_year": 1898,
+                        "birth_place": "Obec Testová, Trnava",
+                        "relatives_summary": "Otec: Jozef Kováč",
+                        "confidence_score": 0.89,
+                        "what_agrees": [
+                            {
+                                "field_sk": "Meno v strome / zázname FS",
+                                "value": "Ján Kováč (L4TR-882)",
+                            }
+                        ],
+                        "what_differs": [],
+                        "selected": False,
+                    },
+                ],
+                ensure_ascii=False,
+            ),
             what_agrees_json=json.dumps(
                 [
                     {

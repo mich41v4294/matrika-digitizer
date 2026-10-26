@@ -328,11 +328,30 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await page.locator("button").filter({ hasText: /Vyriešené \(1\)/ }).click();
     await expect(page.locator("body")).toContainText("Overenie priezviska a mien rodičov");
 
-    // B. FamilySearchReview: verify what_differs, source & review filters, mark reviewed, and sync disabled when token not inserted/valid
+    // B. FamilySearchReview: verify what_differs, source & review filters, mark reviewed, XXXX-YYY candidate identifiers, multi-select, and sync disabled when token not inserted/valid
     await page.goto("/familysearch", { waitUntil: "networkidle" });
     await expect(page.locator("body")).toContainText("Čo sa líši");
     await expect(page.locator("body")).toContainText("15.03.1898 (uvedený dátum krstu)");
     await expect(page.locator("body")).toContainText("Obec Testová (bez čísla domu)");
+
+    // Verify XXXX-YYY identifiers on match candidates have clickthru links and support multi-selection of possible matches
+    const candIdLink1 = page.getByTestId("fs-candidate-id-KWCZ-001").first();
+    await expect(candIdLink1).toBeVisible();
+    await expect(candIdLink1).toHaveAttribute(
+      "href",
+      /https:\/\/www\.familysearch\.org\/(tree\/person\/details\/KWCZ-001|ark:\/61903\/.*)/
+    );
+    await expect(page.getByTestId("fs-candidate-id-L4TR-882").first()).toBeVisible();
+    await expect(page.getByTestId("fs-candidate-id-KWCZ-019").first()).toBeVisible();
+    const secondCandToggle = page.locator('[data-testid^="fs-candidate-toggle-"][data-testid$="-L4TR-882"]').first();
+    await secondCandToggle.click();
+    const selBadge2 = page.getByTestId("fs-selected-id-badge-L4TR-882").first();
+    await expect(selBadge2).toBeVisible();
+    await expect(selBadge2).toHaveAttribute(
+      "href",
+      "https://www.familysearch.org/tree/person/details/L4TR-882"
+    );
+    await expect(page.locator("body")).toContainText("Vybrané: 2 / 2");
 
     // Verify FamilySearch sync controls are disabled when token is not inserted/valid
     await expect(page.getByTestId("fs-token-required-banner")).toBeVisible();

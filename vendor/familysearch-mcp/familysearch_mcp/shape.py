@@ -165,6 +165,37 @@ REDACTED_NOTE = (
 )
 
 
+_FS_PID_RE = re.compile(r"\b([A-Za-z0-9]{4}-[A-Za-z0-9]{3,4})\b")
+
+
+def extract_fs_identifier(entry: dict | None = None, *fallbacks: Any) -> str | None:
+    """Extract a canonical ``XXXX-YYY`` FamilySearch identifier from a person or hit."""
+    candidates: list[str] = []
+    if isinstance(entry, dict):
+        idents = entry.get("identifiers")
+        if isinstance(idents, dict):
+            for vals in idents.values():
+                if isinstance(vals, list):
+                    candidates.extend(str(v) for v in vals if v)
+                elif vals:
+                    candidates.append(str(vals))
+        raw_id = str(entry.get("id") or "").strip()
+        if raw_id and not re.match(r"^[pr]_\d+$", raw_id, flags=re.IGNORECASE):
+            candidates.append(raw_id)
+    for fb in fallbacks:
+        if fb:
+            candidates.append(str(fb).strip())
+    for raw in candidates:
+        cleaned = raw
+        if "ark:/61903/" in cleaned:
+            cleaned = cleaned.split("ark:/61903/", 1)[1]
+        cleaned = re.sub(r"^\d+:\d+:", "", cleaned.split("?", 1)[0].split("#", 1)[0].strip("/"))
+        m = _FS_PID_RE.search(cleaned)
+        if m:
+            return m.group(1).upper()
+    return None
+
+
 def person(entry: dict) -> dict:
     """Shape a GEDCOM X person for tool output.
 
@@ -186,8 +217,12 @@ def person(entry: dict) -> dict:
     all_names = names(entry)
     facts = [fact(f) for f in entry.get("facts") or []]
     display = entry.get("display") or {}
+    fs_id = extract_fs_identifier(entry)
+    raw_id = entry.get("id")
+    eff_id = fs_id if (fs_id and (not raw_id or str(raw_id).startswith("p_"))) else (raw_id or fs_id)
     out = {
-        "id": entry.get("id"),
+        "id": eff_id,
+        "fs_id": fs_id or eff_id,
         "name": person_name(entry) or display.get("name"),
         "names": all_names,
         "sex": humanize((entry.get("gender") or {}).get("type")) or display.get("gender"),
@@ -483,11 +518,18 @@ def search_hits(payload: dict) -> list[dict]:
         # for 2 returned 4, and the extras were mostly unnamed.
         principal = next((p for p in people if p.get("principal")), people[0])
         others = [person_name(p) for p in people if p is not principal]
+        shaped_person = person(principal)
+        fs_id = extract_fs_identifier(principal, item.get("id"), shaped_person.get("id"))
+        if fs_id:
+            shaped_person["fs_id"] = fs_id
+            shaped_person["person_id"] = fs_id
+            if not shaped_person.get("id") or str(shaped_person.get("id")).startswith("p_"):
+                shaped_person["id"] = fs_id
         entry = {
             "score": item.get("score"),
             "confidence": item.get("confidence"),
             "ark": item.get("id"),
-            **person(principal),
+            **shaped_person,
         }
         entry.update(_hit_collection(content))
         named = [n for n in others if n]

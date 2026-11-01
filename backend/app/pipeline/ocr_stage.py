@@ -22,6 +22,36 @@ from backend.app.pipeline.census_layout import (
 )
 
 
+def uses_glm_ocr_prompt_dialect(model: str | None = None) -> bool:
+    """GLM-OCR understands magic prompts like `Table Recognition:`; Qwen/LFM3 do not."""
+    mid = (model or settings.model_ocr or "").strip().lower()
+    return "glm-ocr" in mid
+
+
+def vision_ocr_prompt(kind: str = "text", *, model: str | None = None) -> str:
+    """
+    Prompt for local vision OCR.
+
+    GLM-OCR is trained on short task tokens (`Table Recognition:` / `Text Recognition:`).
+    Qwen3-VL (and other chat VLMs) need an explicit transcribe instruction or they return
+    English image commentary — which breaks overview heuristics and yields 0 houses.
+    """
+    mode = "table" if str(kind or "").strip().lower() == "table" else "text"
+    if uses_glm_ocr_prompt_dialect(model):
+        return "Table Recognition:" if mode == "table" else "Text Recognition:"
+    if mode == "table":
+        return (
+            "Transcribe this census table row. Read every column left to right. "
+            "Output plain text only, with columns separated by |. "
+            "Do not describe the image, translate, or add commentary."
+        )
+    return (
+        "Transcribe all printed and handwritten text in this image. "
+        "Reply with only the transcribed text. "
+        "Do not describe the image, translate, or add commentary."
+    )
+
+
 def html_table_to_pipe_text(raw_html_or_text: str) -> str:
     if not raw_html_or_text:
         return ""
@@ -310,7 +340,10 @@ async def run_ocr_for_scan_header(session: Session, scan: ScanImage) -> None:
     is_overview_or_unnumbered = bool(
         sheet and (sheet.sheet_type in ("overview", "municipal_overview") or not sheet.house_number)
     )
-    hdr_prompt = "Text Recognition:" if is_overview_or_unnumbered else "Table Recognition:"
+    hdr_prompt = vision_ocr_prompt(
+        "text" if is_overview_or_unnumbered else "table",
+        model=settings.model_ocr,
+    )
     ensure_session_write_unlocked(session)
     res = await ai_client.chat_completion(
         stage="ocr_header",
@@ -425,7 +458,7 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
             res_l = await ai_client.chat_completion(
                 stage="ocr_left",
                 model=settings.model_ocr,
-                prompt="Table Recognition:",
+                prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                 image_path=left_path,
                 image_rel_url=row.left_crop_path,
                 scan_id=scan.id,
@@ -469,7 +502,7 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
                 ai_client.chat_completion(
                     stage="ocr_left",
                     model=settings.model_ocr,
-                    prompt="Table Recognition:",
+                    prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                     image_path=left_path,
                     image_rel_url=row.left_crop_path,
                     scan_id=scan.id,
@@ -482,7 +515,7 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
                 ai_client.chat_completion(
                     stage="ocr_right",
                     model=settings.model_ocr,
-                    prompt="Table Recognition:",
+                    prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                     image_path=c_path,
                     image_rel_url=c_rel,
                     scan_id=scan.id,
@@ -511,7 +544,7 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
             res_r = await ai_client.chat_completion(
                 stage="ocr_right",
                 model=settings.model_ocr,
-                prompt="Table Recognition:",
+                prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                 image_path=right_path,
                 image_rel_url=row.right_crop_path,
                 scan_id=scan.id,
@@ -527,7 +560,7 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
                 ai_client.chat_completion(
                     stage="ocr_left",
                     model=settings.model_ocr,
-                    prompt="Table Recognition:",
+                    prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                     image_path=left_path,
                     image_rel_url=row.left_crop_path,
                     scan_id=scan.id,
@@ -537,7 +570,7 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
                 ai_client.chat_completion(
                     stage="ocr_right",
                     model=settings.model_ocr,
-                    prompt="Table Recognition:",
+                    prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                     image_path=right_path,
                     image_rel_url=row.right_crop_path,
                     scan_id=scan.id,
@@ -551,7 +584,7 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
             res_l = await ai_client.chat_completion(
                 stage="ocr_left",
                 model=settings.model_ocr,
-                prompt="Table Recognition:",
+                prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                 image_path=left_path,
                 image_rel_url=row.left_crop_path,
                 scan_id=scan.id,
@@ -563,7 +596,7 @@ async def run_ocr_for_row(session: Session, scan: ScanImage, row: RecordRow) -> 
             res_r = await ai_client.chat_completion(
                 stage="ocr_right",
                 model=settings.model_ocr,
-                prompt="Table Recognition:",
+                prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                 image_path=right_path,
                 image_rel_url=row.right_crop_path,
                 scan_id=scan.id,

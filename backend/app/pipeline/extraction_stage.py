@@ -5933,7 +5933,7 @@ async def _extract_census_overview_sheet_locked(
     from pathlib import Path
     from backend.app.api.ws import ws_manager
     from backend.app.db.models import WorkflowTrace
-    from backend.app.pipeline.ocr_stage import html_table_to_pipe_text, media_rel_to_path
+    from backend.app.pipeline.ocr_stage import html_table_to_pipe_text, media_rel_to_path, vision_ocr_prompt
 
     if front_scan is None and sheet.front_scan_id:
         front_scan = session.get(ScanImage, sheet.front_scan_id)
@@ -6132,7 +6132,7 @@ async def _extract_census_overview_sheet_locked(
                 res_h = await ai_client.chat_completion(
                     stage="ocr_header",
                     model=settings.model_ocr,
-                    prompt="Text Recognition:",
+                    prompt=vision_ocr_prompt("text", model=settings.model_ocr),
                     image_path=h_path,
                     image_rel_url=layout_res.header_crop_rel,
                     scan_id=scan_obj.id,
@@ -6217,7 +6217,7 @@ async def _extract_census_overview_sheet_locked(
                 res_l = await ai_client.chat_completion(
                     stage="ocr_left",
                     model=settings.model_ocr,
-                    prompt="Table Recognition:",
+                    prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                     image_path=l_path,
                     image_rel_url=r_info.left_crop_rel,
                     scan_id=scan_obj.id,
@@ -6263,7 +6263,7 @@ async def _extract_census_overview_sheet_locked(
                     res_r = await ai_client.chat_completion(
                         stage="ocr_right",
                         model=settings.model_ocr,
-                        prompt="Text Recognition:",
+                        prompt=vision_ocr_prompt("text", model=settings.model_ocr),
                         image_path=r_path,
                         image_rel_url=r_info.right_crop_rel,
                         scan_id=scan_obj.id,
@@ -6276,7 +6276,7 @@ async def _extract_census_overview_sheet_locked(
                     res_rt = await ai_client.chat_completion(
                         stage="ocr_right",
                         model=settings.model_ocr,
-                        prompt="Table Recognition:",
+                        prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                         image_path=r_path,
                         image_rel_url=r_info.right_crop_rel,
                         scan_id=scan_obj.id,
@@ -6289,7 +6289,7 @@ async def _extract_census_overview_sheet_locked(
                     res_txt = await ai_client.chat_completion(
                         stage="ocr_left",
                         model=settings.model_ocr,
-                        prompt="Text Recognition:",
+                        prompt=vision_ocr_prompt("text", model=settings.model_ocr),
                         image_path=l_path,
                         image_rel_url=r_info.left_crop_rel,
                         scan_id=scan_obj.id,
@@ -7185,7 +7185,7 @@ async def _extract_census_municipal_overview_sheet_locked(
     from pathlib import Path
     from backend.app.api.ws import ws_manager
     from backend.app.db.models import WorkflowTrace
-    from backend.app.pipeline.ocr_stage import html_table_to_pipe_text, media_rel_to_path
+    from backend.app.pipeline.ocr_stage import html_table_to_pipe_text, media_rel_to_path, vision_ocr_prompt
 
     if front_scan is None and sheet.front_scan_id:
         front_scan = session.get(ScanImage, sheet.front_scan_id)
@@ -7373,7 +7373,7 @@ async def _extract_census_municipal_overview_sheet_locked(
                 res_h = await ai_client.chat_completion(
                     stage="ocr_header",
                     model=settings.model_ocr,
-                    prompt="Text Recognition:",
+                    prompt=vision_ocr_prompt("text", model=settings.model_ocr),
                     image_path=h_path,
                     image_rel_url=layout_res.header_crop_rel,
                     scan_id=scan_obj.id,
@@ -7451,7 +7451,7 @@ async def _extract_census_municipal_overview_sheet_locked(
                 res_l = await ai_client.chat_completion(
                     stage="ocr_left",
                     model=settings.model_ocr,
-                    prompt="Table Recognition:",
+                    prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                     image_path=l_path,
                     image_rel_url=r_info.left_crop_rel,
                     scan_id=scan_obj.id,
@@ -7465,7 +7465,7 @@ async def _extract_census_municipal_overview_sheet_locked(
                 res_r = await ai_client.chat_completion(
                     stage="ocr_right",
                     model=settings.model_ocr,
-                    prompt="Table Recognition:",
+                    prompt=vision_ocr_prompt("table", model=settings.model_ocr),
                     image_path=r_path,
                     image_rel_url=r_info.right_crop_rel,
                     scan_id=scan_obj.id,

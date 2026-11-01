@@ -601,6 +601,7 @@ class StartCensusJobRequest(BaseModel):
     run_mcp: bool = True
     only_undone: bool = True
     overview_only: bool = False
+    force_overview_redo: bool = False
 
 
 class RemoteSearchRequest(BaseModel):
@@ -1122,8 +1123,9 @@ async def start_census_job(
         "limit_sheets": req.max_sheets or (500 if is_overview_only else (max(50, len(explicit_sheet_ids)) if explicit_sheet_ids else 50)),
         "auto_ocr": req.run_pipeline,
         "run_mcp": req.run_mcp,
-        "only_undone": req.only_undone,
+        "only_undone": False if (is_overview_only and req.force_overview_redo) else req.only_undone,
         "overview_only": is_overview_only,
+        "force_overview_redo": bool(is_overview_only and (req.force_overview_redo or not req.only_undone)),
     }
     if is_owner_linked or explicit_sheet_ids:
         filter_payload["sheet_ids"] = explicit_sheet_ids

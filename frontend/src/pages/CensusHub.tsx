@@ -1468,7 +1468,10 @@ export default function CensusHub({ lang, refreshStatus }: Props) {
           max_sheets: targetLimit,
           run_pipeline: true,
           run_mcp: false,
-          only_undone: true,
+          // Force redo: Omni/Qwen migration left sheets marked extracted (often with 0 houses)
+          // so only_undone would finish instantly with "0 remaining".
+          only_undone: false,
+          force_overview_redo: true,
           overview_only: true,
         }),
       });

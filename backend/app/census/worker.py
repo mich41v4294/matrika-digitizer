@@ -54,6 +54,68 @@ DONE_DOWNLOAD_ONLY_STATUSES: tuple[str, ...] = (
 )
 
 
+def _reset_overview_sheets_for_force_redo(session: Session, filters: dict[str, Any]) -> int:
+    """
+    Mark matching overview / municipal sheets incomplete and clear cached header OCR so a
+    force-redo job actually re-calls the vision model instead of reusing stale traces.
+    """
+    targets = _find_matching_census_sheets(
+        session,
+        filters,
+        only_undone=False,
+        run_ocr=True,
+        overview_only=True,
+    )
+    reset_n = 0
+    for sh in targets:
+        if sh.sheet_type not in ("overview", "municipal_overview"):
+            # Potential overviews that are still untyped — leave for detection.
+            if sh.house_number and str(sh.house_number).strip():
+                continue
+        sh.download_status = "ocr_incomplete"
+        sh.error_message = None
+        session.add(sh)
+        reset_n += 1
+        scan_ids = [
+            sid
+            for sid in (sh.front_scan_id, sh.back_scan_id)
+            if isinstance(sid, int) and sid > 0
+        ]
+        if sh.id is not None:
+            for es in session.exec(
+                select(ScanImage).where(ScanImage.census_sheet_id == sh.id)
+            ).all():
+                if es.id is not None and es.id not in scan_ids:
+                    scan_ids.append(es.id)
+        for sid in scan_ids:
+            scan = session.get(ScanImage, sid)
+            if not scan:
+                continue
+            # Always clear on force redo so Qwen re-reads headers (stale GLM/English cache).
+            if scan.header_raw_ocr:
+                scan.header_raw_ocr = None
+            scan.status = "ocr_incomplete"
+            session.add(scan)
+    if reset_n:
+        session.commit()
+    return reset_n
+
+
+async def _ensure_local_ocr_endpoint_reachable() -> None:
+    """Fail overview OCR jobs early when Omni / local VLM is unreachable."""
+    from backend.app.pipeline.ai_client import ai_client
+
+    online, _models, err = await ai_client._probe_local_models()
+    if online:
+        return
+    base = (settings.ai_base_url or "").rstrip("/")
+    raise RuntimeError(
+        f"Local OCR endpoint unreachable at {base or '(unset AI_BASE_URL)'}: {err or 'no response'}. "
+        "Set AI_BASE_URL/AI_MODELS_URL to the MLX Omni router (e.g. http://192.168.8.196:8080/v1), "
+        "not the matrika app port."
+    )
+
+
 def _merge_empty_overview_redos(
     session: Session,
     already: list[CensusSheet],
@@ -1141,7 +1203,17 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
         run_mcp = bool(filters.get("run_mcp", True))
         only_undone = bool(filters.get("only_undone", True))
         overview_only = bool(filters.get("overview_only", False))
+        force_overview_redo = bool(
+            filters.get("force_overview_redo")
+            or (overview_only and not only_undone)
+        )
         max_rows = filters.get("max_rows")
+        force_overview_reset = 0
+
+        if overview_only and force_overview_redo:
+            force_overview_reset = _reset_overview_sheets_for_force_redo(session, filters)
+            only_undone = False
+            filters["only_undone"] = False
 
         undone_matches = _find_matching_census_sheets(
             session,
@@ -1169,6 +1241,7 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
         "current_slovakiana_key": None,
         "current_sheet_label": None,
         "current_sheet_index": 0,
+        "force_overview_reset": force_overview_reset,
     }
 
     # If the local DB has fewer than `limit_sheets` undone sheets (or when `overview_only=True`
@@ -1230,6 +1303,36 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
             job.updated_at = utcnow()
             session.add(job)
             session.commit()
+
+    if overview_only and candidates and run_ocr:
+        try:
+            await _ensure_local_ocr_endpoint_reachable()
+        except Exception as exc:
+            with Session(engine) as session:
+                job = session.get(CensusDownloadJob, job_id)
+                if job:
+                    job.status = "error"
+                    job.error_message = str(exc)[:500]
+                    job.updated_at = utcnow()
+                    session.add(job)
+                    session.commit()
+            await ws_manager.broadcast(
+                "state",
+                {
+                    "job_id": job_id,
+                    "active_stage": "idle",
+                    "progress_pct": 100,
+                    "message_sk": f"OCR prehľadov zlyhalo: {exc}",
+                    "message_en": f"Overview OCR failed: {exc}",
+                },
+            )
+            return {
+                "job_id": job_id,
+                "status": "error",
+                "error": str(exc),
+                "processed": 0,
+                "failed": 0,
+            }
 
     processed = 0
     failed = 0

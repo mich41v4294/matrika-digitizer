@@ -23,6 +23,8 @@ services:
       - GITHUB_SHA=${GITHUB_SHA:-}
       - APP_API_KEY=${APP_API_KEY:-}
       - AI_PROVIDER=${AI_PROVIDER:-local}
+      # Must point at the MLX Omni router, NOT this app. If Omni is on a LAN Mac Mini, set
+      # AI_BASE_URL=http://<mac-mini-ip>:8080/v1 in the stack env (Dockge) or .env.
       - AI_BASE_URL=${AI_BASE_URL:-http://host.docker.internal:8080/v1}
       - AI_MODELS_URL=${AI_MODELS_URL:-http://host.docker.internal:8080/v1/models}
       - AI_API_KEY=${AI_API_KEY:-mlx}

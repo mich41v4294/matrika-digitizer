@@ -62,7 +62,7 @@ docker compose up --build
 The application listens on [http://localhost:8080](http://localhost:8080).
 
 - Persistent SQLite database (`matrika.db`), uploaded Matrika scans (`uploads/`), downloaded Slovakiana census scans (`uploads/slovakiana/`), row crops (`crops/`), and `familysearch.env` are stored in `./data` (mounted at `/app/data` in the container).
-- By default, the container connects to the MLX Omni OpenAI-compatible router on the host (`http://host.docker.internal:8080/v1` when unset). Model IDs and AI settings are loaded from [`.env.example`](.env.example) (committed); an optional `.env` overlays secrets / LAN URLs and is not required to deploy. You can also configure a remote OpenAI-compatible endpoint via `FREELLM_BASE_URL` and `FREELLM_API_KEY` in the stack env / `.env` or live inside `/debug`.
+- By default, the container connects to the MLX Omni OpenAI-compatible router on the host (`http://host.docker.internal:8080/v1` when unset). Model IDs and AI settings are documented in [`.env.example`](.env.example) and mirrored as `${VAR:-default}` in `docker-compose.yml` (no `env_file` — same pattern as Dockge-friendly deploys). You can also configure a remote OpenAI-compatible endpoint via `FREELLM_BASE_URL` and `FREELLM_API_KEY` in the stack env / `.env` or live inside `/debug`.
 
 ---
 

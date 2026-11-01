@@ -540,7 +540,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                         scan_id=scan.id,
                         row_id=row1.id,
                         stage="ocr_left",
-                        model_or_tool="local:glm-ocr-g32-mixed_4_8-mlx",
+                        model_or_tool="local:mlx-community/Qwen3-VL-8B-Instruct-4bit",
                         duration_ms=500,
                         prompt_tokens=150,
                         completion_tokens=30,
@@ -550,7 +550,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                         scan_id=scan.id,
                         row_id=row1.id,
                         stage="ocr_right",
-                        model_or_tool="local:glm-ocr-g32-mixed_4_8-mlx",
+                        model_or_tool="local:mlx-community/Qwen3-VL-8B-Instruct-4bit",
                         duration_ms=400,
                         prompt_tokens=140,
                         completion_tokens=25,
@@ -560,7 +560,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                         scan_id=scan.id,
                         row_id=row1.id,
                         stage="extract",
-                        model_or_tool="local:underdog-saluki-27b-1.0",
+                        model_or_tool="local:LiquidAI/LFM3-Omni-2B-MLX-4bit",
                         duration_ms=700,
                         prompt_tokens=350,
                         completion_tokens=90,
@@ -570,7 +570,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                         scan_id=scan.id,
                         row_id=row2.id,
                         stage="ocr_left",
-                        model_or_tool="local:glm-ocr-g32-mixed_4_8-mlx",
+                        model_or_tool="local:mlx-community/Qwen3-VL-8B-Instruct-4bit",
                         duration_ms=600,
                         prompt_tokens=160,
                         completion_tokens=35,
@@ -580,7 +580,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                         scan_id=scan.id,
                         row_id=row2.id,
                         stage="extract",
-                        model_or_tool="local:underdog-saluki-27b-1.0",
+                        model_or_tool="local:LiquidAI/LFM3-Omni-2B-MLX-4bit",
                         duration_ms=800,
                         prompt_tokens=360,
                         completion_tokens=95,
@@ -624,7 +624,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
             combo = stats["model_combos"][0]
             self.assertEqual(
                 combo["model_combo"],
-                "OCR: local:glm-ocr-g32-mixed_4_8-mlx + Extract: local:underdog-saluki-27b-1.0",
+                "OCR: local:mlx-community/Qwen3-VL-8B-Instruct-4bit + Extract: local:LiquidAI/LFM3-Omni-2B-MLX-4bit",
             )
             self.assertEqual(combo["correctness_rate_pct"], 50.0)
             self.assertEqual(combo["steps"]["layout_ms"], 100)
@@ -917,10 +917,10 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
     def test_task_queue_fifo_ocr_and_familysearch_and_debug_endpoints(self) -> None:
         """
         Verify:
-        1. Default `local_max_concurrent` is 5, and `ai_client.chat_completion` caps concurrent
-           local model requests to 5 while sending `freellm` model requests concurrently without queuing.
+        1. Default `local_max_concurrent` is 1 (MLX Omni serializes); when raised to 5,
+           `ai_client.chat_completion` caps concurrent local requests while `freellm` runs unbounded.
         2. `TaskQueueManager` never queues `freellm` tasks (they run concurrently as they arrive)
-           and enforces `local_max_concurrent` (default 5, configurable) on local tasks, exposing
+           and enforces `local_max_concurrent` (default 1, configurable) on local tasks, exposing
            full queue visibility and controls (`prioritize`, `cancel`, `clear-queued`) under `/api/debug/tasks`.
         """
         import asyncio
@@ -933,7 +933,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
         from backend.app.pipeline.task_queue import task_queue
 
         client = TestClient(app)
-        self.assertEqual(settings.local_max_concurrent, 5)
+        self.assertEqual(settings.local_max_concurrent, 1)
 
         async def _scenario_ai_client_concurrency() -> None:
             # Verify ai_client._acquire_model_slot:
@@ -969,47 +969,48 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
             await asyncio.gather(*fl_tasks)
             self.assertEqual(ai_client.get_concurrency_state()["active_freellm_requests"], 0)
 
-            # (B) Local model requests (default limit = 5): 8 concurrent requests -> max 5 active, 3 waiting!
-            local_release = asyncio.Event()
-            local_entered = 0
-            five_local_in = asyncio.Event()
-            max_local_active = 0
+            # (B) Local model requests with limit patched to 5: 8 concurrent -> max 5 active, 3 waiting
+            with patch.object(settings, "local_max_concurrent", 5):
+                local_release = asyncio.Event()
+                local_entered = 0
+                five_local_in = asyncio.Event()
+                max_local_active = 0
 
-            async def _local_worker(idx: int) -> int:
-                nonlocal local_entered, max_local_active
-                async with ai_client._acquire_model_slot(
-                    provider="local",
-                    stage="ocr",
-                    model="glm-ocr-g32-mixed_4_8-mlx",
-                    row_id=idx,
-                ):
-                    local_entered += 1
-                    conc = ai_client.get_concurrency_state()
-                    max_local_active = max(max_local_active, conc["active_local_requests"])
-                    if local_entered == 5:
-                        five_local_in.set()
-                    await local_release.wait()
-                    return idx
+                async def _local_worker(idx: int) -> int:
+                    nonlocal local_entered, max_local_active
+                    async with ai_client._acquire_model_slot(
+                        provider="local",
+                        stage="ocr",
+                        model="mlx-community/Qwen3-VL-8B-Instruct-4bit",
+                        row_id=idx,
+                    ):
+                        local_entered += 1
+                        conc = ai_client.get_concurrency_state()
+                        max_local_active = max(max_local_active, conc["active_local_requests"])
+                        if local_entered == 5:
+                            five_local_in.set()
+                        await local_release.wait()
+                        return idx
 
-            loc_tasks = [asyncio.create_task(_local_worker(i)) for i in range(1, 9)]
-            await asyncio.wait_for(five_local_in.wait(), timeout=2.0)
-            await asyncio.sleep(0.02)
-            loc_conc = ai_client.get_concurrency_state()
-            self.assertEqual(loc_conc["local_max_concurrent"], 5)
-            self.assertEqual(loc_conc["active_local_requests"], 5)
-            self.assertEqual(loc_conc["waiting_local_requests"], 3)
-            self.assertEqual(local_entered, 5)
+                loc_tasks = [asyncio.create_task(_local_worker(i)) for i in range(1, 9)]
+                await asyncio.wait_for(five_local_in.wait(), timeout=2.0)
+                await asyncio.sleep(0.02)
+                loc_conc = ai_client.get_concurrency_state()
+                self.assertEqual(loc_conc["local_max_concurrent"], 5)
+                self.assertEqual(loc_conc["active_local_requests"], 5)
+                self.assertEqual(loc_conc["waiting_local_requests"], 3)
+                self.assertEqual(local_entered, 5)
 
-            local_release.set()
-            await asyncio.gather(*loc_tasks)
-            self.assertEqual(local_entered, 8)
-            self.assertEqual(max_local_active, 5)
-            self.assertEqual(ai_client.get_concurrency_state()["active_local_requests"], 0)
-            self.assertEqual(ai_client.get_concurrency_state()["waiting_local_requests"], 0)
+                local_release.set()
+                await asyncio.gather(*loc_tasks)
+                self.assertEqual(local_entered, 8)
+                self.assertEqual(max_local_active, 5)
+                self.assertEqual(ai_client.get_concurrency_state()["active_local_requests"], 0)
+                self.assertEqual(ai_client.get_concurrency_state()["waiting_local_requests"], 0)
 
         asyncio.run(_scenario_ai_client_concurrency())
 
-        # Now test TaskQueueManager & /api/debug/tasks (with local_max_concurrent=1 to test queueing + freellm bypass, then restore 5)
+        # Now test TaskQueueManager & /api/debug/tasks (local_max_concurrent=1 + freellm bypass)
         execution_order: list[str] = []
 
         async def _scenario_task_queue() -> None:
@@ -1027,7 +1028,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                     "state",
                     {
                         "active_stage": "ocr",
-                        "active_model": "glm-ocr-g32-mixed_4_8-mlx",
+                        "active_model": "mlx-community/Qwen3-VL-8B-Instruct-4bit",
                         "current_sheet_id": 101,
                         "current_slovakiana_key": "cair-qtest01",
                         "progress_pct": 42,
@@ -1083,7 +1084,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                         title_sk="AI OCR sčítacieho hárku: cair-qtest01",
                         title_en="Census sheet AI OCR: cair-qtest01",
                         initial_stage="ocr",
-                        active_model="local:glm-ocr-g32-mixed_4_8-mlx",
+                        active_model="local:mlx-community/Qwen3-VL-8B-Instruct-4bit",
                         target_url="/scitacie-harky/cair-qtest01",
                         metadata={"sheet_id": 101, "slovakiana_key": "cair-qtest01"},
                     )
@@ -1128,7 +1129,7 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                         title_sk="AI OCR sčítacieho hárku: cair-qtest02",
                         title_en="Census sheet AI OCR: cair-qtest02",
                         initial_stage="ocr",
-                        active_model="local:glm-ocr-g32-mixed_4_8-mlx",
+                        active_model="local:mlx-community/Qwen3-VL-8B-Instruct-4bit",
                         target_url="/scitacie-harky/cair-qtest02",
                         metadata={"sheet_id": 102, "slovakiana_key": "cair-qtest02"},
                     )
@@ -1196,13 +1197,13 @@ class TestAreaPeriodNameMatching(unittest.TestCase):
                     ],
                 )
 
-            # Verify final queue state and default local_max_concurrent == 5
+            # Verify final queue state and default local_max_concurrent == 1
             r_final = client.get("/api/debug/tasks")
             self.assertEqual(r_final.status_code, 200)
             final_q = r_final.json()
             self.assertEqual(final_q["counts"]["running"], 0)
             self.assertEqual(final_q["counts"]["queued"], 0)
-            self.assertEqual(final_q["counts"]["local_max_concurrent"], 5)
+            self.assertEqual(final_q["counts"]["local_max_concurrent"], 1)
             self.assertGreaterEqual(final_q["counts"]["completed"], 4)
             self.assertGreaterEqual(final_q["counts"]["cancelled"], 1)
 

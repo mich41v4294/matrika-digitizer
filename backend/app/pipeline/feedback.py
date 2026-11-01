@@ -89,7 +89,19 @@ def normalize_model_tag(raw: str | None, stage_hint: str = "extract") -> str:
         settings.local_model_extract.lower(),
         settings.local_model_layout.lower(),
     }
-    if low in known_local or any(tok in low for tok in ("mlx", "saluki", "glm-ocr", "d1-3b")):
+    if low in known_local or any(
+        tok in low
+        for tok in (
+            "mlx",
+            "saluki",
+            "glm-ocr",
+            "d1-3b",
+            "liquidai",
+            "qwen3-vl",
+            "d1-omni",
+            "lfm3",
+        )
+    ):
         return f"local:{val}"
     return f"freellm:{val}"
 

@@ -133,7 +133,7 @@ class TaskQueueManager:
         self._max_history: int = 50
 
     def _get_local_limit(self) -> int:
-        return max(1, int(getattr(settings, "local_max_concurrent", 5) or 5))
+        return max(1, int(getattr(settings, "local_max_concurrent", 1) or 1))
 
     def _running_local_count(self) -> int:
         cnt = 0
@@ -735,7 +735,7 @@ class TaskQueueManager:
         If called from inside an already-running task on this async context, runs `coro_fn` inline.
         Otherwise registers a new task:
         - `freellm` tasks start immediately and concurrently without queueing.
-        - `local` tasks run concurrently up to `settings.local_max_concurrent` (default 5) and queue beyond that.
+        - `local` tasks run concurrently up to `settings.local_max_concurrent` (default 1) and queue beyond that.
         """
         if self.is_inside_active_task():
             return await coro_fn()

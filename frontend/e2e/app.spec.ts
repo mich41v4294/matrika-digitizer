@@ -545,7 +545,7 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
     await expect(page.getByTestId("stats-correct-count")).toContainText("1");
     await expect(page.getByTestId("stats-incorrect-count")).toContainText("1");
     await expect(page.getByTestId("model-combos-stats-table")).toContainText(
-      "OCR: local:glm-ocr-g32-mixed_4_8-mlx + Extract: local:underdog-saluki-27b-1.0"
+      "OCR: local:mlx-community/Qwen3-VL-8B-Instruct-4bit + Extract: local:LiquidAI/LFM3-Omni-2B-MLX-4bit"
     );
     await expect(page.getByTestId("debug-ocr-feedback-card")).toContainText("cair-test001");
     await expect(page.getByTestId("debug-ocr-feedback-card")).not.toContainText("cair-test002");
@@ -720,7 +720,7 @@ test.describe("Matrika & Census Full E2E UI/UX Audit", () => {
               queue_position: 0,
               progress_pct: 48,
               active_stage: "ocr",
-              active_model: "glm-ocr-g32-mixed_4_8-mlx",
+              active_model: "mlx-community/Qwen3-VL-8B-Instruct-4bit",
               message_sk: "Čítam rukopis riadku 2/3 (cair-test001)...",
               message_en: "Reading handwriting row 2/3 (cair-test001)...",
               target_url: "/scitacie-harky/cair-test001",

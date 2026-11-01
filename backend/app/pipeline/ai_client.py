@@ -391,7 +391,7 @@ class LocalAIClient:
 
     def _wake_local_waiters(self) -> None:
         self._cleanup_stale_concurrency_state()
-        limit = max(1, int(getattr(settings, "local_max_concurrent", 5) or 5))
+        limit = max(1, int(getattr(settings, "local_max_concurrent", 1) or 1))
         while self._local_waiters and self._active_local_requests < limit:
             waiter = self._local_waiters.pop(0)
             ev = waiter.get("event")
@@ -411,7 +411,7 @@ class LocalAIClient:
 
     def get_concurrency_state(self) -> dict[str, Any]:
         self._cleanup_stale_concurrency_state()
-        limit = max(1, int(getattr(settings, "local_max_concurrent", 5) or 5))
+        limit = max(1, int(getattr(settings, "local_max_concurrent", 1) or 1))
         now = time.time()
         in_flight_list = [
             {
@@ -495,7 +495,7 @@ class LocalAIClient:
             return
 
         # Local model requests: enforce concurrency limit (default 5)
-        limit = max(1, int(getattr(settings, "local_max_concurrent", 5) or 5))
+        limit = max(1, int(getattr(settings, "local_max_concurrent", 1) or 1))
         if self._active_local_requests < limit and not self._local_waiters:
             self._active_local_requests += 1
         else:
@@ -555,7 +555,9 @@ class LocalAIClient:
             return provider, base_url, models_url, headers, freellm_model
         base_url = settings.ai_base_url.rstrip("/")
         models_url = settings.ai_models_url
-        return "local", base_url, models_url, {}, freellm_model
+        api_key = getattr(settings, "ai_api_key", "") or ""
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        return "local", base_url, models_url, headers, freellm_model
 
     async def _probe_local_models(self) -> tuple[bool, list[dict[str, Any]], str | None]:
         self._local_base_url = settings.ai_base_url.rstrip("/")
@@ -668,7 +670,7 @@ class LocalAIClient:
             "stages": stages,
             "configured": configured,
             "models": active_models,
-            "local_max_concurrent": max(1, int(getattr(settings, "local_max_concurrent", 5) or 5)),
+            "local_max_concurrent": max(1, int(getattr(settings, "local_max_concurrent", 1) or 1)),
             "concurrency": self.get_concurrency_state(),
         }
         if primary_err and not online:
@@ -748,6 +750,9 @@ class LocalAIClient:
             "max_tokens": effective_max_tokens,
             "temperature": temperature,
         }
+        if provider == "local":
+            # MLX Omni / mlx-vlm: disable chain-of-thought unless a caller opts in later.
+            payload["enable_thinking"] = False
         if provider == "freellm" and not is_saluki:
             if skip_thinking or response_model is not None:
                 payload["reasoning_effort"] = "low"

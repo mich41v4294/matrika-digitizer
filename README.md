@@ -62,7 +62,7 @@ docker compose up --build
 The application listens on [http://localhost:8080](http://localhost:8080).
 
 - Persistent SQLite database (`matrika.db`), uploaded Matrika scans (`uploads/`), downloaded Slovakiana census scans (`uploads/slovakiana/`), row crops (`crops/`), and `familysearch.env` are stored in `./data` (mounted at `/app/data` in the container).
-- By default, the container connects to a local OpenAI-compatible server (such as LM Studio, Ollama, or vLLM) on the host machine via `http://host.docker.internal:1234/v1`. You can also configure a remote OpenAI-compatible endpoint via `FREELLM_BASE_URL` and `FREELLM_API_KEY` in `.env` or live inside `/debug`.
+- By default, the container connects to the MLX Omni OpenAI-compatible router on the host (`http://host.docker.internal:8080/v1` when unset). Model IDs and AI settings live in [`.env.example`](.env.example) / `.env` only — `docker-compose.yml` passes them through. You can also configure a remote OpenAI-compatible endpoint via `FREELLM_BASE_URL` and `FREELLM_API_KEY` in `.env` or live inside `/debug`.
 
 ---
 
@@ -112,12 +112,15 @@ See [`.env.example`](.env.example) for a complete template.
 | `APP_PORT` | `8080` | HTTP port for the FastAPI server |
 | `APP_API_KEY` | *(empty)* | Optional bearer / `X-API-Key` token required for mutating (`POST`/`PUT`/`PATCH`/`DELETE`) and `/api/debug/*` routes when set |
 | `AI_PROVIDER` | `local` | Default AI provider (`local` or `freellm`) |
-| `AI_BASE_URL` | `http://localhost:1234/v1` (`http://host.docker.internal:1234/v1` in Docker) | Local OpenAI-compatible API base URL (e.g. LM Studio) |
-| `AI_MODELS_URL` | `http://localhost:1234/api/v0/models` | Local model server health/discovery endpoint |
-| `MODEL_OCR` | `glm-ocr-g32-mixed_4_8-mlx` | Local VLM model identifier for the OCR stage |
-| `MODEL_DECISION` | `d1-3b-mlx` | Local LLM model identifier for the Decision stage |
-| `MODEL_EXTRACT` | `underdog-saluki-27b-1.0` | Local LLM model identifier for the Extraction stage |
-| `MODEL_LAYOUT` | `glm-ocr-g32-mixed_4_8-mlx` | Local VLM model identifier for layout analysis |
+| `AI_BASE_URL` | `http://127.0.0.1:8080/v1` (`http://host.docker.internal:8080/v1` Docker fallback) | MLX Omni OpenAI-compatible router base URL |
+| `AI_MODELS_URL` | `http://127.0.0.1:8080/v1/models` | Local model list / health endpoint (`GET /v1/models`) |
+| `AI_API_KEY` | `mlx` | Dummy key for OpenAI-compatible clients (router ignores auth) |
+| `LOCAL_MAX_CONCURRENT` | `1` | Max in-flight local completions (router serializes requests) |
+| `MODEL_OCR` | `mlx-community/Qwen3-VL-8B-Instruct-4bit` | Local VLM for OCR / HTR (defined in `.env.example`) |
+| `MODEL_DECISION` | `LiquidAI/d1-Omni-2B-MLX-8bit` | Local LLM for Decision yes/no reads |
+| `MODEL_EXTRACT` | `LiquidAI/LFM3-Omni-2B-MLX-4bit` | Local LLM for Extraction / chat |
+| `MODEL_LAYOUT` | `mlx-community/Qwen3-VL-8B-Instruct-4bit` | Local VLM for layout analysis |
+| `MODEL_STT` | `mlx-community/whisper-large-v3-turbo-asr-fp16` | Whisper ASR model id (env reserved; no pipeline wiring yet) |
 | `FREELLM_BASE_URL` | `https://api.openai.com/v1` | Remote OpenAI-compatible API base URL for `freellm` stages |
 | `FREELLM_API_KEY` | *(empty)* | Bearer API key for `FREELLM_BASE_URL` (never exposed in API responses) |
 | `FREELLM_MODEL` | `gpt-4o-mini` | Default model name for stages routed to `freellm` |

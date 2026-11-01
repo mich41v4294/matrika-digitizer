@@ -24,24 +24,26 @@ class Settings(BaseSettings):
     app_port: int = 8080
     app_api_key: str = ""
 
-    ai_base_url: str = "http://localhost:1234/v1"
-    ai_models_url: str = "http://localhost:1234/api/v0/models"
-    model_ocr: str = "glm-ocr-g32-mixed_4_8-mlx"
-    model_decision: str = "d1-3b-mlx"
-    model_extract: str = "underdog-saluki-27b-1.0"
-    model_layout: str = "glm-ocr-g32-mixed_4_8-mlx"
+    ai_base_url: str = "http://127.0.0.1:8080/v1"
+    ai_models_url: str = "http://127.0.0.1:8080/v1/models"
+    ai_api_key: str = "mlx"
+    model_ocr: str = "mlx-community/Qwen3-VL-8B-Instruct-4bit"
+    model_decision: str = "LiquidAI/d1-Omni-2B-MLX-8bit"
+    model_extract: str = "LiquidAI/LFM3-Omni-2B-MLX-4bit"
+    model_layout: str = "mlx-community/Qwen3-VL-8B-Instruct-4bit"
+    model_stt: str = "mlx-community/whisper-large-v3-turbo-asr-fp16"
 
-    local_model_ocr: str = "glm-ocr-g32-mixed_4_8-mlx"
-    local_model_decision: str = "d1-3b-mlx"
-    local_model_extract: str = "underdog-saluki-27b-1.0"
-    local_model_layout: str = "glm-ocr-g32-mixed_4_8-mlx"
+    local_model_ocr: str = "mlx-community/Qwen3-VL-8B-Instruct-4bit"
+    local_model_decision: str = "LiquidAI/d1-Omni-2B-MLX-8bit"
+    local_model_extract: str = "LiquidAI/LFM3-Omni-2B-MLX-4bit"
+    local_model_layout: str = "mlx-community/Qwen3-VL-8B-Instruct-4bit"
 
     freellm_base_url: str = FREELLM_DEFAULT_BASE_URL
     freellm_api_key: str = FREELLM_DEFAULT_API_KEY
     ai_provider: str = "local"
     freellm_model: str = "gpt-4o-mini"
     local_max_concurrent: int = Field(
-        default=5,
+        default=1,
         validation_alias=AliasChoices(
             "LOCAL_MAX_CONCURRENT",
             "LOCAL_AI_MAX_CONCURRENT",
@@ -401,7 +403,17 @@ class Settings(BaseSettings):
             elif req_m:
                 low_m = req_m.lower()
                 is_local = req_m in known_local or any(
-                    tok in low_m for tok in ("mlx", "saluki", "glm-ocr", "d1-3b")
+                    tok in low_m
+                    for tok in (
+                        "mlx",
+                        "saluki",
+                        "glm-ocr",
+                        "d1-3b",
+                        "liquidai",
+                        "qwen3-vl",
+                        "d1-omni",
+                        "lfm3",
+                    )
                 )
                 provider = "local" if is_local else "freellm"
                 active_model = req_m
@@ -431,7 +443,7 @@ class Settings(BaseSettings):
         else:
             provider = "local"
             base_url = self.ai_base_url.rstrip("/")
-            api_key = ""
+            api_key = self.ai_api_key or ""
 
         return {
             "stage_key": stage_key,
@@ -456,7 +468,7 @@ class Settings(BaseSettings):
             "freellm_api_key_configured": bool(self.freellm_api_key),
             "local_base_url": self.ai_base_url.rstrip("/"),
             "base_url": active_base,
-            "local_max_concurrent": max(1, int(self.local_max_concurrent or 5)),
+            "local_max_concurrent": max(1, int(self.local_max_concurrent or 1)),
             "freellm_concurrent_unlimited": True,
             "stages": stages_copy,
             "configured": {
@@ -614,7 +626,7 @@ class Settings(BaseSettings):
                     {
                         "provider": self.ai_provider,
                         "freellm_model": self.freellm_model,
-                        "local_max_concurrent": max(1, int(self.local_max_concurrent or 5)),
+                        "local_max_concurrent": max(1, int(self.local_max_concurrent or 1)),
                         "stages": self.ai_stages,
                     },
                     ensure_ascii=False,

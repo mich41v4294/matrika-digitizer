@@ -251,9 +251,9 @@ const DEFAULT_FREELLM_MODEL_SUGGESTIONS = [
 ];
 
 const DEFAULT_LOCAL_MODEL_SUGGESTIONS = [
-  "glm-ocr-g32-mixed_4_8-mlx",
-  "d1-3b-mlx",
-  "underdog-saluki-27b-1.0",
+  "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+  "LiquidAI/d1-Omni-2B-MLX-8bit",
+  "LiquidAI/LFM3-Omni-2B-MLX-4bit",
 ];
 
 const STAGE_DESCRIPTORS: Array<{
@@ -270,10 +270,10 @@ const STAGE_DESCRIPTORS: Array<{
     titleSk: "ocr — Hlavičky hárkov, tabuľky prehľadov & voliteľné OCR riadkov",
     titleEn: "ocr — Sheet Headers, Overview Tables & Optional Row OCR",
     subtitleSk:
-      "GLM-OCR vždy číta hlavičku hárku a tabuľky prehľadov obvodov (textové OCR riadkov sa dá preskočiť nižšie)",
+      "Qwen3-VL vždy číta hlavičku hárku a tabuľky prehľadov obvodov (textové OCR riadkov sa dá preskočiť nižšie)",
     subtitleEn:
-      "GLM-OCR always reads sheet headers and overview tables (per-row text OCR can be skipped below)",
-    defaultLocalModel: "glm-ocr-g32-mixed_4_8-mlx",
+      "Qwen3-VL always reads sheet headers and overview tables (per-row text OCR can be skipped below)",
+    defaultLocalModel: "mlx-community/Qwen3-VL-8B-Instruct-4bit",
     defaultFreellmModel: "gpt-4o-mini",
   },
   {
@@ -286,7 +286,7 @@ const STAGE_DESCRIPTORS: Array<{
       "Rozhodovanie o istote prečítania v cirkevných matrikách (sčítacie hárky 1930/1940 idú priamo do Extract)",
     subtitleEn:
       "Confidence triage for church register rows (1930/1940 census sheets go directly to Extract)",
-    defaultLocalModel: "d1-3b-mlx",
+    defaultLocalModel: "LiquidAI/d1-Omni-2B-MLX-8bit",
     defaultFreellmModel: "gpt-4o-mini",
   },
   {
@@ -299,7 +299,7 @@ const STAGE_DESCRIPTORS: Array<{
       "Priama extrakcia zo zloženého výrezu 5 skupín stĺpcov (row_XX_extract_composite.jpg, stĺpce 1–24) bez OCR nápovied + konsenzus domácnosti",
     subtitleEn:
       "Direct extraction from 5-band stacked column crops (row_XX_extract_composite.jpg, Cols 1–24) without OCR hints + household consensus",
-    defaultLocalModel: "underdog-saluki-27b-1.0",
+    defaultLocalModel: "LiquidAI/LFM3-Omni-2B-MLX-4bit",
     defaultFreellmModel: "gpt-4o-mini",
   },
   {
@@ -307,10 +307,10 @@ const STAGE_DESCRIPTORS: Array<{
     titleSk: "layout — Rozloženie hárku / Prehľad obvodu (Layout)",
     titleEn: "layout — Sheet Layout & District Overview Detection (Layout)",
     subtitleSk:
-      "Detekcia typu hárku a hlavičiek prehľadu obvodu (predvolene: Local AI · glm-ocr-g32-mixed_4_8-mlx)",
+      "Detekcia typu hárku a hlavičiek prehľadu obvodu (predvolene: Local AI · Qwen3-VL)",
     subtitleEn:
-      "Sheet type classification and district overview header detection (default: Local AI · glm-ocr-g32-mixed_4_8-mlx)",
-    defaultLocalModel: "glm-ocr-g32-mixed_4_8-mlx",
+      "Sheet type classification and district overview header detection (default: Local AI · Qwen3-VL)",
+    defaultLocalModel: "mlx-community/Qwen3-VL-8B-Instruct-4bit",
     defaultFreellmModel: "gpt-4o-mini",
   },
 ];
@@ -318,26 +318,26 @@ const STAGE_DESCRIPTORS: Array<{
 const DEFAULT_STAGE_CONFIGS: Record<PipelineStageKey, StageAIConfig> = {
   ocr: {
     provider: "local",
-    model: "glm-ocr-g32-mixed_4_8-mlx",
-    local_model: "glm-ocr-g32-mixed_4_8-mlx",
+    model: "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+    local_model: "mlx-community/Qwen3-VL-8B-Instruct-4bit",
     freellm_model: "gpt-4o-mini",
   },
   decision: {
     provider: "local",
-    model: "d1-3b-mlx",
-    local_model: "d1-3b-mlx",
+    model: "LiquidAI/d1-Omni-2B-MLX-8bit",
+    local_model: "LiquidAI/d1-Omni-2B-MLX-8bit",
     freellm_model: "gpt-4o-mini",
   },
   extract: {
     provider: "local",
-    model: "underdog-saluki-27b-1.0",
-    local_model: "underdog-saluki-27b-1.0",
+    model: "LiquidAI/LFM3-Omni-2B-MLX-4bit",
+    local_model: "LiquidAI/LFM3-Omni-2B-MLX-4bit",
     freellm_model: "gpt-4o-mini",
   },
   layout: {
     provider: "local",
-    model: "glm-ocr-g32-mixed_4_8-mlx",
-    local_model: "glm-ocr-g32-mixed_4_8-mlx",
+    model: "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+    local_model: "mlx-community/Qwen3-VL-8B-Instruct-4bit",
     freellm_model: "gpt-4o-mini",
   },
 };
@@ -468,7 +468,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
   };
 
   // Playground State
-  const [customModel, setCustomModel] = useState<string>("underdog-saluki-27b-1.0");
+  const [customModel, setCustomModel] = useState<string>("LiquidAI/LFM3-Omni-2B-MLX-4bit");
   const [customPrompt, setCustomPrompt] = useState<string>("");
   const [customRowId, setCustomRowId] = useState<string>(
     () => searchParams.get("row") || ""
@@ -512,7 +512,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
       cancelled: 0,
       error: 0,
       total_active_and_queued: 0,
-      local_max_concurrent: 5,
+      local_max_concurrent: 1,
       active_local_requests: 0,
       waiting_local_requests: 0,
       active_freellm_requests: 0,
@@ -813,7 +813,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
       normalizedStages.extract?.model ||
       (prov === "freellm"
         ? cfgData.freellm_model
-        : cfgData.configured?.extract || "underdog-saluki-27b-1.0");
+        : cfgData.configured?.extract || "LiquidAI/LFM3-Omni-2B-MLX-4bit");
     if (activeExtractModel) {
       setCustomModel(activeExtractModel);
     }
@@ -1065,7 +1065,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
       preset === "hybrid"
         ? `Hybrid režim (OCR + Decision lokálne, Extrakcia cez OpenAI/Cloud: ${flModel})`
         : preset === "all_local"
-        ? "Všetky fázy prepnuté na Local AI (http://localhost:1234/v1)"
+        ? "Všetky fázy prepnuté na Local AI (http://127.0.0.1:8080/v1)"
         : `Všetky fázy prepnuté na Cloud API (${flModel})`;
     await postAiConfigUpdate(
       {
@@ -2369,7 +2369,7 @@ export default function DebugWorkflow({ lang, refreshStatus }: Props) {
             <span>
               Local:{" "}
               <strong className="text-stone-200">
-                {aiConfig?.local_base_url || "http://localhost:1234/v1"}
+                {aiConfig?.local_base_url || "http://127.0.0.1:8080/v1"}
               </strong>
             </span>
             <span>

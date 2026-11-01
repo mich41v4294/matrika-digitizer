@@ -13,8 +13,12 @@ services:
     container_name: matrika-digitizer
     ports:
       - "${PORT:-8080}:8080"
+    # Model IDs and AI defaults live in .env.example (committed). Optional .env overlays for secrets / LAN hosts.
+    # Do not list MODEL_* under environment: — empty ${MODEL_*} interpolation would wipe env_file values.
     env_file:
-      - .env
+      - .env.example
+      - path: .env
+        required: false
     environment:
       - PANGOLIN_PUBLIC_URL=${PANGOLIN_PUBLIC_URL:-http://localhost:8080}
       - VITE_COMMIT_HASH=${VITE_COMMIT_HASH:-}
@@ -24,20 +28,10 @@ services:
       - COMMIT_SHA=${COMMIT_SHA:-}
       - GITHUB_SHA=${GITHUB_SHA:-}
       - APP_API_KEY=${APP_API_KEY:-}
-      - AI_PROVIDER=${AI_PROVIDER}
-      # Docker host reachability only — model IDs come from .env (see .env.example).
+      # Docker host reachability — overrides .env.example localhost when unset.
       - AI_BASE_URL=${AI_BASE_URL:-http://host.docker.internal:8080/v1}
       - AI_MODELS_URL=${AI_MODELS_URL:-http://host.docker.internal:8080/v1/models}
-      - AI_API_KEY=${AI_API_KEY:-}
-      - LOCAL_MAX_CONCURRENT=${LOCAL_MAX_CONCURRENT:-}
-      - MODEL_OCR=${MODEL_OCR}
-      - MODEL_DECISION=${MODEL_DECISION}
-      - MODEL_EXTRACT=${MODEL_EXTRACT}
-      - MODEL_LAYOUT=${MODEL_LAYOUT}
-      - MODEL_STT=${MODEL_STT:-}
-      - FREELLM_BASE_URL=${FREELLM_BASE_URL:-}
       - FREELLM_API_KEY=${FREELLM_API_KEY:-}
-      - FREELLM_MODEL=${FREELLM_MODEL:-}
       - DATA_DIR=/app/data
       - MATRIKA_DATA_DIR=${MATRIKA_DATA_DIR:-/app/data/uploads/matrika}
       - CENSUS_DATA_DIR=${CENSUS_DATA_DIR:-/app/data/uploads/slovakiana}

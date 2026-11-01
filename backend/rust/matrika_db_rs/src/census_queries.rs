@@ -1864,10 +1864,36 @@ pub fn find_matching_census_sheets_rs(
                     continue;
                 }
                 if only_undone {
-                    let is_done = matches!(dl_status.as_str(), "ocr_done" | "extracted" | "matched")
-                        || (dl_status == "sliced"
-                            && stype == "household"
-                            && front_sid.filter(|&x| x > 0).is_some());
+                    let status_done = matches!(
+                        dl_status.as_str(),
+                        "ocr_done" | "extracted" | "matched"
+                    ) || (dl_status == "sliced"
+                        && stype == "household"
+                        && front_sid.filter(|&x| x > 0).is_some());
+                    // Empty overview extracts (0 houses/districts) must be re-queued after a bad OCR pass.
+                    let is_done = if !status_done || dl_status == "ocr_incomplete" {
+                        false
+                    } else if stype == "overview" {
+                        let n: i64 = conn
+                            .query_row(
+                                "SELECT COUNT(*) FROM censusoverviewhouse WHERE census_sheet_id = ?1",
+                                [sid],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or(0);
+                        n > 0
+                    } else if stype == "municipal_overview" {
+                        let n: i64 = conn
+                            .query_row(
+                                "SELECT COUNT(*) FROM censusmunicipaloverviewdistrict WHERE census_sheet_id = ?1",
+                                [sid],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or(0);
+                        n > 0
+                    } else {
+                        true
+                    };
                     if is_done {
                         continue;
                     }

@@ -13,6 +13,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from backend.app.api.ws import ws_manager
@@ -21,6 +22,8 @@ from backend.app.config import settings
 from backend.app.db.models import (
     Batch,
     CensusDownloadJob,
+    CensusMunicipalOverviewDistrict,
+    CensusOverviewHouse,
     CensusSheet,
     ScanImage,
     utcnow,
@@ -51,14 +54,72 @@ DONE_DOWNLOAD_ONLY_STATUSES: tuple[str, ...] = (
 )
 
 
+def _merge_empty_overview_redos(
+    session: Session,
+    already: list[CensusSheet],
+    filters: dict[str, Any],
+) -> list[CensusSheet]:
+    """
+    Re-queue overview / municipal sheets that were marked extracted/matched but produced
+    zero houses/districts (common after a bad Omni/Qwen OCR pass).
+    """
+    seen = {s.id for s in already if s.id is not None}
+    years = filters.get("years") or [1930]
+    year = int(years[0]) if years else 1930
+    muni = str(filters.get("municipality") or "").strip()
+    candidates = session.exec(
+        select(CensusSheet).where(
+            CensusSheet.has_images == True,  # noqa: E712
+            CensusSheet.census_year == year,
+            CensusSheet.sheet_type.in_(["overview", "municipal_overview"]),  # type: ignore[union-attr]
+            CensusSheet.download_status.in_(list(DONE_PIPELINE_STATUSES)),  # type: ignore[union-attr]
+        )
+    ).all()
+    out = list(already)
+    for sh in candidates:
+        if sh.id is None or sh.id in seen:
+            continue
+        if muni and not _sheet_matches_muni_filter(sh, muni):
+            continue
+        if _overview_extract_succeeded(session, sh):
+            continue
+        out.append(sh)
+        seen.add(sh.id)
+    return out
+
+
+def _overview_extract_succeeded(session: Session | None, sheet: CensusSheet) -> bool:
+    """Overview/municipal sheets marked extracted are only 'done' if they produced rows."""
+    if session is None or sheet.id is None:
+        return True
+    if sheet.sheet_type == "overview":
+        n = session.exec(
+            select(func.count())
+            .select_from(CensusOverviewHouse)
+            .where(CensusOverviewHouse.census_sheet_id == sheet.id)
+        ).one()
+        return int(n or 0) > 0
+    if sheet.sheet_type == "municipal_overview":
+        n = session.exec(
+            select(func.count())
+            .select_from(CensusMunicipalOverviewDistrict)
+            .where(CensusMunicipalOverviewDistrict.census_sheet_id == sheet.id)
+        ).one()
+        return int(n or 0) > 0
+    return True
+
+
 def is_census_sheet_done(
     sheet: CensusSheet,
     *,
     run_ocr: bool = True,
     overview_only: bool = False,
+    session: Session | None = None,
 ) -> bool:
     """Returns True if a CensusSheet has already completed the target batch stage."""
     status = (sheet.download_status or "").strip()
+    if status == "ocr_incomplete":
+        return False
     if overview_only:
         is_potential_ov = bool(
             sheet.sheet_type in ("municipal_overview", "overview")
@@ -67,12 +128,16 @@ def is_census_sheet_done(
         if not is_potential_ov:
             return True
         if status in DONE_PIPELINE_STATUSES:
-            return True
+            return _overview_extract_succeeded(session, sheet)
         if status == "sliced" and sheet.sheet_type == "household" and sheet.front_scan_id:
             return True
         return False
     done_set = DONE_PIPELINE_STATUSES if run_ocr else DONE_DOWNLOAD_ONLY_STATUSES
-    return status in done_set
+    if status not in done_set:
+        return False
+    if sheet.sheet_type in ("overview", "municipal_overview"):
+        return _overview_extract_succeeded(session, sheet)
+    return True
 
 
 def _sheet_matches_muni_filter(sheet: CensusSheet, muni_value: str | None) -> bool:
@@ -125,7 +190,9 @@ def _find_matching_census_sheets(
             sh = sheets_by_id.get(sid)
             if not sh:
                 continue
-            if only_undone and is_census_sheet_done(sh, run_ocr=run_ocr, overview_only=overview_only):
+            if only_undone and is_census_sheet_done(
+                sh, run_ocr=run_ocr, overview_only=overview_only, session=session
+            ):
                 continue
             ordered.append(sh)
         return ordered
@@ -142,15 +209,17 @@ def _find_matching_census_sheets(
                 run_ocr=run_ocr,
                 overview_only=overview_only,
             )
-            if not matched_ids:
-                return []
             sheets_by_id: dict[int, CensusSheet] = {}
-            for start in range(0, len(matched_ids), 450):
+            for start in range(0, len(matched_ids or []), 450):
                 chunk = matched_ids[start : start + 450]
                 for s in session.exec(select(CensusSheet).where(CensusSheet.id.in_(chunk))).all():  # type: ignore[union-attr]
                     if s.id is not None:
                         sheets_by_id[s.id] = s
-            return [sheets_by_id[sid] for sid in matched_ids if sid in sheets_by_id]
+            ordered = [sheets_by_id[sid] for sid in (matched_ids or []) if sid in sheets_by_id]
+            # Rust still treats empty extracted overviews as done; re-include those for redo.
+            if overview_only and only_undone:
+                ordered = _merge_empty_overview_redos(session, ordered, filters)
+            return ordered
     except Exception:
         pass
 
@@ -197,7 +266,9 @@ def _find_matching_census_sheets(
             )
             if not is_potential_ov:
                 continue
-            if only_undone and is_census_sheet_done(s, run_ocr=run_ocr, overview_only=True):
+            if only_undone and is_census_sheet_done(
+                s, run_ocr=run_ocr, overview_only=True, session=session
+            ):
                 continue
         if muni_keys or municipality:
             key_ok = bool(muni_keys and s.municipality_key in muni_keys)

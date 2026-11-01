@@ -5933,7 +5933,12 @@ async def _extract_census_overview_sheet_locked(
     from pathlib import Path
     from backend.app.api.ws import ws_manager
     from backend.app.db.models import WorkflowTrace
-    from backend.app.pipeline.ocr_stage import html_table_to_pipe_text, media_rel_to_path, vision_ocr_prompt
+    from backend.app.pipeline.ocr_stage import (
+        html_table_to_pipe_text,
+        is_unusable_vision_ocr_text,
+        media_rel_to_path,
+        vision_ocr_prompt,
+    )
 
     if front_scan is None and sheet.front_scan_id:
         front_scan = session.get(ScanImage, sheet.front_scan_id)
@@ -6105,10 +6110,11 @@ async def _extract_census_overview_sheet_locked(
         for r_rec in scan_record_rows.values():
             session.refresh(r_rec)
 
-        # Check existing cached WorkflowTrace OCR on this scan ONLY if previously sliced in overview mode at identical row bounds
+        # Reuse WorkflowTrace OCR only for the active OCR model and usable (non-commentary) text.
         can_reuse_scan_cache = (
             not prev_slicing_mode or prev_slicing_mode == layout_res.slicing_mode
         )
+        active_ocr_model = (settings.model_ocr or "").strip().lower()
         cached_traces = session.exec(
             select(WorkflowTrace)
             .where(WorkflowTrace.scan_id == scan_obj.id, WorkflowTrace.status == "ok")
@@ -6116,8 +6122,14 @@ async def _extract_census_overview_sheet_locked(
         ).all()
         trace_by_img: dict[str, str] = {}
         for tr in cached_traces:
-            if tr.image_path and tr.response_text and tr.image_path not in trace_by_img:
-                trace_by_img[tr.image_path] = tr.response_text
+            if not tr.image_path or not tr.response_text or tr.image_path in trace_by_img:
+                continue
+            if is_unusable_vision_ocr_text(tr.response_text):
+                continue
+            model_tag = (tr.model_or_tool or "").lower()
+            if active_ocr_model and active_ocr_model not in model_tag:
+                continue
+            trace_by_img[tr.image_path] = tr.response_text
 
         # Header OCR on front page using Text Recognition to capture obvod_number & commissioner_name
         if page_side == "front" and layout_res.header_crop_rel:
@@ -6125,6 +6137,8 @@ async def _extract_census_overview_sheet_locked(
             cached_h = (
                 trace_by_img.get(layout_res.header_crop_rel) if can_reuse_scan_cache else None
             ) or (scan_obj.header_raw_ocr if scan_obj.header_raw_ocr else None)
+            if cached_h and is_unusable_vision_ocr_text(cached_h):
+                cached_h = None
             if cached_h and ("prehľad" in cached_h.lower() or "prehlad" in cached_h.lower() or "komisár" in cached_h.lower() or "komisar" in cached_h.lower()):
                 h_text = html_table_to_pipe_text(cached_h)
             elif h_path and h_path.exists():
@@ -6521,10 +6535,11 @@ async def _extract_census_overview_sheet_locked(
         session, sheet, created_houses, sheet_by_house_num, list(candidate_sheets)
     )
 
+    final_status = "extracted" if created_houses else "ocr_incomplete"
     for scan_obj, _ in scans_to_process:
-        scan_obj.status = "extracted"
+        scan_obj.status = final_status
         session.add(scan_obj)
-    sheet.download_status = "extracted"
+    sheet.download_status = final_status
     session.add(sheet)
     session.flush()
     index_census_sheet(session, sheet)
@@ -7185,7 +7200,12 @@ async def _extract_census_municipal_overview_sheet_locked(
     from pathlib import Path
     from backend.app.api.ws import ws_manager
     from backend.app.db.models import WorkflowTrace
-    from backend.app.pipeline.ocr_stage import html_table_to_pipe_text, media_rel_to_path, vision_ocr_prompt
+    from backend.app.pipeline.ocr_stage import (
+        html_table_to_pipe_text,
+        is_unusable_vision_ocr_text,
+        media_rel_to_path,
+        vision_ocr_prompt,
+    )
 
     if front_scan is None and sheet.front_scan_id:
         front_scan = session.get(ScanImage, sheet.front_scan_id)
@@ -7343,6 +7363,7 @@ async def _extract_census_municipal_overview_sheet_locked(
         can_reuse_scan_cache = (
             not prev_slicing_mode or prev_slicing_mode == layout_res.slicing_mode
         )
+        active_ocr_model = (settings.model_ocr or "").strip().lower()
         cached_traces = session.exec(
             select(WorkflowTrace)
             .where(WorkflowTrace.scan_id == scan_obj.id, WorkflowTrace.status == "ok")
@@ -7350,14 +7371,22 @@ async def _extract_census_municipal_overview_sheet_locked(
         ).all()
         trace_by_img: dict[str, str] = {}
         for tr in cached_traces:
-            if tr.image_path and tr.response_text and tr.image_path not in trace_by_img:
-                trace_by_img[tr.image_path] = tr.response_text
+            if not tr.image_path or not tr.response_text or tr.image_path in trace_by_img:
+                continue
+            if is_unusable_vision_ocr_text(tr.response_text):
+                continue
+            model_tag = (tr.model_or_tool or "").lower()
+            if active_ocr_model and active_ocr_model not in model_tag:
+                continue
+            trace_by_img[tr.image_path] = tr.response_text
 
         if page_side == "front" and layout_res.header_crop_rel:
             h_path = media_rel_to_path(layout_res.header_crop_rel)
             cached_h = (
                 trace_by_img.get(layout_res.header_crop_rel) if can_reuse_scan_cache else None
             ) or (scan_obj.header_raw_ocr if scan_obj.header_raw_ocr else None)
+            if cached_h and is_unusable_vision_ocr_text(cached_h):
+                cached_h = None
             h_text = ""
             if cached_h and ("revízor" in cached_h.lower() or "revizor" in cached_h.lower() or "obecný" in cached_h.lower() or "obecny" in cached_h.lower()):
                 h_text = html_table_to_pipe_text(cached_h)
@@ -7672,10 +7701,11 @@ async def _extract_census_municipal_overview_sheet_locked(
     for dr in created_rows:
         session.add(dr)
 
+    final_status = "extracted" if district_only_rows else "ocr_incomplete"
     for scan_obj, _ in scans_to_process:
-        scan_obj.status = "extracted"
+        scan_obj.status = final_status
         session.add(scan_obj)
-    sheet.download_status = "extracted"
+    sheet.download_status = final_status
     session.add(sheet)
     session.flush()
     index_census_sheet(session, sheet)

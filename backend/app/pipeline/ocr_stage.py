@@ -28,6 +28,38 @@ def uses_glm_ocr_prompt_dialect(model: str | None = None) -> bool:
     return "glm-ocr" in mid
 
 
+def is_unusable_vision_ocr_text(text: str | None) -> bool:
+    """True when cached/model output is English commentary or an error, not usable table OCR."""
+    raw = (text or "").strip()
+    if not raw:
+        return True
+    low = raw.lower()
+    if low.startswith("error:"):
+        return True
+    prose_markers = (
+        "the image shows",
+        "based on the provided image",
+        "here is the text recognition",
+        "this appears to be",
+        "likely from a czech",
+        "likely from a slovak",
+        "i can see",
+        "in this image",
+        "the document appears",
+        "as an ai",
+    )
+    if any(m in low for m in prose_markers):
+        return True
+    # Prefer pipe/HTML table dumps; reject long English-only prose without structure.
+    if "|" not in raw and "<td" not in low and "<table" not in low:
+        alpha = re.findall(r"[A-Za-z]+", raw)
+        if len(alpha) >= 12 and sum(1 for w in alpha if w.lower() in {
+            "the", "and", "of", "in", "to", "is", "this", "that", "with", "from", "are", "for"
+        }) >= 4:
+            return True
+    return False
+
+
 def vision_ocr_prompt(kind: str = "text", *, model: str | None = None) -> str:
     """
     Prompt for local vision OCR.

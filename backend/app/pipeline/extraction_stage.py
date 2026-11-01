@@ -3789,15 +3789,17 @@ def reconcile_census_household_relationships(
 
 
 CENSUS_OVERVIEW_SYSTEM_PROMPT = """You are an expert Slovak archivist transcribing a 'Prehľad sčítacieho obvodu' (Census Enumeration District Overview table, 1930/1940 Slovak Census).
-The table has 8 columns:
+The printed form has 9 columns (obývaný / neobývaný are separate). Map them as follows:
 1: Radové číslo (ordinal row number 1, 2, 3...)
-2: Meno osady (dediny, samoty, ulice, námestia) (settlement / village / street name e.g. "Veľké Šurovce", or `- " -` / `//` ditto mark)
+2: Meno osady (dediny, samoty, ulice, námestia) (settlement / village / street name e.g. "Naháč", or `- " -` / `//` ditto mark)
 3: Číslo domu (house number e.g. "1", "2", "18")
-4: Či je dom obývaný alebo neobývaný (is_inhabited: true if "obývaný" or "1", false if "neobývaný" / "0")
-5: Meno majiteľa domu (house owner name e.g. "Ján Šulák", "Karol Gálik", "Jozef Paraba", or `- " -` / `//` ditto mark if same owner as previous house)
-6: Počet bytových strán (domácností) (household_count: integer e.g. 1, 2)
-7: Počet prítomných osôb (present_persons_count: integer e.g. 4, 6, 8)
-8: Poznámka (remarks e.g. "obchod", "škola", "neobývaný")
+4: Obývaný (mark / "1" / ink → contributes to is_inhabited=true)
+5: Neobývaný (mark / "1" / ink → is_inhabited=false when col 4 is blank)
+6: Meno majiteľa domu (house owner name e.g. "Ján Šulák", "Karol Gálik", "Jozef Paraba", or `- " -` / `//` ditto mark if same owner as previous house). Preserve Slovak spelling — NEVER anglicize (Ján≠John, Jozef≠Joseph, Uhlík≠White).
+7: Počet bytových strán (domácností) (household_count: integer e.g. 1, 2)
+8: Počet prítomných osôb (present_persons_count: integer e.g. 4, 6, 8)
+9: Poznámka (remarks e.g. "obchod", "škola", "neobývaný")
+Flatten cols 4/5 into is_inhabited (true if inhabited mark present and uninhabited blank).
 Return ONLY raw JSON starting with { and ending with }."""
 
 
@@ -4585,6 +4587,41 @@ _OVERVIEW_SURNAME_FIXES: dict[str, str] = {
     "puchlová": "Puchlová",
 }
 
+# Whole-token English given names / surnames that Qwen-style VLMs invent when
+# "translating" Slovak cursive (Uhlík→White, Ján→John, Synak→Lynch, …).
+_ENGLISH_OWNER_NAME_TOKENS: frozenset[str] = frozenset(
+    {
+        "john",
+        "joseph",
+        "jesse",
+        "james",
+        "jim",
+        "jane",
+        "mary",
+        "marie",
+        "tommy",
+        "thomas",
+        "george",
+        "william",
+        "robert",
+        "richard",
+        "charles",
+        "michael",
+        "david",
+        "harriet",
+        "harriott",
+        "white",
+        "whitk",
+        "lynch",
+        "design",
+        "waterman",
+        "youref",
+        "yoref",
+        "rosalind",
+        "rosalie",
+    }
+)
+
 _GARBLED_OWNER_MARKERS: tuple[str, ...] = (
     "syndrome",
     "synod",
@@ -4607,6 +4644,11 @@ _GARBLED_OWNER_MARKERS: tuple[str, ...] = (
     "vote",
     "sought",
     "old mrs",
+    "white",
+    "youref",
+    "yoref",
+    "tommy harriet",
+    "rosalind",
     "innenfeile",
     "lachen",
     "listung",
@@ -4936,7 +4978,19 @@ def _is_garbled_or_english_owner_ocr(owner_name: str | None) -> bool:
         return True
     if any(m in low for m in _GARBLED_OWNER_MARKERS):
         return True
+    tokens = {t for t in re.findall(r"[a-záäčďéíĺľňóôŕšťúýž]+", low, flags=re.IGNORECASE) if t}
+    if tokens & _ENGLISH_OWNER_NAME_TOKENS:
+        return True
     return False
+
+
+def _overview_owner_crop_rel(r_info: Any) -> str | None:
+    """Return the dedicated Col-6 owner crop URL written by `slice_census_overview_sheet`, if present."""
+    crops = getattr(r_info, "cell_crops", None) or []
+    if not crops or not isinstance(crops[0], dict):
+        return None
+    rel = crops[0].get("owner_crop_url")
+    return str(rel) if rel else None
 
 
 def _normalize_overview_owner(raw_owner: str | None, prev_owner: str | None = None) -> str | None:
@@ -6263,16 +6317,47 @@ async def _extract_census_overview_sheet_locked(
                 or (heur_probe.get("is_inhabited", True) and heur_probe.get("present_persons_count") is None)
                 or ((heur_probe.get("household_count") or 0) >= 4)
             )
-            if needs_focused_ocr and r_path and r_path.exists():
+            owner_crop_rel = _overview_owner_crop_rel(r_info)
+            owner_path = media_rel_to_path(owner_crop_rel) if owner_crop_rel else None
+            if needs_focused_ocr and (
+                (r_path and r_path.exists()) or (owner_path and owner_path.exists())
+            ):
+                focused_bits: list[str] = []
+                # Col-6-only owner crop first — Qwen/LFM3 read names far more reliably here than on the full strip.
+                if owner_path and owner_path.exists() and owner_crop_rel:
+                    cached_o_ocr = (
+                        html_table_to_pipe_text(trace_by_img.get(owner_crop_rel, "")).strip(" |")
+                        if can_reuse_row_cache
+                        else ""
+                    )
+                    if cached_o_ocr:
+                        focused_bits.append(cached_o_ocr)
+                    else:
+                        ensure_session_write_unlocked(session)
+                        res_o = await ai_client.chat_completion(
+                            stage="ocr_right",
+                            model=settings.model_ocr,
+                            prompt=vision_ocr_prompt("text", model=settings.model_ocr),
+                            image_path=owner_path,
+                            image_rel_url=owner_crop_rel,
+                            scan_id=scan_obj.id,
+                            row_id=r_rec.id,
+                            max_tokens=120,
+                        )
+                        owner_ocr = html_table_to_pipe_text(res_o["content"]).strip(" |")
+                        if owner_ocr and not is_unusable_vision_ocr_text(owner_ocr):
+                            focused_bits.append(owner_ocr)
+
                 cached_r_ocr = (
                     html_table_to_pipe_text(trace_by_img.get(r_info.right_crop_rel, "")).strip(" |")
                     if can_reuse_row_cache
                     else ""
                 )
+                right_ocr = ""
                 if cached_r_ocr:
                     right_ocr = cached_r_ocr
-                else:
-                    # Use Text Recognition on the focused Cols 6..8 (Owner + Counts) crop first
+                elif r_path and r_path.exists():
+                    # Text Recognition on focused Cols 6..8 (Owner + Counts)
                     ensure_session_write_unlocked(session)
                     res_r = await ai_client.chat_completion(
                         stage="ocr_right",
@@ -6298,7 +6383,7 @@ async def _extract_census_overview_sheet_locked(
                         max_tokens=200,
                     )
                     right_ocr = html_table_to_pipe_text(res_rt["content"]).strip(" |")
-                if not right_ocr and l_path and l_path.exists():
+                if not right_ocr and not focused_bits and l_path and l_path.exists():
                     ensure_session_write_unlocked(session)
                     res_txt = await ai_client.chat_completion(
                         stage="ocr_left",
@@ -6312,7 +6397,12 @@ async def _extract_census_overview_sheet_locked(
                     )
                     right_ocr = html_table_to_pipe_text(res_txt["content"]).strip(" |")
                 if right_ocr:
-                    combined_ocr = f"{combined_ocr} | {right_ocr}".strip(" |") if combined_ocr else right_ocr
+                    focused_bits.append(right_ocr)
+                if focused_bits:
+                    focused_join = " | ".join(focused_bits)
+                    combined_ocr = (
+                        f"{combined_ocr} | {focused_join}".strip(" |") if combined_ocr else focused_join
+                    )
 
             r_rec.raw_ocr_left = combined_ocr
             r_rec.raw_ocr_combined = combined_ocr
@@ -6399,16 +6489,26 @@ async def _extract_census_overview_sheet_locked(
         if (not heur.get("owner_name") and not heur.get("has_owner_ditto")) or _is_garbled_or_english_owner_ocr(heur.get("owner_name")):
             ensure_session_write_unlocked(session)
             skip_row_text_ocr = bool(settings.get_feature_flags().get("skip_row_ocr", True))
+            ov_owner_rel = _overview_owner_crop_rel(r_info)
+            ov_owner_path = media_rel_to_path(ov_owner_rel) if ov_owner_rel else None
             ov_r_path = media_rel_to_path(r_info.right_crop_rel) if getattr(r_info, "right_crop_rel", None) else None
             ov_l_path = media_rel_to_path(r_info.left_crop_rel) if getattr(r_info, "left_crop_rel", None) else None
-            ov_img_path = ov_r_path if (ov_r_path and ov_r_path.exists()) else (ov_l_path if (ov_l_path and ov_l_path.exists()) else None)
-            ov_img_rel = r_info.right_crop_rel if (ov_r_path and ov_r_path.exists()) else getattr(r_info, "left_crop_rel", None)
+            # Prefer Col-6 owner crop for extract VLM when the table OCR anglicized the name.
+            if ov_owner_path and ov_owner_path.exists():
+                ov_img_path, ov_img_rel = ov_owner_path, ov_owner_rel
+            elif ov_r_path and ov_r_path.exists():
+                ov_img_path, ov_img_rel = ov_r_path, r_info.right_crop_rel
+            elif ov_l_path and ov_l_path.exists():
+                ov_img_path, ov_img_rel = ov_l_path, getattr(r_info, "left_crop_rel", None)
+            else:
+                ov_img_path, ov_img_rel = None, None
             if skip_row_text_ocr:
                 prompt = (
                     f"Transcribe row #{expected_ord} (House #{heur.get('house_number')}) of Prehľad sčítacieho obvodu "
                     f"(Municipality: {sheet.municipality or 'Unknown'}) directly from the attached crop image.\n"
                     f"Previous row settlement: {prev_house.settlement_name if prev_house else (sheet.municipality or 'dedina')}, "
-                    f"Previous row owner: {prev_house.owner_name if prev_house else 'None'}."
+                    f"Previous row owner: {prev_house.owner_name if prev_house else 'None'}.\n"
+                    f"Keep Slovak orthography; never anglicize owner names."
                 )
             else:
                 prompt = (

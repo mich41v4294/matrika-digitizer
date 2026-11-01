@@ -66,21 +66,30 @@ def vision_ocr_prompt(kind: str = "text", *, model: str | None = None) -> str:
 
     GLM-OCR is trained on short task tokens (`Table Recognition:` / `Text Recognition:`).
     Qwen3-VL (and other chat VLMs) need an explicit transcribe instruction or they return
-    English image commentary — which breaks overview heuristics and yields 0 houses.
+    English image commentary / anglicized names — which breaks overview heuristics
+    (e.g. Uhlík→White, Ján→John) and yields unusable owner rows.
     """
     mode = "table" if str(kind or "").strip().lower() == "table" else "text"
     if uses_glm_ocr_prompt_dialect(model):
         return "Table Recognition:" if mode == "table" else "Text Recognition:"
+    # Shared anti-translation rules for chat VLMs doing Slovak HTR.
+    fidelity = (
+        "This is a 1930/1940 Slovak census scan. Preserve Slovak orthography and diacritics "
+        "(á ä č ď é í ĺ ľ ň ó ô ŕ š ť ú ý ž). "
+        "NEVER translate, anglicize, or modernize names "
+        "(Ján≠John, Jozef≠Joseph/Jesse, Juraj≠George, Uhlík≠White, Synak≠Lynch). "
+        "Do not describe the image or add commentary."
+    )
     if mode == "table":
         return (
             "Transcribe this census table row. Read every column left to right. "
             "Output plain text only, with columns separated by |. "
-            "Do not describe the image, translate, or add commentary."
+            f"{fidelity}"
         )
     return (
-        "Transcribe all printed and handwritten text in this image. "
+        "Transcribe all printed and handwritten text in this image exactly as written. "
         "Reply with only the transcribed text. "
-        "Do not describe the image, translate, or add commentary."
+        f"{fidelity}"
     )
 
 

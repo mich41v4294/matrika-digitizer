@@ -2339,7 +2339,12 @@ class TestCensusLayoutAndHeuristics(unittest.TestCase):
         self.assertTrue(_is_garbled_or_english_owner_ocr("Malele to Syndrome"))
         self.assertTrue(_is_garbled_or_english_owner_ocr("Jaw Paterson Jan Singo"))
         self.assertTrue(_is_garbled_or_english_owner_ocr("Martin Endbjørn"))
+        self.assertTrue(_is_garbled_or_english_owner_ocr("Youref White"))
+        self.assertTrue(_is_garbled_or_english_owner_ocr("John Lynch a Largi Lynch"))
+        self.assertTrue(_is_garbled_or_english_owner_ocr("Jim Simonié"))
         self.assertFalse(_is_garbled_or_english_owner_ocr("Martin Ondrejička"))
+        self.assertFalse(_is_garbled_or_english_owner_ocr("Ján Synak"))
+        self.assertFalse(_is_garbled_or_english_owner_ocr("Rozália Lehutová"))
 
         self.assertEqual(_normalize_overview_owner("Malele to Syndrome"), "Maloleté Synakové deti")
         self.assertEqual(_normalize_overview_owner("Jaw Paterson Jan Singo"), "Ján Petrovič, Ján Šingo")

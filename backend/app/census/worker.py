@@ -1284,11 +1284,15 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
             existing_total_count = len(all_matches)
             already_done_count = max(0, existing_total_count - len(undone_matches))
 
-        if (
-            harvest_res.get("error")
-            or int(harvest_res.get("harvested") or 0) == 0
-            or not has_more_remote
-        ):
+        if harvest_res.get("error"):
+            break
+        # For overview-only, keep paginating while Slovakiana reports more pages even when
+        # this page upserted 0 new rows (households already in DB). Stopping on harvested==0
+        # skipped overview sheets later in the catalog and finished with 0 candidates.
+        if overview_only:
+            if not has_more_remote:
+                break
+        elif int(harvest_res.get("harvested") or 0) == 0 or not has_more_remote:
             break
 
     candidates = undone_matches[:limit_sheets]
@@ -1303,6 +1307,58 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
             job.updated_at = utcnow()
             session.add(job)
             session.commit()
+
+    if overview_only and not candidates:
+        empty_sk = (
+            "Nenašli sa žiadne prehľadové hárky pre tento výber (obec/rok). "
+            "Skontrolujte filter obce alebo najprv načítajte katalóg Slovakiana."
+        )
+        empty_en = (
+            "No overview sheets matched this selection (municipality/year). "
+            "Check the municipality filter or harvest the Slovakiana catalog first."
+        )
+        with Session(engine) as session:
+            job = session.get(CensusDownloadJob, job_id)
+            if job:
+                job.status = "error"
+                job.error_message = empty_sk[:500]
+                job.updated_at = utcnow()
+                session.add(job)
+                session.commit()
+        await ws_manager.broadcast(
+            "state",
+            {
+                "job_id": job_id,
+                "active_stage": "idle",
+                "active_model": None,
+                "progress_pct": 100,
+                "message_sk": empty_sk,
+                "message_en": empty_en,
+            },
+        )
+        await ws_manager.emit_completion(
+            {
+                "status": "error",
+                "kind": "census_job",
+                "job_id": job_id,
+                "rows_processed": 0,
+                "title_sk": "OCR prehľadov — nič na spracovanie",
+                "title_en": "Overview OCR — nothing to process",
+                "message_sk": empty_sk,
+                "message_en": empty_en,
+                "target_url": "/scitacie-harky",
+            }
+        )
+        _ACTIVE_JOB_FLAGS.pop(job_id, None)
+        _ACTIVE_JOB_RUNTIME.pop(job_id, None)
+        return {
+            "job_id": job_id,
+            "status": "error",
+            "processed": 0,
+            "failed": 0,
+            "skipped_done": already_done_count,
+            "error": empty_sk,
+        }
 
     if overview_only and candidates and run_ocr:
         try:
@@ -1411,11 +1467,40 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
             pass
 
     was_not_paused = _ACTIVE_JOB_FLAGS.get(job_id, True)
+
+    if processed == 0 and failed == 0 and already_done_count > 0:
+        done_msg_sk = (
+            f"Všetky vybrané sčítacie hárky sú už spracované ({already_done_count} hotových, 0 zostávajúcich)."
+        )
+        done_msg_en = (
+            f"All selected census sheets are already processed ({already_done_count} done, 0 remaining)."
+        )
+        done_status = "completed"
+    elif processed == 0 and failed == 0 and already_done_count == 0:
+        done_msg_sk = (
+            "Nenašli sa žiadne sčítacie hárky pre tento výber (0 na spracovanie). "
+            "Skontrolujte obec/rok alebo najprv načítajte katalóg."
+        )
+        done_msg_en = (
+            "No census sheets matched this selection (0 to process). "
+            "Check municipality/year or harvest the catalog first."
+        )
+        done_status = "error"
+    else:
+        done_msg_sk = f"Hotovo: stiahnutých a spracovaných {processed} sčítacích hárkov."
+        done_msg_en = f"Done: downloaded and processed {processed} census sheets."
+        done_status = "completed" if failed == 0 or processed > 0 else "error"
+
     try:
         with Session(engine) as session:
             job = session.get(CensusDownloadJob, job_id)
             if job:
-                job.status = "completed" if was_not_paused else "paused"
+                if not was_not_paused:
+                    job.status = "paused"
+                else:
+                    job.status = done_status
+                if done_status == "error" and processed == 0:
+                    job.error_message = done_msg_sk[:500]
                 job.updated_at = utcnow()
                 session.add(job)
                 safe_session_commit(session)
@@ -1425,39 +1510,47 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
     _ACTIVE_JOB_FLAGS.pop(job_id, None)
     _ACTIVE_JOB_RUNTIME.pop(job_id, None)
 
-    done_msg_sk = (
-        f"Všetky vybrané sčítacie hárky sú už spracované ({already_done_count} hotových, 0 zostávajúcich)."
-        if processed == 0 and failed == 0 and already_done_count > 0
-        else f"Hotovo: stiahnutých a spracovaných {processed} sčítacích hárkov."
-    )
-    done_msg_en = (
-        f"All selected census sheets are already processed ({already_done_count} done, 0 remaining)."
-        if processed == 0 and failed == 0 and already_done_count > 0
-        else f"Done: downloaded and processed {processed} census sheets."
-    )
-
+    # Idle state only — do not set progress_pct=100 + message here (App.tsx would toast
+    # "AI OCR dokončené!" and then emit_completion would toast again).
     await ws_manager.broadcast(
         "state",
         {
+            "job_id": job_id,
             "active_stage": "idle",
             "active_model": None,
             "current_sheet_id": None,
             "current_slovakiana_key": None,
             "current_sheet_label": None,
-            "progress_pct": 100,
-            "message_sk": done_msg_sk,
-            "message_en": done_msg_en,
+            "progress_pct": 0,
+            "message_sk": None,
+            "message_en": None,
         },
     )
     if was_not_paused:
         await ws_manager.emit_completion(
             {
-                "status": "completed" if failed == 0 or processed > 0 else "error",
+                "status": done_status,
                 "kind": "census_job",
                 "job_id": job_id,
                 "rows_processed": processed,
-                "title_sk": "Hromadné OCR dokončené" if run_ocr else "Hromadné sťahovanie dokončené",
-                "title_en": "Batch census OCR completed" if run_ocr else "Batch census download completed",
+                "title_sk": (
+                    "OCR prehľadov dokončené"
+                    if overview_only and done_status == "completed"
+                    else (
+                        "Hromadné OCR — nič na spracovanie"
+                        if done_status == "error" and processed == 0
+                        else ("Hromadné OCR dokončené" if run_ocr else "Hromadné sťahovanie dokončené")
+                    )
+                ),
+                "title_en": (
+                    "Overview OCR completed"
+                    if overview_only and done_status == "completed"
+                    else (
+                        "Batch OCR — nothing to process"
+                        if done_status == "error" and processed == 0
+                        else ("Batch census OCR completed" if run_ocr else "Batch census download completed")
+                    )
+                ),
                 "message_sk": done_msg_sk,
                 "message_en": done_msg_en,
                 "target_url": "/scitacie-harky",

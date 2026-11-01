@@ -1244,9 +1244,11 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
         "force_overview_reset": force_overview_reset,
     }
 
-    # If the local DB has fewer than `limit_sheets` undone sheets (or when `overview_only=True`
-    # and we need the full village catalog so overview sheets at the end of the remote pagination
-    # are discovered), harvest catalog pages from Slovakiana.
+    # If the local DB has fewer than `limit_sheets` matching undone sheets, harvest more
+    # catalog pages from Slovakiana. For overview_only, keep paging even when a page
+    # upserts 0 new rows (households already cataloged) so overviews later in the
+    # remote result set are still discovered — but stop once we already have enough
+    # local overview matches (do not burn 25 pages before OCR).
     has_explicit_sheet_ids = bool(filters.get("sheet_ids"))
     harvest_attempts = 0
     max_harvest_pages = 25
@@ -1254,8 +1256,9 @@ async def _run_download_and_pipeline_job_inner(job_id: int) -> dict[str, Any]:
     while (
         not has_explicit_sheet_ids
         and _ACTIVE_JOB_FLAGS.get(job_id, True)
-        and (len(undone_matches) < limit_sheets or (overview_only and has_more_remote))
+        and len(undone_matches) < limit_sheets
         and harvest_attempts < max_harvest_pages
+        and has_more_remote
     ):
         harvest_page_size = min(200, max(50, limit_sheets + existing_total_count))
         harvest_res = await run_catalog_harvest_job(
